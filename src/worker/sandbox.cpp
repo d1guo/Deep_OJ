@@ -185,7 +185,7 @@ namespace deep_oj {
                 
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
-            
+
             // 检查子进程退出状态
             if (WIFEXITED(status))
             {
@@ -285,12 +285,15 @@ namespace deep_oj {
             setrlimit(RLIMIT_CPU, &cpu_limit);
 
             // B2. 虚拟内存限制 (RLIMIT_AS)
-            // 单位是字节
-            // 建议：给 2MB 的冗余空间给 C++ 运行时库和栈，防止 'malloc' 刚到限制就挂掉
+            // 策略优化 (Level 1.7): "宽进严出"
+            // 我们设置一个较宽松的硬限制 (比如 用户限制的 2倍 或 加上 128MB)，
+            // 这样程序超一点点内存时不会直接 crash (RE)，而是能继续跑，
+            // 最后我们在父进程里检查实际用量来判定 MLE。
+            // 这样可以彻底区分 "内存分配失败导致的崩溃" 和 "逻辑错误导致的崩溃"。
             rlimit mem_limit;
-            long long safe_mem_limit = (memory_limit_kb + 2048) * 1024L; 
-            mem_limit.rlim_cur = safe_mem_limit;
-            mem_limit.rlim_max = safe_mem_limit;
+            long long hard_mem_limit = (memory_limit_kb * 2 + 1024 * 128) * 1024L; 
+            mem_limit.rlim_cur = hard_mem_limit;
+            mem_limit.rlim_max = hard_mem_limit;
             setrlimit(RLIMIT_AS, &mem_limit);
 
             // B3. 输出文件大小限制 (RLIMIT_FSIZE)
@@ -374,6 +377,15 @@ namespace deep_oj {
             // ru_maxrss 单位：在 Linux 上是 KB
             result.memory_used = usage.ru_maxrss;
 
+            // 优先判定资源超限 (MLE)
+            // 只要实际物理内存使用超过了用户设定的限制，无论程序最后是死是活，都判 MLE。
+            // 这种逻辑非常公正：你用了那么多资源，这就是犯规。
+            if (result.memory_used > memory_limit_kb)
+            {
+                result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
+                return result;
+            }
+
             // 根据退出状态判断结果
             if (WIFEXITED(status))
             {
@@ -406,6 +418,16 @@ namespace deep_oj {
                 else if (signal == SIGSEGV)
                 {
                     result.status = SandboxStatus::RUNTIME_ERROR; // Runtime Error (Segfault)
+                }
+                else if (signal == SIGFPE)
+                {
+                     result.status = SandboxStatus::RUNTIME_ERROR; // Runtime Error (Float Exception / Div by Zero)
+                }
+                else if (signal == SIGABRT)
+                {
+                    // 既然我们已经放宽了内存硬限制并优先检查了 MLE，
+                    // 这里的 SIGABRT 就几乎肯定是用户的逻辑问题 (assert失败, throw exception等)，而非 OOM。
+                    result.status = SandboxStatus::RUNTIME_ERROR;
                 }
                 else if (signal == SIGKILL)
                 {
