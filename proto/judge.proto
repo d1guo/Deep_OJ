@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package deep_oj;
+
+service JudgeService
+{
+    rpc Submit(SubmitRequest) returns (SubmitResponse);
+}
+
+// 使用枚举严格定义支持的语言，防止 "cpp", "CPP", "c++" 这种字符串混战
+enum Language {
+    LANGUAGE_UNSPECIFIED = 0; // Protobuf 枚举的第一项必须是 0
+    CPP = 1;
+    JAVA = 2;
+    PYTHON = 3;
+    GO = 4;
+}
+
+// 定义所有可能的判题状态，告别 magic number
+enum JudgeStatus {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;              // AC: 答案正确
+    WRONG_ANSWER = 2;          // WA: 答案错误
+    COMPILE_ERROR = 3;         // CE: 编译失败
+    TIME_LIMIT_EXCEEDED = 4;   // TLE: 超时
+    MEMORY_LIMIT_EXCEEDED = 5; // MLE: 超内存
+    RUNTIME_ERROR = 6;         // RE: 运行时错误 (Segfault 等)
+    SYSTEM_ERROR = 7;          // SE: 系统故障 (如沙箱挂了)
+}
+
+message SubmitRequest
+{
+    string request_id = 1;
+    string code = 2;
+    Language language = 3;     // 改用枚举
+    int32 time_limit = 4;      // 单位: ms
+    int32 memory_limit = 5;    // 单位: KB
+}
+
+message SubmitResponse
+{
+    string request_id = 1;
+    JudgeStatus status = 2;    // 改用枚举
+    string error_message = 3;  // 如果是 CE，这里放编译器输出；如果是 SE，放系统日志
+    int32 actual_time = 4;     // 单位: ms (整数足够)
+    int64 actual_memory = 5;   // 单位: KB
+}
