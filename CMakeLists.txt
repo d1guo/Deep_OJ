@@ -10,6 +10,9 @@ find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(Threads REQUIRED)
 
+# ========================================================
+# Helper Function for gRPC
+# ========================================================
 function(add_grpc_proto TARGET_NAME PROTO_FILE)
     if(NOT IS_ABSOLUTE "${PROTO_FILE}")
         set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/${PROTO_FILE}")
@@ -46,12 +49,39 @@ function(add_grpc_proto TARGET_NAME PROTO_FILE)
     target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)
 endfunction()
 
+# 生成 gRPC 代码库 target: judge_proto
 add_grpc_proto(judge_proto "proto/judge.proto")
 
+# ========================================================
+# [Core Library] The Sandbox
+# ========================================================
+add_library(deep_oj_core STATIC 
+    src/worker/sandbox.cpp 
+    src/worker/sandbox_isolation.cpp
+)
+
+target_include_directories(deep_oj_core PUBLIC src/worker)
+target_link_libraries(deep_oj_core PUBLIC Threads::Threads)
+target_compile_features(deep_oj_core PUBLIC cxx_std_20)
+
+
+# ========================================================
+# Executables
+# ========================================================
+
+# 1. Scheduler (The Client)
 add_executable(scheduler src/scheduler/main.cpp)
 target_link_libraries(scheduler PRIVATE judge_proto gRPC::grpc++ gRPC::grpc++_reflection protobuf::libprotobuf Threads::Threads)
 target_compile_features(scheduler PRIVATE cxx_std_20)
 
-add_executable(worker src/worker/main.cpp src/worker/sandbox.cpp)
-target_link_libraries(worker PRIVATE judge_proto gRPC::grpc++ gRPC::grpc++_reflection protobuf::libprotobuf Threads::Threads)
+# 2. Worker (The Server)
+add_executable(worker src/worker/main.cpp)
+target_link_libraries(worker PRIVATE deep_oj_core judge_proto gRPC::grpc++ gRPC::grpc++_reflection protobuf::libprotobuf Threads::Threads)
 target_compile_features(worker PRIVATE cxx_std_20)
+
+# 3. Security Test Suite (Standalone)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/security_test.cpp")
+    add_executable(security_test tests/security_test.cpp)
+    target_link_libraries(security_test PRIVATE deep_oj_core Threads::Threads)
+    target_compile_features(security_test PRIVATE cxx_std_20)
+endif()

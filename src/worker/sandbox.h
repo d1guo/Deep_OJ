@@ -33,6 +33,7 @@ namespace deep_oj
         int time_used = 0;      // ms
         long memory_used = 0;   // KB
         int exit_code = 0;      // 只有 status != SYSTEM_ERROR 时有效
+        std::string error_message; // 系统的错误详情 (Level 3 新增)
     };
 
     /**
@@ -67,6 +68,12 @@ namespace deep_oj
          * @return RunResult 运行结果
          */
         RunResult Run(const std::string& exe_path, int time_limit_ms, int memory_limit_kb);
+
+        /**
+         * @brief 清理请求临时目录
+         * @param request_id 请求 ID
+         */
+        void Cleanup(const std::string& request_id);
 
     private:
         std::string temp_dir_; // 根临时目录路径

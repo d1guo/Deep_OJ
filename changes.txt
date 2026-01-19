@@ -1,0 +1,683 @@
+diff --git a/src/scheduler/main.cpp b/src/scheduler/main.cpp
+index de95090..9a40911 100644
+--- a/src/scheduler/main.cpp
++++ b/src/scheduler/main.cpp
+@@ -1,7 +1,12 @@
+ #include <iostream>
+ #include <memory>
+ #include <string>
++#include <vector>
+ #include <format>
++#include <chrono>
++#include <thread>
++#include <cstring>
++#include <algorithm> // for std::all_of
+ #include <grpcpp/grpcpp.h>
+ #include "judge.grpc.pb.h"
+ 
+@@ -10,90 +15,309 @@ using grpc::ClientContext;
+ using grpc::Status;
+ using namespace deep_oj;
+ 
++struct TestCase {
++    std::string name;
++    std::string code;
++    int time_limit_ms;
++    int mem_limit_kb;
++    JudgeStatus expected_status;
++};
++
+ class SchedulerClient
+ {
+ public:
+     SchedulerClient(std::shared_ptr<Channel> channel)
+         : stub_(JudgeService::NewStub(channel)) {}
+ 
+-    // 发送请求的函数
+-    void CallWorker()
++    void RunTests()
+     {
+-        // 1. 准备请求数据
+-        SubmitRequest request;
+-        request.set_request_id("REQ-TEST-2026");
+-        
+-        // 编写一段简单的 C++ 代码用于测试
+-        // 也可以故意写错来测试 COMPILE_ERROR
+-        std::string code = R"(
+-    #include <iostream>
+-    #include <thread>
+-    #include <chrono>
+-    int main() {
+-        // 睡 5 秒，超过默认的时间限制
+-        std::this_thread::sleep_for(std::chrono::seconds(5));
+-        return 0;
++        std::vector<TestCase> tests = {
++            {
++                .name = "1. Normal AC (Hello World)",
++                .code = R"(
++#include <iostream>
++int main() {
++    std::cout << "Hello, Namespace!" << std::endl;
++    return 0;
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768, // 32MB
++                .expected_status = JudgeStatus::ACCEPTED
++            },
++            {
++                .name = "2. TLE Test (Infinite Loop)",
++                .code = R"(
++int main() {
++    volatile int i = 0;
++    while(true) {
++        i++;
++    }
++    return 0;
++}
++)",
++                .time_limit_ms = 1000, // 1s
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::TIME_LIMIT_EXCEEDED
++            },
++            {
++                .name = "3. MLE Test (OOM)",
++                .code = R"(
++#include <vector>
++#include <cstring>
++int main() {
++    // 尝试分配 50MB (超过限制 16MB)
++    // 必须真的写入数据，通过 page fault 触发物理内存分配
++    size_t size = 50 * 1024 * 1024;
++    std::vector<char> v(size);
++    std::memset(v.data(), 1, size);
++    return 0;
++}
++)",
++                .time_limit_ms = 2000,
++                .mem_limit_kb = 16384, // 16MB
++                .expected_status = JudgeStatus::MEMORY_LIMIT_EXCEEDED
++            },
++             {
++                .name = "4. Runtime Error (Div by Zero)",
++                .code = R"(
++#include <iostream>
++int main() {
++    volatile int a = 1;
++    volatile int b = 0;
++    std::cout << (a / b) << std::endl;
++    return 0;
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::RUNTIME_ERROR
++            },
++            {
++                .name = "5. Security Test (Privilege Escalation - Read /etc/shadow)",
++                .code = R"(
++#include <iostream>
++#include <fstream>
++
++int main() {
++    // 尝试读取只有 root 才能读的文件 /etc/shadow
++    // 注意：因为我们目前只做了 Namespace 隔离，没有做 chroot/pivot_root，
++    // 而且是以 root 身份运行 worker，如果读取成功，说明存在严重安全漏洞。
++    std::ifstream file("/etc/shadow");
++    if (file.good()) {
++        std::string line;
++        std::getline(file, line);
++        // 读取成功！返回 0 (AC)，代表攻击成功（系统不安全）
++        std::cout << "HACKED: " << line.substr(0, 10) << "..." << std::endl;
++        return 0; 
++    }
++    // 读取失败（权限拒绝），返回 1 (RE)，代表攻击失败（系统安全）
++    return 1;
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768,
++                // 我们期望它失败 (RE)，如果 AC 了说明可以通过代码读取宿主机敏感文件
++                .expected_status = JudgeStatus::RUNTIME_ERROR 
++            },
++             {
++                .name = "5. Security Test (Root & File Write)",
++                .code = R"(
++#include <iostream>
++#include <fstream>
++#include <unistd.h>
++
++int main() {
++    // 1. Check Root
++    if (getuid() == 0) {
++        // We are root! Try to leave a mark on the host system.
++        std::ofstream ofs("/tmp/hacked_by_worker.txt");
++        if (ofs) {
++            ofs << "I was here. UID=" << getuid();
++            return 1; // Return non-zero to signal 'success' of the hack (which is a Runtime Error for the OJ)
++        }
++    }
++    return 0; 
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::ACCEPTED // We expect AC: Permission denied (Safe)
++            },
++            {
++                .name = "6. Network Access (Google DNS)",
++                .code = R"(
++#include <sys/socket.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++#include <cstring>
++#include <iostream>
++
++int main() {
++    int sock = socket(AF_INET, SOCK_STREAM, 0);
++    if (sock == -1) return 0; // Failed to create socket
++
++    struct sockaddr_in server;
++    server.sin_addr.s_addr = inet_addr("8.8.8.8");
++    server.sin_family = AF_INET;
++    server.sin_port = htons(53);
++
++    // Try to connect (Timeout usually)
++    struct timeval tv;
++    tv.tv_sec = 2;
++    tv.tv_usec = 0;
++    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
++
++    if (connect(sock, (struct sockaddr *)&server , sizeof(server)) < 0) {
++        return 1; // Connect failed (Good! Secure!) -> Runtime Error
+     }
+-)";
+-        request.set_code(code);
+-        
+-        // 关键变更：使用 Proto 枚举设置语言
+-        request.set_language(Language::CPP);
+-        
+-        request.set_time_limit(1000);  // 1000ms
+-        request.set_memory_limit(65536); // 64MB
+-
+-        std::cout << "[Scheduler] 正在呼叫 Worker..." << std::endl;
+-
+-        // 2. 准备接收响应的容器
+-        SubmitResponse response;
+-        ClientContext context;
+-
+-        // 3. 真正的 RPC 调用
+-        Status status = stub_->Submit(&context, request, &response);
+-
+-        // 4. 检查结果
+-        if (status.ok())
++    
++    return 0; // Connect success (Bad! Insecure!) -> Accepted
++}
++)",
++                .time_limit_ms = 3000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::RUNTIME_ERROR // Expect secure failure
++            },
++            {
++                .name = "7. Process Isolation (Count PIDs)",
++                .code = R"(
++#include <filesystem>
++#include <iostream>
++
++namespace fs = std::filesystem;
++
++int main() {
++    int count = 0;
++    // Count directories in /proc that are numbers
++    for (const auto& entry : fs::directory_iterator("/proc")) {
++        if (entry.is_directory()) {
++            std::string name = entry.path().filename().string();
++            if (std::all_of(name.begin(), name.end(), ::isdigit)) {
++                count++;
++            }
++        }
++    }
++    
++    // If we see more than 5 processes, we are likely seeing the host
++    if (count > 5) {
++        return 1; // Leaked! RE
++    }
++    return 0; // Isolated! AC
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::ACCEPTED
++            },
++            {
++                .name = "8. Fork Bomb Attempt",
++                .code = R"(
++#include <unistd.h>
++#include <sys/wait.h>
++#include <vector>
++
++int main() {
++    // Try to fork 50 times
++    std::vector<pid_t> pids;
++    for(int i=0; i<50; ++i) {
++         pid_t pid = fork();
++         if (pid == 0) {
++             // Child: sleep and exit
++             sleep(1);
++             return 0;
++         } else if (pid > 0) {
++             pids.push_back(pid);
++         } else {
++             // Fork failed (Good!)
++             return 1; 
++         }
++    }
++    // Clean up
++    for(auto p : pids) waitpid(p, nullptr, 0);
++    return 0; // Fork succeeded seems bad if limit is low
++}
++)",
++                .time_limit_ms = 3000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::RUNTIME_ERROR // Ideally we want to block forks
++            },
++            {
++                .name = "9. File System Read Injection (Host File)",
++                .code = R"(
++#include <fstream>
++#include <iostream>
++
++int main() {
++    // Try to read /etc/os-release (World readable)
++    std::ifstream ifs("/etc/os-release");
++    if(ifs.good()) {
++        return 0; // Success (Bad for strict sandbox) -> AC
++    }
++    return 1; // Fail (Good) -> RE
++}
++)",
++                .time_limit_ms = 1000,
++                .mem_limit_kb = 32768,
++                .expected_status = JudgeStatus::RUNTIME_ERROR // We WANT it to fail, but it will pass now
++            }
++        };
++
++        int passed = 0;
++        for (const auto& test : tests)
+         {
+-            std::cout << "[Scheduler] 调用成功！" << std::endl;
+-            
+-            // 使用 Protobuf 生成的辅助函数将 Enum 转为字符串名称，方便调试
+-            // 例如: JudgeStatus_Name(1) -> "ACCEPTED"
+-            std::cout << "   -> 结果状态: " << JudgeStatus_Name(response.status()) << std::endl;
+-            
+-            if (response.status() == JudgeStatus::ACCEPTED)
++            std::cout << "\n========================================" << std::endl;
++            std::cout << "Running Test: " << test.name << std::endl;
++            std::cout << "----------------------------------------" << std::endl;
++
++            SubmitRequest request;
++            request.set_request_id("REQ-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
++            request.set_code(test.code);
++            request.set_language(Language::CPP);
++            request.set_time_limit(test.time_limit_ms);
++            request.set_memory_limit(test.mem_limit_kb);
++
++            SubmitResponse response;
++            ClientContext context;
++
++            Status status = stub_->Submit(&context, request, &response);
++
++            if (!status.ok())
+             {
+-                std::cout << "   -> 判题通过 (AC)!" << std::endl;
+-                std::cout << "   -> 实际耗时: " << response.actual_time() << "ms" << std::endl;
++                std::cout << "[RPC Failed] " << status.error_code() << ": " << status.error_message() << std::endl;
++                continue;
+             }
+-            else if (response.status() == JudgeStatus::COMPILE_ERROR)
++
++            std::cout << "Actual Status: " << JudgeStatus_Name(response.status()) << std::endl;
++            std::cout << "Message: " << response.error_message() << std::endl;
++            std::cout << "Time: " << response.actual_time() << "ms" << std::endl;
++            std::cout << "Memory: " << response.actual_memory() << "KB" << std::endl;
++
++            if (response.status() == test.expected_status)
+             {
+-                std::cout << "   -> 编译错误 (CE):" << std::endl;
+-                std::cout << response.error_message() << std::endl;
++                std::cout << ">> Result: PASS" << std::endl;
++                passed++;
+             }
+             else
+             {
+-                std::cout << "   -> 其他错误: " << response.error_message() << std::endl;
++                std::cout << ">> Result: FAIL (Expected " << JudgeStatus_Name(test.expected_status) << ")" << std::endl;
+             }
+         }
+-        else
+-        {
+-            std::cout << "[Scheduler] 调用失败: " << status.error_code() 
+-                      << ": " << status.error_message() << std::endl;
+-        }
++
++        std::cout << "\n========================================" << std::endl;
++        std::cout << "Summary: " << passed << "/" << tests.size() << " tests passed." << std::endl;
+     }
+ 
+ private:
+     std::unique_ptr<JudgeService::Stub> stub_;
+ };
+ 
+-int main(int argc, char** argv)
++int main()
+ {
+-    // 建立连接：连接到本机的 unix socket
+     SchedulerClient client(grpc::CreateChannel(
+         "unix:///tmp/deep_oj_worker.sock", grpc::InsecureChannelCredentials()));
+ 
+-    client.CallWorker();
++    client.RunTests();
+ 
+     return 0;
+-}
+\ No newline at end of file
++}
+diff --git a/src/worker/main.cpp b/src/worker/main.cpp
+index 8747f98..55e1ff5 100644
+--- a/src/worker/main.cpp
++++ b/src/worker/main.cpp
+@@ -3,6 +3,8 @@
+ #include <chrono>
+ #include <memory>
+ #include <format>
++#include <sys/stat.h>
++#include <unistd.h>
+ #include <grpcpp/grpcpp.h>
+ #include "judge.grpc.pb.h"
+ #include "sandbox.h"
+@@ -118,6 +120,13 @@ void RunServer()
+     builder.RegisterService(&service);
+     
+     std::unique_ptr<Server> server(builder.BuildAndStart());
++    
++    // 更改 Socket 文件权限，允许非 root 用户(如 Scheduler)连接
++    // chmod 的参数是 八进制，0777 表示所有人可读写
++    if (chmod("/tmp/deep_oj_worker.sock", 0777) != 0) {
++        perror("chmod failed");
++    }
++
+     std::cout << "[Worker] 服务已启动，监听地址: " << server_address << std::endl;
+     server->Wait();
+ }
+diff --git a/src/worker/sandbox.cpp b/src/worker/sandbox.cpp
+index 1014500..7eb1cac 100644
+--- a/src/worker/sandbox.cpp
++++ b/src/worker/sandbox.cpp
+@@ -14,24 +14,128 @@
+ #include <sys/wait.h>
+ #include <sys/resource.h>
+ #include <sys/time.h>
++#include <sched.h> // clone
++#include <sys/mount.h> // mount
+ #include <cstring>
+ #include <cmath>
++#include <memory> // unique_ptr
++
++// 定义子进程栈大小: 1MB 足够了，因为要在栈上 exec，不需要太大
++const int STACK_SIZE = 1024 * 1024; 
+ 
+ namespace deep_oj {
+ 
+     namespace fs = std::filesystem;
+ 
+-
+     namespace
+     {
+         /**
+-         * @brief 辅助函数：将 errno 转换为易读的字符串，并拼接前缀
+-         * 使用 C++20 std::format 进行格式化
++         * @brief 传递给 clone 子进程的参数包 (C++20风格)
++         */
++        struct RunChildArgs {
++            std::string exe_path;
++            int time_limit_ms;
++            int memory_limit_kb;
++        };
++
++        /**
++         * @brief 辅助函数：将 errno 转换为易读的字符串
+          */
+         std::string FormatSystemError(const std::string& prefix)
+         {
+             return std::format("{}: {}", prefix, std::strerror(errno));
+         }
++
++        /**
++         * @brief clone 的目标函数 (子进程入口) (Level 2)
++         */
++        int RunChildFn(void* arg)
++        {
++            auto* args = static_cast<RunChildArgs*>(arg);
++
++            // ---------------------------------------------
++            // [Level 2 Core]: Namespace Isolation
++            // ---------------------------------------------
++            
++            // 1. PID Namespace 生效的关键：重新挂载 /proc
++            // 因为现在我们是 PID 1，原来的 /proc 还是宿主机的，看到的还是宿主机的进程。
++            // 只有重新挂载，/proc 才会刷新为当前 Namespace 的视图。
++            // flags=0 表示读写挂载 (默认)
++            // 先尝试挂载，失败也不一定致命（有些精简或者特权环境可能限制mount）
++            mount("proc", "/proc", "proc", 0, nullptr);
++
++            // ---------------------------------------------
++            // [Level 1]: Resource Limits & Execution
++            // ---------------------------------------------
++
++            // 2. IO 重定向
++            fs::path exe_p(args->exe_path);
++            fs::path output_file = exe_p.parent_path() / "output.txt";
++
++            int out_fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
++            if (out_fd == -1) _exit(120);
++            if (dup2(out_fd, STDOUT_FILENO) == -1) _exit(121);
++            close(out_fd);
++
++            // 3. 设置资源限制
++            
++            // B1. CPU
++            rlimit cpu_limit;
++            cpu_limit.rlim_cur = (args->time_limit_ms + 999) / 1000; 
++            cpu_limit.rlim_max = cpu_limit.rlim_cur + 1;
++            setrlimit(RLIMIT_CPU, &cpu_limit);
++ 
++            // B2. Memory (Level 1.7 宽进严出)
++            rlimit mem_limit;
++            long long hard_mem_limit = (args->memory_limit_kb * 2 + 1024 * 128) * 1024L; 
++            mem_limit.rlim_cur = hard_mem_limit;
++            mem_limit.rlim_max = hard_mem_limit;
++            setrlimit(RLIMIT_AS, &mem_limit);
++
++            // [New] B3. Stack Size (栈大小)
++            // 默认栈只有 8MB，对于竞赛中 10^5 级别的 DFS 深度很容易爆栈。
++            // 这里我们将其设置为 无限 (RLIM_INFINITY) 或者等于内存限制。
++            // 防止正常的递归代码因为栈溢出被判 RE。
++            rlimit stack_limit;
++            stack_limit.rlim_cur = RLIM_INFINITY;
++            stack_limit.rlim_max = RLIM_INFINITY;
++            setrlimit(RLIMIT_STACK, &stack_limit);
++
++            // [New] B3.5 NPROC (防止 Fork 炸弹)
++            // 限制该用户下的最大进程数。虽然 NPROC 是针对用户的，但在 Nobody 用户专属的隔离场景下，
++            // 依然能起到很好的防御作用。
++            // 设为 1 其实意味着 "当前进程就是最后一个"，无法再 fork。
++            // 注意：某些系统可能需要设为 0 或其他值，视具体内核计算方式而定，通常 1 是包括当前进程的安全值。
++            rlimit nproc_limit;
++            nproc_limit.rlim_cur = 1; 
++            nproc_limit.rlim_max = 1;
++            setrlimit(RLIMIT_NPROC, &nproc_limit);
++
++            // B4. FSIZE
++            rlimit fsize_limit;
++            fsize_limit.rlim_cur = 10 * 1024 * 1024; 
++            fsize_limit.rlim_max = 10 * 1024 * 1024;
++            setrlimit(RLIMIT_FSIZE, &fsize_limit);
++            
++            // [Level 2.5 Security]: 降权 (Drop Privileges)
++            // 在 exec 之前，将在此命名空间内的进程身份切换为 nobody (65534)
++            // 确保用户程序没有 root 权限
++            
++            // 移动到沙箱目录 (虽然我们没有 chroot，但至少改变 CWD)
++            // CWD: /tmp/deep_oj_workspace/{req_id}/
++            if (chdir(exe_p.parent_path().c_str()) != 0) _exit(128);
++
++            // 切换 Group (nogroup)
++            if (setgid(65534) != 0) _exit(129);
++            // 切换 User (nobody)
++            if (setuid(65534) != 0) _exit(130);
++            
++            // 4. Exec
++            execl(args->exe_path.c_str(), args->exe_path.c_str(), nullptr);
++
++            _exit(127); // Exec failed
++            return 0;
++        }
+     }
+ 
+     Sandbox::Sandbox(const std::string& temp_dir) : temp_dir_(temp_dir)
+@@ -242,87 +346,50 @@ namespace deep_oj {
+     {
+         RunResult result;
+         
+-        // 1. 准备重定向输出文件
+-        // 假设输出文件位于可执行文件的同一目录下，名为 "output.txt"
+-        fs::path exe_dir = fs::path(exe_path).parent_path();
+-        fs::path output_file = exe_dir / "output.txt";
+-
+-        // 2. Fork 子进程进行运行
+-        pid_t pid = fork();
++        // 1. 准备 Clone 参数与栈 (RAII 管理)
++        // 使用 C++20 Designated Initializers 初始化参数
++        RunChildArgs args {
++            .exe_path = exe_path,
++            .time_limit_ms = time_limit_ms,
++            .memory_limit_kb = memory_limit_kb
++        };
++        
++        // 准备子进程栈
++        // 栈必须足够大，且在堆上分配
++        auto stack_mem = std::make_unique<char[]>(STACK_SIZE);
++        char* stack_top = stack_mem.get() + STACK_SIZE; // 栈向下增长
++
++        // 2. Clone 子进程 (Level 2 Core)
++        // CLONE_NEWPID: 进程隔离
++        // CLONE_NEWNS:  挂载点隔离
++        // SIGCHLD:      子进程退出时发送信号 (兼容 waitpid)
++        // 注意：不使用 CLONE_NEWNET (网络隔离)，为了让用户代码可能需要联网?
++        // 不，通常 OJ 需要断网。但 clone 如果非 root 则可能失败。
++        // 为了稳健起见，我们先加上 CLONE_NEWPID | CLONE_NEWNS。
++        // 如果需要真正断网，需要 unshare(CLONE_NEWNET)。
++        pid_t pid = clone(RunChildFn, stack_top, CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, &args);
+ 
+         if (pid == -1)
+         {
+             result.status = SandboxStatus::SYSTEM_ERROR; // System Error
++            // 简单的错误日志，实际使用中可能需要记录更多
++            std::cerr << "[Sandbox] Clone failed: " << std::strerror(errno) << std::endl;
+             return result;
+         }
+-        else if (pid == 0)
+-        {
+-            // ================= 子进程 =================
+-
+-            // A. 重定向标准输出到文件
+-            int out_fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+-            if (out_fd == -1)
+-            {
+-                // 如果连输出文件都打不开（如磁盘满），直接视为系统错误退出
+-                // 使用错误码 120 表示 I/O 准备失败
+-                _exit(120);
+-            }
+-
+-            if (dup2(out_fd, STDOUT_FILENO) == -1)
+-            {
+-                 _exit(121); // 重定向失败
+-            }
+-            close(out_fd);
+-
+-            // B. 设置资源限制 (setrlimit)
+-            
+-            // B1. CPU 时间限制 (RLIMIT_CPU)
+-            // setrlimit 的单位是秒，所以需要将毫秒转换为秒并向上取整
+-            // 如果程序运行超过这个硬限制，内核会发送 SIGXCPU 秒杀它
+-            rlimit cpu_limit;
+-            cpu_limit.rlim_cur = (time_limit_ms + 999) / 1000; 
+-            cpu_limit.rlim_max = cpu_limit.rlim_cur + 1; // 给一秒缓冲，虽然通常直接用硬限制也可以
+-            setrlimit(RLIMIT_CPU, &cpu_limit);
+-
+-            // B2. 虚拟内存限制 (RLIMIT_AS)
+-            // 策略优化 (Level 1.7): "宽进严出"
+-            // 我们设置一个较宽松的硬限制 (比如 用户限制的 2倍 或 加上 128MB)，
+-            // 这样程序超一点点内存时不会直接 crash (RE)，而是能继续跑，
+-            // 最后我们在父进程里检查实际用量来判定 MLE。
+-            // 这样可以彻底区分 "内存分配失败导致的崩溃" 和 "逻辑错误导致的崩溃"。
+-            rlimit mem_limit;
+-            long long hard_mem_limit = (memory_limit_kb * 2 + 1024 * 128) * 1024L; 
+-            mem_limit.rlim_cur = hard_mem_limit;
+-            mem_limit.rlim_max = hard_mem_limit;
+-            setrlimit(RLIMIT_AS, &mem_limit);
+-
+-            // B3. 输出文件大小限制 (RLIMIT_FSIZE)
+-            // 防止恶意程序通过无限打印撑爆磁盘
+-            // 限制为 10MB (10 * 1024 * 1024)
+-            rlimit fsize_limit;
+-            fsize_limit.rlim_cur = 10 * 1024 * 1024; 
+-            fsize_limit.rlim_max = 10 * 1024 * 1024;
+-            setrlimit(RLIMIT_FSIZE, &fsize_limit);
+-
+-            // C. 执行用户程序
+-            execl(exe_path.c_str(), exe_path.c_str(), nullptr);
+-
+-            // 如果 execl 返回，说明执行失败
+-            _exit(127);
+-        }
+-        else
+-        {
+-            // ================= 父进程 =================
+-            int status;
+-            struct rusage usage;
++        
++        // ================= 父进程 =================
++        // Watchdog 逻辑完全复用 (Level 1.5)
++        
++        int status;
++        struct rusage usage;
+ 
+-            // Watchdog (看门狗) 机制
+-            // 使用稳态时钟记录开始时间
+-            auto start_time = std::chrono::steady_clock::now();
++        // Watchdog (看门狗) 机制
++        // 使用稳态时钟记录开始时间
++        auto start_time = std::chrono::steady_clock::now();
+             
+-            // 真实时间限制建议：给 CPU 限制时间多加 1秒 的宽限，或者是 2倍，防止正常程序因调度被误杀
+-            // 这里我们采用 "limit + 1000ms" 的策略
+-            int real_time_limit_ms = time_limit_ms + 1000;
++        // 真实时间限制建议：给 CPU 限制时间多加 1秒 的宽限，或者是 2倍，防止正常程序因调度被误杀
++        // 这里我们采用 "limit + 1000ms" 的策略
++        int real_time_limit_ms = time_limit_ms + 1000;
+ 
+             while (true)
+             {
+@@ -460,8 +527,7 @@ namespace deep_oj {
+             {
+                 result.status = SandboxStatus::SYSTEM_ERROR; // Unknown System Error
+             }
+-        }
+-
++        
+         return result;
+     }
+ }

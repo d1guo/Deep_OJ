@@ -1,4 +1,40 @@
+# ========================
+# C++ / CMake Build Files
+# ========================
 build/
-.vscode/
+cmake-build-debug/
+cmake-build-release/
+bin/
+lib/
+*.d
 *.o
+*.a
+*.so
+*.dylib
+*.dll
 *.exe
+
+# ========================
+# IDE / Editor Files
+# ========================
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# ========================
+# Generated Files
+# ========================
+# gRPC generated codes (if they are generated inside src)
+src/proto/*.pb.cc
+src/proto/*.pb.h
+generated/
+
+# ========================
+# Runtime Data (Important!)
+# ========================
+# 不要把运行时的日志和临时目录传上去
+logs/
+*.log
+/tmp/deep_oj_workspace/

@@ -1,0 +1,63 @@
+#ifndef DEEP_OJ_SANDBOX_INTERNAL_H
+#define DEEP_OJ_SANDBOX_INTERNAL_H
+
+namespace deep_oj {
+
+    // 定义子进程栈大小: 1MB
+    const int STACK_SIZE = 1024 * 1024;
+
+    // ==========================================
+    // 退出状态码定义 (Exit Codes)
+    // ==========================================
+    enum SandboxExitCode {
+        EXIT_OK = 0, // 正常退出
+
+        // --- 第一阶段: 基础设置 / Exec (120-139) ---
+        ERR_OPEN_OUTPUT      = 120, // 打开输出文件失败
+        ERR_DUP2             = 121, // 重定向标准输出/输入失败
+        ERR_EXEC_FAILED      = 127, // execle 执行失败
+        ERR_CHDIR_FAILED     = 128, // 切换工作目录失败
+        ERR_SETGID_FAILED    = 129, // 设置组 ID 失败
+        ERR_SETUID_FAILED    = 130, // 设置用户 ID 失败
+
+        // --- 第二阶段: 资源限制 (140-159) ---
+        ERR_RLIMIT_CPU       = 141, // 设置 CPU 时间限制失败
+        ERR_RLIMIT_MEMORY    = 142, // 设置内存限制失败
+        ERR_RLIMIT_STACK     = 143, // 设置栈限制失败
+        ERR_RLIMIT_NPROC     = 144, // 设置进程数限制失败
+        ERR_RLIMIT_FSIZE     = 145, // 设置文件大小限制失败
+
+        // --- 第三阶段: 隔离 / Rootfs (190-200) ---
+        ERR_MOUNT_PRIVATE    = 190, // mount --make-private 失败
+        ERR_MOUNT_BIND_SELF  = 191, // bind mount 工作目录失败
+        ERR_MOUNT_BIND_LIB   = 192, // 挂载系统库 (/lib, /usr...) 失败
+        ERR_REMOUNT_RO       = 193, //重新挂载为只读失败
+        ERR_PIVOT_ROOT       = 194, // pivot_root 系统调用失败
+        ERR_CHDIR_NEW_ROOT   = 195, // 切换到新根目录失败
+        ERR_UMOUNT_OLD       = 196, // 卸载旧根目录 (/old_root) 失败
+        ERR_MOUNT_PROC       = 197, // 挂载 /proc 失败
+        ERR_MKDIR_FAILED     = 198, // 创建目录失败
+        ERR_SANDBOX_EXCEPTION = 199 // 沙箱内部异常
+    };
+
+    /**
+     * @brief 运行子进程所需的参数 (C 风格结构体)
+     */
+    struct RunChildArgs {
+        char exe_path[256];     // 可执行文件路径
+        int time_limit_ms;      // 时间限制 (毫秒)
+        int memory_limit_kb;    // 内存限制 (KB)
+    };
+
+    /**
+     * @brief 编译子进程所需的参数 (C 风格结构体)
+     */
+    struct CompileArgs {
+        char source_path[256];  // 源代码路径
+        char exe_path[256];     // 目标可执行文件路径
+        char log_path[256];     // 编译日志路径 (用于 stderr)
+    };
+
+} // namespace deep_oj
+
+#endif // DEEP_OJ_SANDBOX_INTERNAL_H

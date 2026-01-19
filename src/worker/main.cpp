@@ -3,6 +3,7 @@
 #include <chrono>
 #include <memory>
 #include <format>
+#include <semaphore> 
 #include <sys/stat.h>
 #include <unistd.h>
 #include <grpcpp/grpcpp.h>
@@ -15,10 +16,28 @@ using grpc::ServerContext;
 using grpc::Status;
 using namespace deep_oj;
 
+// 全局信号量，限制最大并发数为 4
+static std::counting_semaphore<4> active_tasks_sem(4);
+
+// RAII 风格的信号量守卫
+struct SemaphoreGuard {
+    std::counting_semaphore<4>& sem;
+    SemaphoreGuard(std::counting_semaphore<4>& s) : sem(s) { 
+        sem.acquire(); 
+    }
+    ~SemaphoreGuard() { 
+        sem.release(); 
+    }
+};
+
 class WorkerImpl final : public JudgeService::Service
 {
     Status Submit(ServerContext* context, const SubmitRequest* request, SubmitResponse* response) override
     {
+        // 尝试获取信号量，如果满载可以阻塞，或者立即返回 ResourceExhausted
+        // 这里我们选择阻塞等待，直到有资源可用
+        SemaphoreGuard guard(active_tasks_sem);
+
         std::cout << std::format("[Worker] 收到请求 ID: {}", request->request_id()) << std::endl;
 
         // 1. 初始化响应 ID
@@ -39,6 +58,16 @@ class WorkerImpl final : public JudgeService::Service
             // 使用 /tmp/deep_oj_workspace 作为工作根目录
             Sandbox sandbox("/tmp/deep_oj_workspace");
 
+            // [Security] RAII Guard to ensure cleanup always happens
+            struct RequestGuard {
+                Sandbox& sb;
+                std::string id;
+                ~RequestGuard() { 
+                    sb.Cleanup(id);
+                    std::cout << "[Worker] Cleaned up request " << id << std::endl; 
+                }
+            } request_guard(sandbox, request->request_id());
+
             std::cout << "[Worker] Sandbox 初始化完成，开始编译..." << std::endl;
 
             // 4. 调用 Sandbox 进行编译
@@ -48,7 +77,7 @@ class WorkerImpl final : public JudgeService::Service
             {
                 std::cout << std::format("[Worker] 编译成功: {}", compile_res.exe_path) << std::endl;
                 
-                // 5. 运行 Sandbox::Run (Level 1: 资源限制 + 监控)
+                // 5. 运行 Sandbox::Run (资源限制 + 监控)
                 std::cout << "[Worker] 开始运行 (Run)..." << std::endl;
                 RunResult run_res = sandbox.Run(
                     compile_res.exe_path, 
@@ -79,14 +108,18 @@ class WorkerImpl final : public JudgeService::Service
                 else if (run_res.status == SandboxStatus::RUNTIME_ERROR) // RE
                 {
                     response->set_status(JudgeStatus::RUNTIME_ERROR);
-                    response->set_error_message(std::format("Runtime Error (Exit Code: {})", run_res.exit_code));
+                    response->set_error_message(std::format("运行时错误 (退出码: {})", run_res.exit_code));
                     std::cout << "[Worker] 运行结束: RE" << std::endl;
                 }
                 else // SE
                 {
                     response->set_status(JudgeStatus::SYSTEM_ERROR);
-                    response->set_error_message("Sandbox System Error during execution");
-                     std::cout << "[Worker] 运行结束: SE" << std::endl;
+                    if (!run_res.error_message.empty()) {
+                        response->set_error_message(run_res.error_message);
+                    } else {
+                        response->set_error_message("执行过程中发生沙箱系统错误");
+                    }
+                     std::cout << "[Worker] 运行结束: SE (" << run_res.error_message << ")" << std::endl;
                 }
             }
             else
@@ -122,8 +155,11 @@ void RunServer()
     std::unique_ptr<Server> server(builder.BuildAndStart());
     
     // 更改 Socket 文件权限，允许非 root 用户(如 Scheduler)连接
-    // chmod 的参数是 八进制，0777 表示所有人可读写
-    if (chmod("/tmp/deep_oj_worker.sock", 0777) != 0) {
+    // chmod 的参数是 八进制，0666 表示所有人可读写 (Socket 不需要执行权限)
+    // TODO: [Security] 在生产环境中，应设置为 0770 并使用专门的用户组管理权限
+    // [TODO]: 生产环境应改为 0770 并配合用户组 (oj-group)，防止未授权连接。
+    // 目前开发环境为了调试方便，暂时全开。
+    if (chmod("/tmp/deep_oj_worker.sock", 0666) != 0) {
         perror("chmod failed");
     }
 
