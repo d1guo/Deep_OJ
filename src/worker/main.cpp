@@ -3,6 +3,8 @@
 #include <chrono>
 #include <memory>
 #include <format>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <grpcpp/grpcpp.h>
 #include "judge.grpc.pb.h"
 #include "sandbox.h"
@@ -118,6 +120,13 @@ void RunServer()
     builder.RegisterService(&service);
     
     std::unique_ptr<Server> server(builder.BuildAndStart());
+    
+    // 更改 Socket 文件权限，允许非 root 用户(如 Scheduler)连接
+    // chmod 的参数是 八进制，0777 表示所有人可读写
+    if (chmod("/tmp/deep_oj_worker.sock", 0777) != 0) {
+        perror("chmod failed");
+    }
+
     std::cout << "[Worker] 服务已启动，监听地址: " << server_address << std::endl;
     server->Wait();
 }

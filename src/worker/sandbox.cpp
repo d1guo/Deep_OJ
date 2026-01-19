@@ -14,23 +14,127 @@
 #include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/time.h>
+#include <sched.h> // clone
+#include <sys/mount.h> // mount
 #include <cstring>
 #include <cmath>
+#include <memory> // unique_ptr
+
+// 定义子进程栈大小: 1MB 足够了，因为要在栈上 exec，不需要太大
+const int STACK_SIZE = 1024 * 1024; 
 
 namespace deep_oj {
 
     namespace fs = std::filesystem;
 
-
     namespace
     {
         /**
-         * @brief 辅助函数：将 errno 转换为易读的字符串，并拼接前缀
-         * 使用 C++20 std::format 进行格式化
+         * @brief 传递给 clone 子进程的参数包 (C++20风格)
+         */
+        struct RunChildArgs {
+            std::string exe_path;
+            int time_limit_ms;
+            int memory_limit_kb;
+        };
+
+        /**
+         * @brief 辅助函数：将 errno 转换为易读的字符串
          */
         std::string FormatSystemError(const std::string& prefix)
         {
             return std::format("{}: {}", prefix, std::strerror(errno));
+        }
+
+        /**
+         * @brief clone 的目标函数 (子进程入口) (Level 2)
+         */
+        int RunChildFn(void* arg)
+        {
+            auto* args = static_cast<RunChildArgs*>(arg);
+
+            // ---------------------------------------------
+            // [Level 2 Core]: Namespace Isolation
+            // ---------------------------------------------
+            
+            // 1. PID Namespace 生效的关键：重新挂载 /proc
+            // 因为现在我们是 PID 1，原来的 /proc 还是宿主机的，看到的还是宿主机的进程。
+            // 只有重新挂载，/proc 才会刷新为当前 Namespace 的视图。
+            // flags=0 表示读写挂载 (默认)
+            // 先尝试挂载，失败也不一定致命（有些精简或者特权环境可能限制mount）
+            mount("proc", "/proc", "proc", 0, nullptr);
+
+            // ---------------------------------------------
+            // [Level 1]: Resource Limits & Execution
+            // ---------------------------------------------
+
+            // 2. IO 重定向
+            fs::path exe_p(args->exe_path);
+            fs::path output_file = exe_p.parent_path() / "output.txt";
+
+            int out_fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (out_fd == -1) _exit(120);
+            if (dup2(out_fd, STDOUT_FILENO) == -1) _exit(121);
+            close(out_fd);
+
+            // 3. 设置资源限制
+            
+            // B1. CPU
+            rlimit cpu_limit;
+            cpu_limit.rlim_cur = (args->time_limit_ms + 999) / 1000; 
+            cpu_limit.rlim_max = cpu_limit.rlim_cur + 1;
+            setrlimit(RLIMIT_CPU, &cpu_limit);
+ 
+            // B2. Memory (Level 1.7 宽进严出)
+            rlimit mem_limit;
+            long long hard_mem_limit = (args->memory_limit_kb * 2 + 1024 * 128) * 1024L; 
+            mem_limit.rlim_cur = hard_mem_limit;
+            mem_limit.rlim_max = hard_mem_limit;
+            setrlimit(RLIMIT_AS, &mem_limit);
+
+            // [New] B3. Stack Size (栈大小)
+            // 默认栈只有 8MB，对于竞赛中 10^5 级别的 DFS 深度很容易爆栈。
+            // 这里我们将其设置为 无限 (RLIM_INFINITY) 或者等于内存限制。
+            // 防止正常的递归代码因为栈溢出被判 RE。
+            rlimit stack_limit;
+            stack_limit.rlim_cur = RLIM_INFINITY;
+            stack_limit.rlim_max = RLIM_INFINITY;
+            setrlimit(RLIMIT_STACK, &stack_limit);
+
+            // [New] B3.5 NPROC (防止 Fork 炸弹)
+            // 限制该用户下的最大进程数。虽然 NPROC 是针对用户的，但在 Nobody 用户专属的隔离场景下，
+            // 依然能起到很好的防御作用。
+            // 设为 1 其实意味着 "当前进程就是最后一个"，无法再 fork。
+            // 注意：某些系统可能需要设为 0 或其他值，视具体内核计算方式而定，通常 1 是包括当前进程的安全值。
+            rlimit nproc_limit;
+            nproc_limit.rlim_cur = 1; 
+            nproc_limit.rlim_max = 1;
+            setrlimit(RLIMIT_NPROC, &nproc_limit);
+
+            // B4. FSIZE
+            rlimit fsize_limit;
+            fsize_limit.rlim_cur = 10 * 1024 * 1024; 
+            fsize_limit.rlim_max = 10 * 1024 * 1024;
+            setrlimit(RLIMIT_FSIZE, &fsize_limit);
+            
+            // [Level 2.5 Security]: 降权 (Drop Privileges)
+            // 在 exec 之前，将在此命名空间内的进程身份切换为 nobody (65534)
+            // 确保用户程序没有 root 权限
+            
+            // 移动到沙箱目录 (虽然我们没有 chroot，但至少改变 CWD)
+            // CWD: /tmp/deep_oj_workspace/{req_id}/
+            if (chdir(exe_p.parent_path().c_str()) != 0) _exit(128);
+
+            // 切换 Group (nogroup)
+            if (setgid(65534) != 0) _exit(129);
+            // 切换 User (nobody)
+            if (setuid(65534) != 0) _exit(130);
+            
+            // 4. Exec
+            execl(args->exe_path.c_str(), args->exe_path.c_str(), nullptr);
+
+            _exit(127); // Exec failed
+            return 0;
         }
     }
 
@@ -242,87 +346,50 @@ namespace deep_oj {
     {
         RunResult result;
         
-        // 1. 准备重定向输出文件
-        // 假设输出文件位于可执行文件的同一目录下，名为 "output.txt"
-        fs::path exe_dir = fs::path(exe_path).parent_path();
-        fs::path output_file = exe_dir / "output.txt";
+        // 1. 准备 Clone 参数与栈 (RAII 管理)
+        // 使用 C++20 Designated Initializers 初始化参数
+        RunChildArgs args {
+            .exe_path = exe_path,
+            .time_limit_ms = time_limit_ms,
+            .memory_limit_kb = memory_limit_kb
+        };
+        
+        // 准备子进程栈
+        // 栈必须足够大，且在堆上分配
+        auto stack_mem = std::make_unique<char[]>(STACK_SIZE);
+        char* stack_top = stack_mem.get() + STACK_SIZE; // 栈向下增长
 
-        // 2. Fork 子进程进行运行
-        pid_t pid = fork();
+        // 2. Clone 子进程 (Level 2 Core)
+        // CLONE_NEWPID: 进程隔离
+        // CLONE_NEWNS:  挂载点隔离
+        // SIGCHLD:      子进程退出时发送信号 (兼容 waitpid)
+        // 注意：不使用 CLONE_NEWNET (网络隔离)，为了让用户代码可能需要联网?
+        // 不，通常 OJ 需要断网。但 clone 如果非 root 则可能失败。
+        // 为了稳健起见，我们先加上 CLONE_NEWPID | CLONE_NEWNS。
+        // 如果需要真正断网，需要 unshare(CLONE_NEWNET)。
+        pid_t pid = clone(RunChildFn, stack_top, CLONE_NEWPID | CLONE_NEWNS | SIGCHLD, &args);
 
         if (pid == -1)
         {
             result.status = SandboxStatus::SYSTEM_ERROR; // System Error
+            // 简单的错误日志，实际使用中可能需要记录更多
+            std::cerr << "[Sandbox] Clone failed: " << std::strerror(errno) << std::endl;
             return result;
         }
-        else if (pid == 0)
-        {
-            // ================= 子进程 =================
+        
+        // ================= 父进程 =================
+        // Watchdog 逻辑完全复用 (Level 1.5)
+        
+        int status;
+        struct rusage usage;
 
-            // A. 重定向标准输出到文件
-            int out_fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (out_fd == -1)
-            {
-                // 如果连输出文件都打不开（如磁盘满），直接视为系统错误退出
-                // 使用错误码 120 表示 I/O 准备失败
-                _exit(120);
-            }
-
-            if (dup2(out_fd, STDOUT_FILENO) == -1)
-            {
-                 _exit(121); // 重定向失败
-            }
-            close(out_fd);
-
-            // B. 设置资源限制 (setrlimit)
+        // Watchdog (看门狗) 机制
+        // 使用稳态时钟记录开始时间
+        auto start_time = std::chrono::steady_clock::now();
             
-            // B1. CPU 时间限制 (RLIMIT_CPU)
-            // setrlimit 的单位是秒，所以需要将毫秒转换为秒并向上取整
-            // 如果程序运行超过这个硬限制，内核会发送 SIGXCPU 秒杀它
-            rlimit cpu_limit;
-            cpu_limit.rlim_cur = (time_limit_ms + 999) / 1000; 
-            cpu_limit.rlim_max = cpu_limit.rlim_cur + 1; // 给一秒缓冲，虽然通常直接用硬限制也可以
-            setrlimit(RLIMIT_CPU, &cpu_limit);
-
-            // B2. 虚拟内存限制 (RLIMIT_AS)
-            // 策略优化 (Level 1.7): "宽进严出"
-            // 我们设置一个较宽松的硬限制 (比如 用户限制的 2倍 或 加上 128MB)，
-            // 这样程序超一点点内存时不会直接 crash (RE)，而是能继续跑，
-            // 最后我们在父进程里检查实际用量来判定 MLE。
-            // 这样可以彻底区分 "内存分配失败导致的崩溃" 和 "逻辑错误导致的崩溃"。
-            rlimit mem_limit;
-            long long hard_mem_limit = (memory_limit_kb * 2 + 1024 * 128) * 1024L; 
-            mem_limit.rlim_cur = hard_mem_limit;
-            mem_limit.rlim_max = hard_mem_limit;
-            setrlimit(RLIMIT_AS, &mem_limit);
-
-            // B3. 输出文件大小限制 (RLIMIT_FSIZE)
-            // 防止恶意程序通过无限打印撑爆磁盘
-            // 限制为 10MB (10 * 1024 * 1024)
-            rlimit fsize_limit;
-            fsize_limit.rlim_cur = 10 * 1024 * 1024; 
-            fsize_limit.rlim_max = 10 * 1024 * 1024;
-            setrlimit(RLIMIT_FSIZE, &fsize_limit);
-
-            // C. 执行用户程序
-            execl(exe_path.c_str(), exe_path.c_str(), nullptr);
-
-            // 如果 execl 返回，说明执行失败
-            _exit(127);
-        }
-        else
-        {
-            // ================= 父进程 =================
-            int status;
-            struct rusage usage;
-
-            // Watchdog (看门狗) 机制
-            // 使用稳态时钟记录开始时间
-            auto start_time = std::chrono::steady_clock::now();
-            
-            // 真实时间限制建议：给 CPU 限制时间多加 1秒 的宽限，或者是 2倍，防止正常程序因调度被误杀
-            // 这里我们采用 "limit + 1000ms" 的策略
-            int real_time_limit_ms = time_limit_ms + 1000;
+        // 真实时间限制建议：给 CPU 限制时间多加 1秒 的宽限，或者是 2倍，防止正常程序因调度被误杀
+        // 这里我们采用 "limit + 1000ms" 的策略
+        int real_time_limit_ms = time_limit_ms + 1000;
 
             while (true)
             {
@@ -460,8 +527,7 @@ namespace deep_oj {
             {
                 result.status = SandboxStatus::SYSTEM_ERROR; // Unknown System Error
             }
-        }
-
+        
         return result;
     }
 }
