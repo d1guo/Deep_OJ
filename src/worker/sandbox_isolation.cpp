@@ -64,6 +64,45 @@ namespace deep_oj {
                 }
             }
 
+            // 3.5. 挂载 /dev 设备 (防止 std::random_device 崩溃)
+            char dev_path[512];
+            snprintf(dev_path, sizeof(dev_path), "%s/dev", work_dir);
+            if (mkdir(dev_path, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+
+            const char* devices[] = {"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"};
+            for (const char* dev : devices)
+            {
+                if (access(dev, F_OK) != 0) continue;
+
+                char target[512];
+                snprintf(target, sizeof(target), "%s%s", work_dir, dev);
+
+                // 创建空文件作为挂载点
+                int fd = open(target, O_CREAT | O_RDWR, 0666);
+                if (fd != -1) close(fd);
+                else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+
+                if (mount(dev, target, nullptr, MS_BIND, nullptr) == -1)
+                {
+                     _exit(ERR_MOUNT_BIND_LIB);
+                }
+            }
+
+            // 3.6. 挂载 /etc/localtime (即使没用到, 保持时间正确也是好习惯)
+            char etc_path[512];
+            snprintf(etc_path, sizeof(etc_path), "%s/etc", work_dir);
+            if (mkdir(etc_path, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+            
+            if (access("/etc/localtime", F_OK) == 0) {
+                 char target[512];
+                 snprintf(target, sizeof(target), "%s/etc/localtime", work_dir);
+                 int fd = open(target, O_CREAT | O_RDWR, 0644);
+                 if (fd != -1) close(fd);
+                 
+                 // Bind mount
+                 mount("/etc/localtime", target, nullptr, MS_BIND | MS_REC | MS_RDONLY, nullptr);
+            }
+
             // 4. Pivot Root (切换根目录)
             char old_root[512];
             snprintf(old_root, sizeof(old_root), "%s/old_root", work_dir);
@@ -145,7 +184,9 @@ namespace deep_oj {
         if (setrlimit(RLIMIT_CPU, &cpu_limit) == -1) _exit(ERR_RLIMIT_CPU);
 
         rlimit mem_limit;
-        long long hard_mem_limit = (args->memory_limit_kb * 2 + 1024 * 128) * 1024L; // 放宽硬限制防止OOM Killer误杀
+        // [调整]: 去除 *2 倍率，改为固定增加 128MB 缓冲 (应对 GLIBC/Stack 的虚拟内存开销)
+        // 这样既防止了小内存题目(如4MB)启动失败，也防止了大内存题目(如1GB)占用过多宿主机资源
+        long long hard_mem_limit = (static_cast<long long>(args->memory_limit_kb) + 1024 * 128) * 1024L; 
         mem_limit.rlim_cur = hard_mem_limit;
         mem_limit.rlim_max = hard_mem_limit;
         if (setrlimit(RLIMIT_AS, &mem_limit) == -1) _exit(ERR_RLIMIT_MEMORY);
@@ -210,7 +251,7 @@ namespace deep_oj {
         if (mkdir("/tmp", 0777) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
         // 挂载 tmpfs, 限制 128MB
         if (mount("tmpfs", "/tmp", "tmpfs", 0, "size=128m") == -1) {
-             _exit(ERR_MOUNT_PROC);
+             _exit(ERR_MOUNT_TMP);
         }
 
         // 5. 重定向 stderr 到日志文件
@@ -256,8 +297,16 @@ namespace deep_oj {
 
         char* const envp[] = { (char*)"PATH=/bin:/usr/bin", nullptr };
         
+        // TODO(Optimization): Future Work - Precompiled Headers (PCH)
+        // 目前编译速度受限于 I/O 和头文件解析。
+        // 未来的优化方向：
+        // 1. 在宿主机 /usr/local/include/deep_oj_pch/ 生成 stdc++.h.gch
+        // 2. mount --bind 该目录到沙箱内
+        // 3. g++ 参数添加 -I /usr/local/include/deep_oj_pch
+        
+        // 目前先加上 -pipe (使用管道代替临时文件) 略微提速
         execlp("g++", "g++", 
-               "-std=c++20", "-O2", 
+               "-std=c++20", "-O2", "-pipe",
                new_src_path, "-o", new_exe_path, 
                nullptr, envp);
 

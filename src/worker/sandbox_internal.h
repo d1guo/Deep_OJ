@@ -37,7 +37,8 @@ namespace deep_oj {
         ERR_UMOUNT_OLD       = 196, // 卸载旧根目录 (/old_root) 失败
         ERR_MOUNT_PROC       = 197, // 挂载 /proc 失败
         ERR_MKDIR_FAILED     = 198, // 创建目录失败
-        ERR_SANDBOX_EXCEPTION = 199 // 沙箱内部异常
+        ERR_SANDBOX_EXCEPTION = 199, // 沙箱内部异常
+        ERR_MOUNT_TMP        = 200  // 挂载 /tmp 失败
     };
 
     /**

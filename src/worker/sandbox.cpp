@@ -22,12 +22,13 @@
 #include <sched.h> 
 #include <signal.h>
 
-namespace deep_oj {
+namespace deep_oj
+{
 
     namespace fs = std::filesystem;
 
     namespace {
-        
+
         bool IsValidRequestId(const std::string& id)
         {
             if (id.empty() || id.length() > 64) return false;
@@ -39,7 +40,8 @@ namespace deep_oj {
 
         std::string GetExitCodeDescription(int code)
         {
-            switch (code) {
+            switch (code)
+            {
                 // Stage 1
                 case ERR_OPEN_OUTPUT:   return "无法打开输出文件 (IO Redirect)";
                 case ERR_DUP2:          return "dup2 调用失败 (IO Redirect)";
@@ -47,14 +49,14 @@ namespace deep_oj {
                 case ERR_CHDIR_FAILED:  return "chdir 切换工作目录失败";
                 case ERR_SETGID_FAILED: return "setgid 失败 (降权失败)";
                 case ERR_SETUID_FAILED: return "setuid 失败 (降权失败)";
-                
+
                 // Stage 2
                 case ERR_RLIMIT_CPU:    return "setrlimit(CPU) 失败";
                 case ERR_RLIMIT_MEMORY: return "setrlimit(AS) 失败";
                 case ERR_RLIMIT_STACK:  return "setrlimit(STACK) 失败";
                 case ERR_RLIMIT_NPROC:  return "setrlimit(NPROC) 失败";
                 case ERR_RLIMIT_FSIZE:  return "setrlimit(FSIZE) 失败";
-                
+
                 // Stage 3
                 case ERR_MOUNT_PRIVATE:   return "mount --make-rprivate 失败";
                 case ERR_MOUNT_BIND_SELF: return "bind mount 工作目录失败";
@@ -64,9 +66,10 @@ namespace deep_oj {
                 case ERR_CHDIR_NEW_ROOT:  return "切换到新根目录失败";
                 case ERR_UMOUNT_OLD:      return "umount /old_root 失败";
                 case ERR_MOUNT_PROC:      return "mount /proc 失败";
+                case ERR_MOUNT_TMP:       return "mount /tmp (tmpfs) 失败";
                 case ERR_MKDIR_FAILED:    return "mkdir (构建 Rootfs) 失败";
                 case ERR_SANDBOX_EXCEPTION: return "沙箱内部异常 (C++ Throw)";
-                
+
                 default: return "与系统相关的未知错误";
             }
         }
@@ -97,9 +100,10 @@ namespace deep_oj {
     {
         CompileResult result;
 
-        if (!IsValidRequestId(request_id)) {
-             std::cerr << "[Security] CRITICAL: Invalid request_id '" << request_id << "' detected. Rejected.\n";
-             result.error_message = "Security Violation: Invalid Request ID";
+        if (!IsValidRequestId(request_id))
+        {
+             std::cerr << "[Security] 严重警告: 检测到非法 request_id '" << request_id << "'。请求已拒绝。\n";
+             result.error_message = "安全违规: 请求 ID 包含非法字符 (潜在路径遍历攻击)";
              result.success = false;
              return result;
         }
@@ -134,15 +138,18 @@ namespace deep_oj {
         }
 
         // [安全修复]: 更改目录所有者为 nobody (UID 65534)，并限制权限为 700
+        // 700 : 所有者（Owner）拥有完全控制权。同组/系统其他用户没有任何权限。
         // 这样只有 nobody 用户可以访问该目录，防止 Time-of-Check to Time-of-Use 攻击
-        if (chown(request_dir.c_str(), 65534, 65534) != 0) {
+        if (chown(request_dir.c_str(), 65534, 65534) != 0)
+        {
              result.error_message = FormatSystemError("无法修改目录所有者为 nobody");
              return result;
         }
-
+        
         // 仅允许所有者 (nobody) 读写执行
         fs::permissions(request_dir, fs::perms::owner_all, ec);
-        if (ec) {
+        if (ec)
+        {
              result.error_message = std::format("无法设置安全权限: {}", ec.message());
              return result;
         }
@@ -161,15 +168,15 @@ namespace deep_oj {
         char* stack_top = stack_mem.get() + STACK_SIZE;
 
         pid_t pid = clone(CompileChildFn, stack_top, 
-                          CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD, 
-                          &args);
-
+                        CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD | CLONE_NEWNET,
+                        &args);
+        
         if (pid == -1)
         {
             result.error_message = FormatSystemError("系统调用 clone (compile) 失败");
             return result;
         }
-        
+
         // ================= 父进程 =================
         int status;
         const int COMPILE_TIME_LIMIT_MS = 15000; 
