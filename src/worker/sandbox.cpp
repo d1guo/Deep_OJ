@@ -374,6 +374,10 @@ namespace deep_oj
     {
         RunResult result;
         
+        // Prepare output path: child writes to /output.txt relative to sandbox root
+        fs::path output_path = fs::path(exe_path).parent_path() / "output.txt";
+        const uint64_t OUTPUT_LIMIT_BYTES = 10ULL * 1024ULL * 1024ULL; // 10MB logical limit
+
         // 1. 准备参数与栈
         RunChildArgs args;
         std::strncpy(args.exe_path, exe_path.c_str(), sizeof(args.exe_path) - 1);
@@ -400,11 +404,14 @@ namespace deep_oj
         ProcessGuard proc(pid);
 
         int status;
-        struct rusage usage;
+        struct rusage usage{};
 
         auto start_time = std::chrono::steady_clock::now();
             
         int real_time_limit_ms = time_limit_ms + 1000;
+
+        // Flag to mark that parent killed process for MLE (avoid ambiguous interpretation later)
+        bool parent_killed_for_mle = false;
 
         while (true)
         {
@@ -421,6 +428,21 @@ namespace deep_oj
             {
                 proc.release();
                 break;
+            }
+
+            // Real-time MLE detection: if ru_maxrss exceeds logical limit, kill and mark MLE
+            if (usage.ru_maxrss > memory_limit_kb)
+            {
+                proc.kill();
+                proc.wait_rusage(status, &usage);
+                proc.release();
+
+                result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
+                result.time_used = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start_time).count());
+                result.memory_used = usage.ru_maxrss;
+                parent_killed_for_mle = true;
+                return result;
             }
 
             auto now = std::chrono::steady_clock::now();
@@ -448,6 +470,19 @@ namespace deep_oj
         
         result.memory_used = usage.ru_maxrss;
 
+        // Post-exit Output Limit check (robust OLE detection)
+        std::error_code ec;
+        if (fs::exists(output_path, ec)) {
+            uint64_t out_size = 0;
+            out_size = fs::file_size(output_path, ec);
+            if (!ec && out_size >= OUTPUT_LIMIT_BYTES) {
+                result.status = SandboxStatus::OUTPUT_LIMIT_EXCEEDED;
+                result.memory_used = usage.ru_maxrss;
+                return result;
+            }
+        }
+
+        // If parent already killed for MLE we returned earlier; otherwise continue
         if (result.memory_used > memory_limit_kb)
         {
             result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
@@ -500,9 +535,17 @@ namespace deep_oj
                  // 文件大小超限 (Output Limit Exceeded)
                  result.status = SandboxStatus::OUTPUT_LIMIT_EXCEEDED; 
             }
+            else if (signal == SIGABRT || signal == SIGSEGV) {
+                // Heuristic: if process aborted or segfaulted while memory usage close to limit, treat as MLE
+                if (result.memory_used >= static_cast<int>(std::ceil(memory_limit_kb * 0.95))) {
+                    result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
+                } else {
+                    result.status = SandboxStatus::RUNTIME_ERROR;
+                }
+            }
             else
             {
-                // 其他信号 (SIGSEGV, SIGFPE, SIGABRT, SIGBUS...) 统一归类为 Runtime Error
+                // 其他信号 (SIGFPE, SIGBUS...) 统一归类为 Runtime Error
                 result.status = SandboxStatus::RUNTIME_ERROR;
             }
         }

@@ -4,35 +4,50 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <cstring>
 #include <cassert>
+#include <sys/wait.h>
 
 using namespace deep_oj;
 
-// Color codes
+// ================== 测试工具函数 ==================
 const std::string RESET = "\033[0m";
 const std::string RED = "\033[31m";
 const std::string GREEN = "\033[32m";
 const std::string YELLOW = "\033[33m";
+const std::string BLUE = "\033[34m";
 
 void PrintResult(const std::string& name, bool pass, const std::string& msg = "") {
     std::cout << "[" << (pass ? GREEN + "PASS" : RED + "FAIL") << RESET << "] " 
-              << name << (msg.empty() ? "" : " - " + msg) << std::endl;
+              << std::left << std::setw(25) << name 
+              << (msg.empty() ? "" : " | " + msg) << std::endl;
 }
 
-void RunTest(Sandbox& sandbox, std::string name, std::string code, SandboxStatus expected_status, int time_limit = 1000, int mem_limit = 128 * 1024) {
+std::string StatusToString(SandboxStatus s) {
+    switch(s) {
+        case SandboxStatus::OK: return "OK";
+        case SandboxStatus::TIME_LIMIT_EXCEEDED: return "TLE";
+        case SandboxStatus::MEMORY_LIMIT_EXCEEDED: return "MLE";
+        case SandboxStatus::OUTPUT_LIMIT_EXCEEDED: return "OLE";
+        case SandboxStatus::RUNTIME_ERROR: return "RE";
+        case SandboxStatus::SYSTEM_ERROR: return "SE";
+        default: return "UNKNOWN";
+    }
+}
+
+void RunTest(Sandbox& sandbox, 
+             std::string name, 
+             std::string code, 
+             SandboxStatus expected_status, 
+             int time_limit = 1000, 
+             int mem_limit = 128 * 1024) 
+{
     std::string req_id = "test_" + name;
     
     // 1. Compile
     auto compile_res = sandbox.Compile(req_id, code);
     if (!compile_res.success) {
-        if (expected_status == SandboxStatus::SYSTEM_ERROR) {
-             // Sometimes we test compile failures? No, mostly runtime.
-             // If compilation fails unexpectedly
-             PrintResult(name, false, "Compilation Failed: " + compile_res.error_message);
-             return;
-        }
-        // Maybe the test code itself is invalid
-        PrintResult(name, false, "Compilation Failed: " + compile_res.error_message);
+        PrintResult(name, false, "Compile Failed: " + compile_res.error_message);
         return;
     }
 
@@ -40,138 +55,210 @@ void RunTest(Sandbox& sandbox, std::string name, std::string code, SandboxStatus
     auto run_res = sandbox.Run(compile_res.exe_path, time_limit, mem_limit);
 
     // 3. Verify
-    bool status_match = (run_res.status == expected_status);
-    bool msg_match = true;
-
-    if (status_match) {
-        PrintResult(name, true, "Status matched");
-    } else {
-        std::string status_str;
-        switch(run_res.status) {
-            case SandboxStatus::OK: status_str = "OK"; break;
-            case SandboxStatus::TIME_LIMIT_EXCEEDED: status_str = "TLE"; break;
-            case SandboxStatus::MEMORY_LIMIT_EXCEEDED: status_str = "MLE"; break;
-            case SandboxStatus::OUTPUT_LIMIT_EXCEEDED: status_str = "OLE"; break;
-            case SandboxStatus::RUNTIME_ERROR: status_str = "RE"; break;
-            case SandboxStatus::SYSTEM_ERROR: status_str = "SE"; break;
-        }
-        PrintResult(name, false, "Expected " + std::to_string((int)expected_status) + ", Got " + status_str + " (" + run_res.error_message + ")");
+    bool pass = (run_res.status == expected_status);
+    
+    // 特殊情况：如果是 Hack 类测试，只要不是 OK 就算通过（通常是 RE 或 SE）
+    // 但为了严谨，我们通常期望 Hack 行为触发 RE (Permission Denied)
+    
+    std::string msg = "Exp: " + StatusToString(expected_status) + 
+                      ", Got: " + StatusToString(run_res.status);
+    
+    if (!pass && run_res.status == SandboxStatus::RUNTIME_ERROR) {
+        msg += " (" + std::to_string(run_res.exit_code) + ")";
     }
+
+    PrintResult(name, pass, msg);
 }
 
 int main() {
-    std::cout << "=== Starting Security & Stability Tests ===" << std::endl;
+    std::cout << BLUE << "=== DeepOJ Sandbox: Ultimate Security & Stress Test ===" << RESET << std::endl;
 
     try {
         Sandbox sandbox("/tmp/deep_oj_tests");
 
-        // 1. Baseline
-        std::string code_ok = R"(
-            #include <iostream>
-            int main() {
-                int a = 1, b = 2;
-                std::cout << a + b << std::endl; 
-                return 0;
-            }
-        )";
-        RunTest(sandbox, "Baseline_OK", code_ok, SandboxStatus::OK);
+        // ================= 1. 基础功能测试 =================
+        std::cout << YELLOW << "\n[Group 1: Basic Logic]" << RESET << std::endl;
+        
+        RunTest(sandbox, "Normal_AC", 
+            R"(int main() { return 0; })", 
+            SandboxStatus::OK);
 
-        // 2. Timeout (TLE)
-        std::string code_tle = R"(
-            int main() {
-                while(true) {}
-                return 0;
-            }
-        )";
-        RunTest(sandbox, "Time_Limit", code_tle, SandboxStatus::TIME_LIMIT_EXCEEDED);
+        RunTest(sandbox, "Normal_RE", 
+            R"(int main() { return 1; })", 
+            SandboxStatus::RUNTIME_ERROR); // Exit code 1
 
-        // 3. Memory (MLE)
-        std::string code_mle = R"(
-            #include <vector>
-            #include <cstring>
-            int main() {
-                // Try to allocate 200MB (limit is 128MB)
-                // We must touch memory to trigger RSS growth
-                std::vector<char*> ptrs;
-                for(int i=0; i<200; ++i) {
-                    char* p = new char[1024*1024];
-                    std::memset(p, 0, 1024*1024);
-                    ptrs.push_back(p);
-                }
-                return 0;
-            }
-        )";
-        RunTest(sandbox, "Memory_Limit", code_mle, SandboxStatus::MEMORY_LIMIT_EXCEEDED);
+        RunTest(sandbox, "Normal_SegFault", 
+            R"(int main() { int* p=0; *p=1; return 0; })", 
+            SandboxStatus::RUNTIME_ERROR); // Signal 11 (SIGSEGV)
 
-        // 4. File Read Attack (/etc/passwd)
-        // Note: In our sandbox, /etc is NOT mounted. 
-        // So checking if we can read host's /etc/passwd
-        std::string code_read_etc = R"(
-            #include <fstream>
-            #include <iostream>
-            int main() {
-                std::ifstream f("/etc/passwd");
-                if (f.good()) {
-                    // Start reading
-                    std::string line;
-                    if (std::getline(f, line)) {
-                        // If we read something, return 0 (Success = BAD for security)
-                        return 0; 
+        // ================= 2. 资源限制测试 =================
+        std::cout << YELLOW << "\n[Group 2: Resource Limits]" << RESET << std::endl;
+
+        // TLE: 死循环
+        RunTest(sandbox, "Limit_Time_Loop", 
+            R"(int main() { while(true); return 0; })", 
+            SandboxStatus::TIME_LIMIT_EXCEEDED);
+
+        // MLE: 疯狂分配内存 (256MB > 128MB Limit)
+        RunTest(sandbox, "Limit_Memory", 
+            R"(
+                #include <vector>
+                #include <cstring>
+                int main() {
+                    std::vector<char*> v;
+                    for(int i=0; i<256; i++) {
+                        char* p = new char[1024*1024];
+                        std::memset(p, 1, 1024*1024); // Touch memory
+                        v.push_back(p);
                     }
+                    return 0;
                 }
-                // Failed to read (Good)
-                return 1;
-            }
-        )";
-        // Expect RUNTIME_ERROR (exit code 1) because it fails to find file
-        RunTest(sandbox, "Hack_Read_Etc", code_read_etc, SandboxStatus::RUNTIME_ERROR);
+            )", 
+            SandboxStatus::MEMORY_LIMIT_EXCEEDED);
 
-        // 5. Root Traversal (../../)
-        // Try to escape chroot/pivot_root
-        std::string code_traverse = R"(
-            #include <fstream>
-            int main() {
-                std::ifstream f("../../../../../etc/passwd");
-                if (f.good()) return 0; // Bad
-                return 1; // Good
-            }
-        )";
-        RunTest(sandbox, "Hack_Traverse", code_traverse, SandboxStatus::RUNTIME_ERROR);
-
-        // 6. Write to Root
-        // Try to write a file in / 
-        std::string code_write = R"(
-            #include <fstream>
-            int main() {
-                std::ofstream f("/hacked.txt");
-                if (f.good()) return 0; // Write success (Bad)
-                return 1; // Write failed (Good)
-            }
-        )";
-        RunTest(sandbox, "Hack_Write_Root", code_write, SandboxStatus::RUNTIME_ERROR);
-
-        // 7. Fork Bomb
-        // Limit is set to 1 via RLIMIT_NPROC (or low number)
-        std::string code_fork = R"(
-            #include <unistd.h>
-            int main() {
-                while(1) {
-                    fork();
+        // OLE: 输出超限 (10MB Limit)
+        // [优化]: 加大输出量到 20MB，确保冲破缓冲区强制触发 SIGXFSZ
+        RunTest(sandbox, "Limit_Output", 
+            R"(
+                #include <cstdio>
+                int main() {
+                    // 20MB > 10MB Limit
+                    for(int i=0; i<20*1024*1024; i++) putchar('A'); 
+                    return 0;
                 }
-                return 0;
-            }
-        )";
-        // This might cause RE (cannot fork) or SE logic depending on how it's caught
-        // Usually, fork() fails returning -1, creating a loop.
-        // It will eventually TLE if it just loops failing forks.
-        // Or if it crashes.
-        RunTest(sandbox, "Hack_Fork_Bomb", code_fork, SandboxStatus::TIME_LIMIT_EXCEEDED); // Or RUNTIME_ERROR
+            )", 
+            SandboxStatus::OUTPUT_LIMIT_EXCEEDED);
+
+        // Fork Bomb: 尝试耗尽进程数
+        // 期望：因为 setrlimit NPROC=5，Fork 失败返回 -1，最终死循环被 TLE 杀掉
+        // 或者因为无法 fork 导致逻辑错误退出 RE
+        // 只要不是 OK 就行
+        RunTest(sandbox, "Limit_Fork_Bomb", 
+            R"(
+                #include <unistd.h>
+                int main() {
+                    while(1) { fork(); }
+                    return 0;
+                }
+            )", 
+            SandboxStatus::TIME_LIMIT_EXCEEDED); // 或者是 RUNTIME_ERROR
+
+        // ================= 3. 文件系统隔离测试 =================
+        std::cout << YELLOW << "\n[Group 3: Filesystem Isolation]" << RESET << std::endl;
+
+        // 尝试读取宿主机敏感文件
+        // 期望：RE (文件不存在)
+        RunTest(sandbox, "FS_Read_Host_Etc", 
+            R"(
+                #include <fstream>
+                int main() {
+                    std::ifstream f("/etc/passwd");
+                    return f.good() ? 0 : 1;
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR);
+
+        // 尝试写入根目录 (这就是你刚才挂的那个)
+        // 期望：RE (Permission Denied -> exit 1)
+        RunTest(sandbox, "FS_Write_Root", 
+            R"(
+                #include <fstream>
+                int main() {
+                    std::ofstream f("/hacked.txt");
+                    return f.good() ? 0 : 1; 
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR);
+
+        // 尝试覆盖系统命令 (/bin/ls)
+        RunTest(sandbox, "FS_Overwrite_Bin", 
+            R"(
+                #include <cstdio>
+                int main() {
+                    FILE* f = fopen("/bin/ls", "w");
+                    return f ? 0 : 1;
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR);
+
+        // ================= 4. 网络隔离测试 =================
+        std::cout << YELLOW << "\n[Group 4: Network Isolation]" << RESET << std::endl;
+
+        // 尝试创建一个 TCP Socket 连接公网 (8.8.8.8)
+        // 因为用了 CLONE_NEWNET，只有 lo 设备，且没配置路由，connect 应该失败
+        RunTest(sandbox, "Net_Connect_Internet", 
+            R"(
+                #include <sys/socket.h>
+                #include <arpa/inet.h>
+                #include <unistd.h>
+                int main() {
+                    int sock = socket(AF_INET, SOCK_STREAM, 0);
+                    if (sock < 0) return 1; // socket creation failed (good)
+                    
+                    struct sockaddr_in serv_addr;
+                    serv_addr.sin_family = AF_INET;
+                    serv_addr.sin_port = htons(80);
+                    inet_pton(AF_INET, "8.8.8.8", &serv_addr.sin_addr);
+                    
+                    if (connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == 0) {
+                        return 0; // Connected! (BAD)
+                    }
+                    return 1; // Failed (Good)
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR);
+
+        // 尝试绑定端口 (Server)
+        RunTest(sandbox, "Net_Bind_Port", 
+            R"(
+                #include <sys/socket.h>
+                #include <netinet/in.h>
+                int main() {
+                    int sock = socket(AF_INET, SOCK_STREAM, 0);
+                    struct sockaddr_in addr;
+                    addr.sin_family = AF_INET;
+                    addr.sin_addr.s_addr = INADDR_ANY;
+                    addr.sin_port = htons(8080);
+                    // 在 NEWNET 里，bind 应该成功(因为是独立的 localhost)，但外面访问不到
+                    // 这里主要是测试不会 Crash
+                    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) return 0;
+                    return 1;
+                }
+            )", 
+            SandboxStatus::OK); // 内部 Bind 允许成功，只要出不去就行
+
+        // ================= 5. 系统攻击测试 =================
+        std::cout << YELLOW << "\n[Group 5: System Attacks]" << RESET << std::endl;
+
+        // 尝试杀掉其他进程 (PID -1 = kill all possible)
+        RunTest(sandbox, "Sys_Kill_All", 
+            R"(
+                #include <signal.h>
+                int main() {
+                    // Try to kill everything I can see
+                    if (kill(-1, SIGKILL) == 0) return 0;
+                    return 1;
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR); // 只能杀自己，或者 kill 返回失败
+
+        // 尝试调用 reboot (需要 root 权限，且受 Capability 限制)
+        RunTest(sandbox, "Sys_Reboot", 
+            R"(
+                #include <sys/reboot.h>
+                #include <unistd.h>
+                int main() {
+                    syscall(169, 0xFEE1DEAD, 672274793, 0x1234567); // sys_reboot
+                    return 1; // Should fail and reach here
+                }
+            )", 
+            SandboxStatus::RUNTIME_ERROR);
 
     } catch (const std::exception& e) {
-        std::cerr << "Test Suite Exception: " << e.what() << std::endl;
+        std::cerr << RED << "Test Suite Fatal Error: " << e.what() << RESET << std::endl;
         return 1;
     }
 
-    std::cout << "=== Tests Completed ===" << std::endl;
+    std::cout << BLUE << "\n=== All Tests Completed ===" << RESET << std::endl;
     return 0;
 }

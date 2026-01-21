@@ -17,7 +17,7 @@
 
 namespace deep_oj {
 
-    namespace {
+    namespace {d
         
         // 辅助函数：安全地设置 Rootfs (Pivot Root)
         // 必须 static，限制在当前编译单元内
@@ -193,9 +193,9 @@ namespace deep_oj {
         if (setrlimit(RLIMIT_CPU, &cpu_limit) == -1) _exit(ERR_RLIMIT_CPU);
 
         rlimit mem_limit;
-        // [调整]: 去除 *2 倍率，改为固定增加 128MB 缓冲 (应对 GLIBC/Stack 的虚拟内存开销)
-        // 这样既防止了小内存题目(如4MB)启动失败，也防止了大内存题目(如1GB)占用过多宿主机资源
-        long long hard_mem_limit = (static_cast<long long>(args->memory_limit_kb) + 1024 * 128) * 1024L; 
+        // [软硬限优化]: OS 层放宽内存限制，增加 256MB 缓冲，防止 C++ 在堆分配瞬间抛出 bad_alloc
+        // 由父进程在运行时实时检测 ru_maxrss 来判定 MLE（软限/硬限策略）
+        long long hard_mem_limit = (static_cast<long long>(args->memory_limit_kb) + 1024 * 256) * 1024L; 
         mem_limit.rlim_cur = hard_mem_limit;
         mem_limit.rlim_max = hard_mem_limit;
         if (setrlimit(RLIMIT_AS, &mem_limit) == -1) _exit(ERR_RLIMIT_MEMORY);
@@ -206,15 +206,22 @@ namespace deep_oj {
         if (setrlimit(RLIMIT_STACK, &stack_limit) == -1) _exit(ERR_RLIMIT_STACK);
 
         rlimit nproc_limit;
-        nproc_limit.rlim_cur = 5; // 只能有一个进程
+        nproc_limit.rlim_cur = 5;
         nproc_limit.rlim_max = 5;
         if (setrlimit(RLIMIT_NPROC, &nproc_limit) == -1) _exit(ERR_RLIMIT_NPROC);
 
         rlimit fsize_limit;
-        fsize_limit.rlim_cur = 10 * 1024 * 1024; // 输出文件最大 10MB
-        fsize_limit.rlim_max = 10 * 1024 * 1024;
+        // [软硬限优化]: OS 层放宽输出文件大小限制，增加 10MB 缓冲
+        fsize_limit.rlim_cur = 10 * 1024 * 1024 + 10 * 1024 * 1024; // 10MB + 10MB buffer
+        fsize_limit.rlim_max = 10 * 1024 * 1024 + 10 * 1024 * 1024;
         if (setrlimit(RLIMIT_FSIZE, &fsize_limit) == -1) _exit(ERR_RLIMIT_FSIZE);
         
+        // [Security Fix] Lock down the root directory permissions.
+        // Change mode to 0555 (r-xr-xr-x) so nobody cannot write to /
+        if (chmod("/", 0555) == -1) {
+            _exit(ERR_CHDIR_FAILED); // Fail safe
+        }
+
         // 5. 降权 (nobody)
         if (chdir("/") != 0) _exit(ERR_CHDIR_FAILED);
         if (setgid(65534) != 0) _exit(ERR_SETGID_FAILED);
