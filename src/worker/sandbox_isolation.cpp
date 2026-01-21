@@ -306,14 +306,14 @@ namespace deep_oj {
 
         char* const envp[] = { (char*)"PATH=/bin:/usr/bin", nullptr };
         
-        // TODO(Optimization): Future Work - Precompiled Headers (PCH)
+        // TODO
         // 目前编译速度受限于 I/O 和头文件解析。
         // 未来的优化方向：
         // 1. 在宿主机 /usr/local/include/deep_oj_pch/ 生成 stdc++.h.gch
         // 2. mount --bind 该目录到沙箱内
         // 3. g++ 参数添加 -I /usr/local/include/deep_oj_pch
-        
         // 目前先加上 -pipe (使用管道代替临时文件) 略微提速
+
         execlp("g++", "g++", 
                "-std=c++20", "-O2", "-pipe",
                new_src_path, "-o", new_exe_path, 

@@ -79,6 +79,114 @@ namespace deep_oj
             return std::format("{}: {}", prefix, std::strerror(errno));
         }
 
+        // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
+        class ProcessGuard
+        {
+        public:
+            explicit ProcessGuard(pid_t pid) : pid_(pid), released_(false) {}
+
+            ~ProcessGuard()
+            {
+                if (released_ || pid_ <= 0) return;
+
+                int status;
+                // 检查子进程是否已经退出
+                pid_t w = waitpid(pid_, &status, WNOHANG);
+                if (w == 0) {
+                    // 仍在运行，尝试强杀并回收
+                    ::kill(pid_, SIGKILL);
+                    // 阻塞等待回收（忽略 EINTR）
+                    for (;;) {
+                        pid_t r = waitpid(pid_, &status, 0);
+                        if (r == -1) {
+                            if (errno == EINTR) continue;
+                            break;
+                        }
+                        break;
+                    }
+                }
+                // w > 0 或者 ECHILD 表示已经退出/被回收
+            }
+
+            // 非阻塞地检查是否退出，返回 waitpid 的返回值 (pid, 0, -1)
+            pid_t wait_nonblock(int &status)
+            {
+                if (pid_ <= 0) return -1;
+                for (;;) {
+                    pid_t w = waitpid(pid_, &status, WNOHANG);
+                    if (w == -1 && errno == EINTR) continue;
+                    return w;
+                }
+            }
+
+            // 非阻塞获取 rusage
+            pid_t wait_nonblock_rusage(int &status, struct rusage *usage)
+            {
+                if (pid_ <= 0) return -1;
+                for (;;) {
+                    pid_t w = wait4(pid_, &status, WNOHANG, usage);
+                    if (w == -1 && errno == EINTR) continue;
+                    return w;
+                }
+            }
+
+            // 阻塞等待并返回 (用于超时后强制回收)
+            pid_t wait(int &status)
+            {
+                if (pid_ <= 0) return -1;
+                for (;;) {
+                    pid_t w = waitpid(pid_, &status, 0);
+                    if (w == -1 && errno == EINTR) continue;
+                    return w;
+                }
+            }
+
+            // 阻塞等待并收集 rusage
+            pid_t wait_rusage(int &status, struct rusage *usage)
+            {
+                if (pid_ <= 0) return -1;
+                for (;;) {
+                    pid_t w = wait4(pid_, &status, 0, usage);
+                    if (w == -1 && errno == EINTR) continue;
+                    return w;
+                }
+            }
+
+            bool kill()
+            {
+                if (pid_ <= 0) return false;
+                return ::kill(pid_, SIGKILL) == 0;
+            }
+
+            void release()
+            {
+                released_ = true;
+                pid_ = -1;
+            }
+
+        private:
+            pid_t pid_;
+            bool released_;
+        };
+
+        class DirectoryGuard
+        {
+        public:
+            explicit DirectoryGuard(fs::path p) : path_(std::move(p)), committed_(false) {}
+            ~DirectoryGuard()
+            {
+                if (committed_) return;
+                std::error_code ec;
+                if (fs::exists(path_, ec)) {
+                    fs::remove_all(path_, ec);
+                }
+            }
+            void commit() { committed_ = true; }
+        private:
+            fs::path path_;
+            bool committed_;
+        };
+
     } // anonymous namespace
 
     Sandbox::Sandbox(const std::string& temp_dir) : temp_dir_(temp_dir)
@@ -158,6 +266,9 @@ namespace deep_oj
         fs::path exe_file = request_dir / "main";
         fs::path log_file = request_dir / "compile_error.log";
 
+        // RAII guard: 保证异常或早退时临时目录被清理
+        DirectoryGuard dir_guard(request_dir);
+
         // 4. 调用 Clone (隔离层)
         CompileArgs args;
         strncpy(args.source_path, source_file.c_str(), 255); args.source_path[255] = 0;
@@ -178,13 +289,16 @@ namespace deep_oj
         }
 
         // ================= 父进程 =================
+        // RAII guard for child process lifecycle
+        ProcessGuard proc(pid);
+
         int status;
         const int COMPILE_TIME_LIMIT_MS = 15000; 
         auto start_time = std::chrono::steady_clock::now();
         
         while (true)
         {
-            int w = waitpid(pid, &status, WNOHANG);
+            int w = proc.wait_nonblock(status);
                 
             if (w == -1)
             {
@@ -195,6 +309,7 @@ namespace deep_oj
             
             if (w != 0)
             {
+                proc.release();
                 break;
             }
             
@@ -203,11 +318,10 @@ namespace deep_oj
             
             if (elapsed_ms > COMPILE_TIME_LIMIT_MS)
             {
-                kill(pid, SIGKILL);
-                waitpid(pid, &status, 0);
+                proc.kill();
+                proc.wait(status);
                 
                 result.error_message = std::format("编译超时 (> {}ms). 可能存在极度复杂的模板展开。", COMPILE_TIME_LIMIT_MS);
-                fs::remove(log_file, ec);
                 return result;
             }
             
@@ -220,6 +334,8 @@ namespace deep_oj
             int exit_code = WEXITSTATUS(status);
             if (exit_code == 0)
             {
+                // 编译成功：保留 request_dir (可供后续执行使用)
+                dir_guard.commit();
                 result.success = true;
                 result.exe_path = exe_file.string();
             }
@@ -251,8 +367,6 @@ namespace deep_oj
             result.error_message = "编译器因未知原因结束";
         }
 
-        fs::remove(log_file, ec); 
-
         return result;
     }
 
@@ -282,6 +396,9 @@ namespace deep_oj
         }
         
         // ================= 父进程 =================
+        // RAII guard for child
+        ProcessGuard proc(pid);
+
         int status;
         struct rusage usage;
 
@@ -291,7 +408,7 @@ namespace deep_oj
 
         while (true)
         {
-            pid_t w = wait4(pid, &status, WNOHANG, &usage);
+            pid_t w = proc.wait_nonblock_rusage(status, &usage);
 
             if (w == -1)
             {
@@ -302,6 +419,7 @@ namespace deep_oj
 
             if (w != 0) 
             {
+                proc.release();
                 break;
             }
 
@@ -310,8 +428,9 @@ namespace deep_oj
 
             if (elapsed_ms > real_time_limit_ms)
             {
-                kill(pid, SIGKILL);
-                wait4(pid, &status, 0, &usage);
+                proc.kill();
+                proc.wait_rusage(status, &usage);
+                proc.release();
 
                 result.status = SandboxStatus::TIME_LIMIT_EXCEEDED;
                 result.time_used = elapsed_ms; 
