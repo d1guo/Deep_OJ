@@ -361,27 +361,16 @@ namespace deep_oj
             {
                 result.status = SandboxStatus::TIME_LIMIT_EXCEEDED; 
             }
-            else if (signal == SIGSEGV)
-            {
-                result.status = SandboxStatus::RUNTIME_ERROR; 
-            }
-            else if (signal == SIGFPE)
-            {
-                    result.status = SandboxStatus::RUNTIME_ERROR; 
-            }
-            else if (signal == SIGABRT)
-            {
-                result.status = SandboxStatus::RUNTIME_ERROR;
-            }
             else if (signal == SIGKILL)
             {
+                // SIGKILL 可能是因为 MLE 导致的 OOM，也可能是超时被我们手动杀掉
                 if (result.time_used > time_limit_ms)
                 {
-                        result.status = SandboxStatus::TIME_LIMIT_EXCEEDED; 
+                    result.status = SandboxStatus::TIME_LIMIT_EXCEEDED; 
                 }
                 else if (result.memory_used > memory_limit_kb)
                 {
-                        result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED; 
+                    result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED; 
                 }
                 else
                 {
@@ -389,11 +378,13 @@ namespace deep_oj
                 }
             }
             else if (signal == SIGXFSZ) {
-                    result.status = SandboxStatus::RUNTIME_ERROR; 
+                 // 文件大小超限 (Output Limit Exceeded)
+                 result.status = SandboxStatus::OUTPUT_LIMIT_EXCEEDED; 
             }
             else
             {
-                result.status = SandboxStatus::RUNTIME_ERROR; 
+                // 其他信号 (SIGSEGV, SIGFPE, SIGABRT, SIGBUS...) 统一归类为 Runtime Error
+                result.status = SandboxStatus::RUNTIME_ERROR;
             }
         }
         else

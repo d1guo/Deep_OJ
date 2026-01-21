@@ -23,8 +23,9 @@ namespace deep_oj
         OK = 0,                 // 0: OK
         TIME_LIMIT_EXCEEDED,    // 1: TLE
         MEMORY_LIMIT_EXCEEDED,  // 2: MLE
-        RUNTIME_ERROR,          // 3: RE
-        SYSTEM_ERROR            // 4: SE
+        OUTPUT_LIMIT_EXCEEDED,  // 3: OLE
+        RUNTIME_ERROR,          // 4: RE
+        SYSTEM_ERROR            // 5: SE
     };
 
     struct RunResult

@@ -51,6 +51,7 @@ void RunTest(Sandbox& sandbox, std::string name, std::string code, SandboxStatus
             case SandboxStatus::OK: status_str = "OK"; break;
             case SandboxStatus::TIME_LIMIT_EXCEEDED: status_str = "TLE"; break;
             case SandboxStatus::MEMORY_LIMIT_EXCEEDED: status_str = "MLE"; break;
+            case SandboxStatus::OUTPUT_LIMIT_EXCEEDED: status_str = "OLE"; break;
             case SandboxStatus::RUNTIME_ERROR: status_str = "RE"; break;
             case SandboxStatus::SYSTEM_ERROR: status_str = "SE"; break;
         }
