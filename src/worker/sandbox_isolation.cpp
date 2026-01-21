@@ -82,13 +82,14 @@ namespace deep_oj {
                 if (fd != -1) close(fd);
                 else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
 
+                // Step A: Bind Mount RW
                 if (mount(dev, target, nullptr, MS_BIND, nullptr) == -1)
                 {
-                     _exit(ERR_MOUNT_BIND_LIB);
+                    _exit(ERR_MOUNT_BIND_LIB); // 复用错误码
                 }
             }
 
-            // 3.6. 挂载 /etc/localtime (即使没用到, 保持时间正确也是好习惯)
+            // 3.6. 挂载 /etc/localtime (保持时间正确，必须只读)
             char etc_path[512];
             snprintf(etc_path, sizeof(etc_path), "%s/etc", work_dir);
             if (mkdir(etc_path, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
@@ -98,9 +99,17 @@ namespace deep_oj {
                  snprintf(target, sizeof(target), "%s/etc/localtime", work_dir);
                  int fd = open(target, O_CREAT | O_RDWR, 0644);
                  if (fd != -1) close(fd);
-                 
-                 // Bind mount
-                 mount("/etc/localtime", target, nullptr, MS_BIND | MS_REC | MS_RDONLY, nullptr);
+                 else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+                 // Step A: Bind Mount RW
+                 if (mount("/etc/localtime", target, nullptr, MS_BIND, nullptr) == -1)
+                 {
+                     _exit(ERR_MOUNT_BIND_LIB); // 复用错误码
+                 }
+                 // Step B: Remount Read-Only
+                 if (mount("/etc/localtime", target, nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY, nullptr) == -1)
+                 {
+                     _exit(ERR_REMOUNT_RO); // 用于只读挂载失败
+                 }
             }
 
             // 4. Pivot Root (切换根目录)

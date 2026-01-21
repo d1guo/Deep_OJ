@@ -293,7 +293,7 @@ namespace deep_oj
         {
             pid_t w = wait4(pid, &status, WNOHANG, &usage);
 
-            if (w == -1) 
+            if (w == -1)
             {
                 if (errno == EINTR) continue; 
                 result.status = SandboxStatus::SYSTEM_ERROR;
