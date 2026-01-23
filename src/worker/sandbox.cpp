@@ -4,7 +4,6 @@
 
 #include <filesystem>
 #include <fstream>
-#include <format>
 #include <iostream>
 #include <system_error>
 #include <thread>
@@ -76,7 +75,7 @@ namespace deep_oj
 
         std::string FormatSystemError(const std::string& prefix)
         {
-            return std::format("{}: {}", prefix, std::strerror(errno));
+            return prefix + ": " + std::strerror(errno);
         }
 
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
@@ -84,6 +83,44 @@ namespace deep_oj
         {
         public:
             explicit ProcessGuard(pid_t pid) : pid_(pid), released_(false) {}
+
+            // 禁止拷贝
+            ProcessGuard(const ProcessGuard&) = delete;
+            ProcessGuard& operator=(const ProcessGuard&) = delete;
+
+            // 移动构造：窃取资源并将 other 置为安全状态
+            ProcessGuard(ProcessGuard&& other) noexcept
+                : pid_(other.pid_), released_(other.released_)
+            {
+                other.pid_ = -1;
+                other.released_ = true;
+            }
+
+            // 移动赋值：先清理自身资源（如果有），然后窃取 other 并置为安全状态
+            ProcessGuard& operator=(ProcessGuard&& other) noexcept
+            {
+                if (this != &other) {
+                    if (!released_ && pid_ > 0) {
+                        ::kill(pid_, SIGKILL);
+                        int status;
+                        for (;;) {
+                            pid_t r = waitpid(pid_, &status, 0);
+                            if (r == -1) {
+                                if (errno == EINTR) continue;
+                                break;
+                            }
+                            break;
+                        }
+                    }
+
+                    pid_ = other.pid_;
+                    released_ = other.released_;
+
+                    other.pid_ = -1;
+                    other.released_ = true;
+                }
+                return *this;
+            }
 
             ~ProcessGuard()
             {
@@ -173,6 +210,36 @@ namespace deep_oj
         {
         public:
             explicit DirectoryGuard(fs::path p) : path_(std::move(p)), committed_(false) {}
+
+            // 禁止拷贝
+            DirectoryGuard(const DirectoryGuard&) = delete;
+            DirectoryGuard& operator=(const DirectoryGuard&) = delete;
+
+            // 移动构造：窃取 path 并将 other 标记为已提交以防止析构时删除
+            DirectoryGuard(DirectoryGuard&& other) noexcept
+                : path_(std::move(other.path_)), committed_(other.committed_)
+            {
+                other.committed_ = true;
+            }
+
+            // 移动赋值：先清理自身未提交的目录，然后窃取 other
+            DirectoryGuard& operator=(DirectoryGuard&& other) noexcept
+            {
+                if (this != &other) {
+                    if (!committed_) {
+                        std::error_code ec;
+                        if (fs::exists(path_, ec)) {
+                            fs::remove_all(path_, ec);
+                        }
+                    }
+
+                    path_ = std::move(other.path_);
+                    committed_ = other.committed_;
+                    other.committed_ = true;
+                }
+                return *this;
+            }
+
             ~DirectoryGuard()
             {
                 if (committed_) return;
@@ -181,6 +248,7 @@ namespace deep_oj
                     fs::remove_all(path_, ec);
                 }
             }
+
             void commit() { committed_ = true; }
         private:
             fs::path path_;
@@ -197,10 +265,7 @@ namespace deep_oj
         fs::create_directories(root_path, ec);
         if (ec)
         {
-            throw std::runtime_error(std::format(
-                "Sandbox 初始化失败: 无法创建临时目录 '{}'. 原因: {}", 
-                temp_dir_, ec.message()
-            ));
+            throw std::runtime_error("Sandbox 初始化失败: 无法创建根临时目录 '" + temp_dir_ + "': " + ec.message());
         }
     }
 
@@ -224,8 +289,7 @@ namespace deep_oj
         fs::create_directories(request_dir, ec);
         if (ec)
         {
-            result.error_message = std::format("无法创建请求目录 '{}': {}", request_dir.string(), ec.message());
-            return result;
+            result.error_message = "无法创建请求目录 '" + request_dir.string() + "': " + ec.message();
         }
 
         // 2. 写入源代码文件: main.cpp
@@ -234,7 +298,7 @@ namespace deep_oj
             std::ofstream ofs(source_file);
             if (!ofs)
             {
-                result.error_message = std::format("无法打开文件进行写入: {}", source_file.string());
+                result.error_message = "无法打开文件进行写入: " + source_file.string();
                 return result;
             }
             ofs << source_code;
@@ -258,8 +322,8 @@ namespace deep_oj
         fs::permissions(request_dir, fs::perms::owner_all, ec);
         if (ec)
         {
-             result.error_message = std::format("无法设置安全权限: {}", ec.message());
-             return result;
+            result.error_message = "无法设置目录权限: " + ec.message();
+            return result;
         }
 
         // 3. 准备结果路径
@@ -293,7 +357,7 @@ namespace deep_oj
         ProcessGuard proc(pid);
 
         int status;
-        const int COMPILE_TIME_LIMIT_MS = 15000; 
+        const int COMPILE_TIME_LIMIT_MS = g_runner_config.compile_real_limit * 1000; // milliseconds
         auto start_time = std::chrono::steady_clock::now();
         
         while (true)
@@ -320,8 +384,7 @@ namespace deep_oj
             {
                 proc.kill();
                 proc.wait(status);
-                
-                result.error_message = std::format("编译超时 (> {}ms). 可能存在极度复杂的模板展开。", COMPILE_TIME_LIMIT_MS);
+                result.error_message = "编译超时 (> " + std::to_string(COMPILE_TIME_LIMIT_MS) + "ms). 可能存在极度复杂的模板展开。";
                 return result;
             }
             
@@ -349,18 +412,18 @@ namespace deep_oj
                     result.error_message = buffer.str();
                     
                     if (result.error_message.empty()) {
-                        result.error_message = std::format("g++ 异常退出，状态码: {}", exit_code);
+                        result.error_message = "g++ 异常退出，状态码: " + std::to_string(exit_code);
                     }
                 }
                 else
                 {
-                    result.error_message = std::format("编译失败 (g++ 退出码: {})，且无法读取错误日志", exit_code);
+                    result.error_message = "编译失败 (g++ 退出码: " + std::to_string(exit_code) + ")，且无法读取错误日志";
                 }
             }
         }
         else if (WIFSIGNALED(status))
         {
-            result.error_message = std::format("编译器异常终止 (Signal: {})", WTERMSIG(status));
+            result.error_message = "编译器异常终止 (Signal: " + std::to_string(WTERMSIG(status)) + ")";
         }
         else
         {
@@ -460,7 +523,14 @@ namespace deep_oj
                 return result;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Adaptive polling: if process is close to memory limit, poll faster to reduce risk window
+            double mem_ratio = 0.0;
+            if (memory_limit_kb > 0) mem_ratio = usage.ru_maxrss / (double)memory_limit_kb;
+            if (mem_ratio > 0.8) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10)); // High alert mode
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50)); // Normal mode
+            }
         }
 
         double cpu_time_ms = (usage.ru_utime.tv_sec * 1000 + usage.ru_utime.tv_usec / 1000.0) +
@@ -499,8 +569,7 @@ namespace deep_oj
             else if (result.exit_code >= 120) 
             {
                 result.status = SandboxStatus::SYSTEM_ERROR; 
-                result.error_message = std::format("沙箱恐慌 (退出码 {}): {}", 
-                    result.exit_code, GetExitCodeDescription(result.exit_code));
+                result.error_message = "沙箱恐慌 (退出码 " + std::to_string(result.exit_code) + "): " + GetExitCodeDescription(result.exit_code);
             }
             else
             {

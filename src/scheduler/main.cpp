@@ -4,11 +4,11 @@
 #include <vector>
 #include <thread>
 #include <chrono>
-#include <format>
 #include <mutex>
 #include <algorithm>
-#include <random> // 之前漏了
+#include <random>
 #include <atomic>
+#include <sstream> // 引入流用于处理字符串
 
 #include <grpcpp/grpcpp.h>
 #include "judge.grpc.pb.h"
@@ -36,17 +36,13 @@ struct TestCase {
 };
 
 std::mutex g_io_mutex;
+
+// [改写 1] 使用流输出替代 std::format，保留颜色逻辑
 void LogResult(const std::string& name, const std::string& result, bool pass, long time, long mem) {
     std::lock_guard<std::mutex> lock(g_io_mutex);
-    std::cout << std::format("{}[{}] {}{} | Time: {}ms | Mem: {}KB | Case: {}", 
-        pass ? GREEN : RED,
-        pass ? "PASS" : "FAIL",
-        RESET,
-        result,
-        time,
-        mem,
-        name
-    ) << std::endl;
+    std::cout << (pass ? GREEN : RED) << "[" << (pass ? "PASS" : "FAIL") << "] " << RESET
+              << result << " | Time: " << time << "ms | Mem: " << mem << "KB | Case: " << name 
+              << std::endl;
 }
 
 class Scheduler {
@@ -60,7 +56,9 @@ public:
         
         auto now = std::chrono::system_clock::now().time_since_epoch().count();
         int unique_id = g_req_counter.fetch_add(1);
-        std::string req_id = std::format("req_{}_{}_{}", test.name, now, unique_id);
+
+        // [改写 2] 使用 std::to_string 拼接唯一的请求 ID
+        std::string req_id = "req_" + test.name + "_" + std::to_string(now) + "_" + std::to_string(unique_id);
         
         request.set_request_id(req_id);
         request.set_code(test.code);
@@ -85,11 +83,10 @@ public:
             LogResult(test.name, status_str, pass, response.actual_time(), response.actual_memory());
         } else {
             std::lock_guard<std::mutex> lock(g_io_mutex);
-            // [FIXED] Cast error_code to int
-            std::cout << RED << std::format("[RPC Error] {} ({})", 
-                status.error_message(), 
-                static_cast<int>(status.error_code())) // <--- 修复点
-            << RESET << std::endl;
+            // [改写 3] 直接流输出 RPC 错误信息
+            std::cout << RED << "[RPC Error] " << status.error_message() 
+                      << " (" << static_cast<int>(status.error_code()) << ")"
+                      << RESET << std::endl;
         }
     }
 
@@ -98,6 +95,7 @@ private:
 };
 
 int main() {
+    // 确保你的 Worker 也在监听这个 unix socket
     std::string target_str = "unix:///tmp/deep_oj_worker.sock";
     auto channel = grpc::CreateChannel(target_str, grpc::InsecureChannelCredentials());
     Scheduler scheduler(channel);
@@ -116,10 +114,10 @@ int main() { std::vector<char> v(50*1024*1024); std::memset(v.data(), 1, v.size(
 #include <iostream>
 int main() { std::ifstream f("/etc/passwd"); if(f.good()) return 0; return 1; })", 1000, 32768, JudgeStatus::RUNTIME_ERROR },
         { "Security: Network", R"(#include <sys/socket.h>
-int main() { return socket(AF_INET, SOCK_STREAM, 0) > 0 ? 0 : 1; })", 1000, 32768, JudgeStatus::RUNTIME_ERROR } // Socket might succeed but connect fails, let's keep simple
+int main() { return socket(AF_INET, SOCK_STREAM, 0) > 0 ? 0 : 1; })", 1000, 32768, JudgeStatus::RUNTIME_ERROR }
     };
 
-    std::cout << CYAN << "\n>>> 启动并发压力测试 (12 个请求 vs Worker 限流 4) <<<" << RESET << std::endl;
+    std::cout << CYAN << "\n>>> 启动并发压力测试 (12 个请求) <<<" << RESET << std::endl;
     
     std::vector<std::thread> threads;
     for (int i = 0; i < 12; ++i) {

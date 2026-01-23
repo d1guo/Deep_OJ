@@ -1,6 +1,9 @@
 #ifndef DEEP_OJ_SANDBOX_INTERNAL_H
 #define DEEP_OJ_SANDBOX_INTERNAL_H
 
+#include <sys/types.h>
+#include <unistd.h>
+
 namespace deep_oj {
 
     // 定义子进程栈大小: 1MB
@@ -40,6 +43,31 @@ namespace deep_oj {
         ERR_SANDBOX_EXCEPTION = 199, // 沙箱内部异常
         ERR_MOUNT_TMP        = 200  // 挂载 /tmp 失败
     };
+
+    // ... namespace deep_oj ...
+
+    struct GlobalConfig {
+        // 1. 路径
+        char workspace_root[128];
+        char compiler_path[128];
+        
+        // 2. 挂载目录白名单
+        char mount_dirs[16][64];
+        int mount_count;
+
+        // 3. [新增] 挂载文件白名单
+        char mount_files[16][64]; // 同样给16个槽位
+        int mount_file_count;
+
+        // ... (编译限制和安全身份保持不变) ...
+        int compile_cpu_limit;
+        int compile_real_limit;
+        long long compile_mem_limit;
+        uid_t run_uid;
+        gid_t run_gid;
+    };
+
+    extern GlobalConfig g_runner_config;
 
     /**
      * @brief 运行子进程所需的参数 (C 风格结构体)

@@ -17,8 +17,35 @@
 
 namespace deep_oj {
 
-    namespace {d
+    namespace {
         
+        // Ensure the parent directory for a given path exists (e.g., /dev for /dev/null)
+        static void EnsureParentDir(const char* path, const char* base)
+        {
+            char tmp[512];
+            strncpy(tmp, path, sizeof(tmp) - 1);
+            tmp[sizeof(tmp)-1] = '\0';
+            char* p = strrchr(tmp, '/');
+            if (!p) return;
+            *p = '\0'; // tmp is parent dir now
+
+            size_t base_len = strlen(base);
+            if (base_len == 0) return;
+            if (strncmp(tmp, base, base_len) != 0) return;
+
+            size_t len = strlen(tmp);
+            for (size_t i = base_len + 1; i <= len; ++i) {
+                if (tmp[i] == '\0' || tmp[i] == '/') {
+                    char dirbuf[512];
+                    memcpy(dirbuf, tmp, i);
+                    dirbuf[i] = '\0';
+                    if (mkdir(dirbuf, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+                }
+            }
+        }
+
+        // 辅助函数：安全地设置 Rootfs (Pivot Root)
+        // 必须 static，限制在当前编译单元内
         // 辅助函数：安全地设置 Rootfs (Pivot Root)
         // 必须 static，限制在当前编译单元内
         void SetupRootfs(const char* work_dir)
@@ -30,110 +57,69 @@ namespace deep_oj {
             }
 
             // 2. 将工作目录 Bind Mount 到自身 (pivot_root 的要求: 不能是 rootfs)
-            if (mount(work_dir, work_dir, "bind", MS_BIND | MS_REC, nullptr) == -1)
+            if (mount(work_dir, work_dir, nullptr, MS_BIND | MS_REC, nullptr) == -1)
             {
                 _exit(ERR_MOUNT_BIND_SELF);
             }
 
-            // 3. 镜像挂载系统库 (/lib, /usr, /bin)
-            const char* dirs[] = {"/lib", "/lib64", "/usr", "/bin"};
+            // ==========================================
+            // 3. 通用处理：挂载目录 (mount_dirs)
+            // ==========================================
             char target[512];
-            
-            for (const char* dir : dirs)
+            for (int i = 0; i < g_runner_config.mount_count; ++i)
             {
-                if (access(dir, F_OK) != 0) continue;
+                const char* src = g_runner_config.mount_dirs[i];
+                if (access(src, F_OK) != 0) continue; 
 
-                int n = snprintf(target, sizeof(target), "%s%s", work_dir, dir);
+                int n = snprintf(target, sizeof(target), "%s%s", work_dir, src);
                 if (n >= (int)sizeof(target)) _exit(ERR_MKDIR_FAILED);
 
-                // 创建目录 (类似 mkdir -p，假设父目录 work_dir 已存在)
-                if (mkdir(target, 0755) == -1 && errno != EEXIST) {
-                    _exit(ERR_MKDIR_FAILED);
-                }
+                // [核心修复]: 传入 work_dir 作为第二个参数！
+                EnsureParentDir(target, work_dir); 
 
-                // 步骤 A: Bind Mount
-                if (mount(dir, target, nullptr, MS_BIND | MS_REC, nullptr) == -1)
-                {
-                    _exit(ERR_MOUNT_BIND_LIB);
-                }
+                // A. 文件夹占位: mkdir
+                // 现在 /etc 已经由 EnsureParentDir 创建了，mkdir /etc/alternatives 就会成功
+                if (mkdir(target, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
 
-                // 步骤 B: 重新挂载为只读 (Read-Only)
-                if (mount(dir, target, nullptr, MS_BIND | MS_REC | MS_RDONLY | MS_REMOUNT, nullptr) == -1)
-                {
-                    _exit(ERR_REMOUNT_RO);
-                }
+                // B. Bind Mount
+                if (mount(src, target, nullptr, MS_BIND | MS_REC, nullptr) == -1) _exit(ERR_MOUNT_BIND_LIB);
+                // C. Remount RO
+                if (mount(src, target, nullptr, MS_BIND | MS_REC | MS_RDONLY | MS_REMOUNT, nullptr) == -1) _exit(ERR_REMOUNT_RO);
             }
 
-            // 3.5. 挂载 /dev 设备 (防止 std::random_device 崩溃)
-            char dev_path[512];
-            snprintf(dev_path, sizeof(dev_path), "%s/dev", work_dir);
-            if (mkdir(dev_path, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
-
-            const char* devices[] = {"/dev/null", "/dev/zero", "/dev/urandom", "/dev/random"};
-            for (const char* dev : devices)
+            // ==========================================
+            // 4. 通用处理：挂载文件 (mount_files)
+            // ==========================================
+            for (int i = 0; i < g_runner_config.mount_file_count; ++i)
             {
-                if (access(dev, F_OK) != 0) continue;
+                const char* src = g_runner_config.mount_files[i];
+                if (access(src, F_OK) != 0) continue;
 
-                char target[512];
-                snprintf(target, sizeof(target), "%s%s", work_dir, dev);
+                snprintf(target, sizeof(target), "%s%s", work_dir, src);
 
-                // 创建空文件作为挂载点
+                // [核心修复]: 这里也要传入 work_dir！
+                EnsureParentDir(target, work_dir);
+
+                // B. 文件占位: open(O_CREAT) -> touch
                 int fd = open(target, O_CREAT | O_RDWR, 0666);
                 if (fd != -1) close(fd);
                 else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
 
-                // Step A: Bind Mount RW
-                if (mount(dev, target, nullptr, MS_BIND, nullptr) == -1)
-                {
-                    _exit(ERR_MOUNT_BIND_LIB); // 复用错误码
-                }
+                // C. Bind Mount (文件通常不需要 MS_REC)
+                if (mount(src, target, nullptr, MS_BIND, nullptr) == -1) _exit(ERR_MOUNT_BIND_LIB);
+                // D. Remount RO
+                if (mount(src, target, nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY, nullptr) == -1) _exit(ERR_REMOUNT_RO);
             }
 
-            // 3.6. 挂载 /etc/localtime (保持时间正确，必须只读)
-            char etc_path[512];
-            snprintf(etc_path, sizeof(etc_path), "%s/etc", work_dir);
-            if (mkdir(etc_path, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
-            
-            if (access("/etc/localtime", F_OK) == 0) {
-                 char target[512];
-                 snprintf(target, sizeof(target), "%s/etc/localtime", work_dir);
-                 int fd = open(target, O_CREAT | O_RDWR, 0644);
-                 if (fd != -1) close(fd);
-                 else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
-                 // Step A: Bind Mount RW
-                 if (mount("/etc/localtime", target, nullptr, MS_BIND, nullptr) == -1)
-                 {
-                     _exit(ERR_MOUNT_BIND_LIB); // 复用错误码
-                 }
-                 // Step B: Remount Read-Only
-                 if (mount("/etc/localtime", target, nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY, nullptr) == -1)
-                 {
-                     _exit(ERR_REMOUNT_RO); // 用于只读挂载失败
-                 }
-            }
-
-            // 4. Pivot Root (切换根目录)
+            // 5. Pivot Root
             char old_root[512];
             snprintf(old_root, sizeof(old_root), "%s/old_root", work_dir);
             if (mkdir(old_root, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
 
-            // 执行系统调用 syscall(SYS_pivot_root, new_root, put_old)
-            if (syscall(SYS_pivot_root, work_dir, old_root) == -1)
-            {
-                _exit(ERR_PIVOT_ROOT);
-            }
-
-            // 5. 切换当前工作目录到新的根 "/"
-            if (chdir("/") == -1)
-            {
-                 _exit(ERR_CHDIR_NEW_ROOT);
-            }
-
-            // 6. 卸载旧的根目录 (old_root)
-            if (umount2("/old_root", MNT_DETACH) == -1)
-            {
-                _exit(ERR_UMOUNT_OLD);
-            }
+            if (syscall(SYS_pivot_root, work_dir, old_root) == -1) _exit(ERR_PIVOT_ROOT);
+            if (chdir("/") == -1) _exit(ERR_CHDIR_NEW_ROOT);
+            if (umount2("/old_root", MNT_DETACH) == -1) _exit(ERR_UMOUNT_OLD);
+            if (rmdir("old_root") == -1 && errno != EEXIST && errno != EBUSY) {}
         }
 
     } // anonymous namespace
@@ -188,16 +174,14 @@ namespace deep_oj {
 
         // 4. 资源限制 (setrlimit)
         rlimit cpu_limit;
-        cpu_limit.rlim_cur = (args->time_limit_ms + 999) / 1000; // 向上取整秒
-        cpu_limit.rlim_max = cpu_limit.rlim_cur + 1;             // 硬限制多给1秒
+        cpu_limit.rlim_cur = g_runner_config.compile_cpu_limit;
+        cpu_limit.rlim_max = g_runner_config.compile_real_limit; // 硬限制稍微宽一点
         if (setrlimit(RLIMIT_CPU, &cpu_limit) == -1) _exit(ERR_RLIMIT_CPU);
 
+        // [软硬限优化]: OS 层放宽内存限制，增加缓冲，防止 C++ 在堆分配瞬间抛出 bad_alloc
         rlimit mem_limit;
-        // [软硬限优化]: OS 层放宽内存限制，增加 256MB 缓冲，防止 C++ 在堆分配瞬间抛出 bad_alloc
-        // 由父进程在运行时实时检测 ru_maxrss 来判定 MLE（软限/硬限策略）
-        long long hard_mem_limit = (static_cast<long long>(args->memory_limit_kb) + 1024 * 256) * 1024L; 
-        mem_limit.rlim_cur = hard_mem_limit;
-        mem_limit.rlim_max = hard_mem_limit;
+        mem_limit.rlim_cur = g_runner_config.compile_mem_limit;
+        mem_limit.rlim_max = g_runner_config.compile_mem_limit;
         if (setrlimit(RLIMIT_AS, &mem_limit) == -1) _exit(ERR_RLIMIT_MEMORY);
 
         rlimit stack_limit;
@@ -224,8 +208,8 @@ namespace deep_oj {
 
         // 5. 降权 (nobody)
         if (chdir("/") != 0) _exit(ERR_CHDIR_FAILED);
-        if (setgid(65534) != 0) _exit(ERR_SETGID_FAILED);
-        if (setuid(65534) != 0) _exit(ERR_SETUID_FAILED);
+        if (setgid(g_runner_config.run_gid) != 0) _exit(ERR_SETGID_FAILED);
+        if (setuid(g_runner_config.run_uid) != 0) _exit(ERR_SETUID_FAILED);
         
         // 6. 执行用户程序 (execle)
         char new_exe[512];
@@ -244,7 +228,8 @@ namespace deep_oj {
     }
 
     int CompileChildFn(void* arg) {
-        auto* args = (CompileArgs*)(arg);
+        // 1. 将参数重命名为 config，避免与后面的 argv 冲突
+        auto* config = (CompileArgs*)(arg);
 
         // 1. [安全] 关闭文件描述符
         #ifdef __NR_close_range
@@ -255,7 +240,7 @@ namespace deep_oj {
 
         // 2. 准备 work_dir
         char work_dir[256];
-        strncpy(work_dir, args->source_path, sizeof(work_dir)-1);
+        strncpy(work_dir, config->source_path, sizeof(work_dir)-1);
         work_dir[sizeof(work_dir)-1] = '\0';
         char* p = strrchr(work_dir, '/');
         if (p) *p = '\0';
@@ -263,73 +248,70 @@ namespace deep_oj {
         // 3. [隔离] Setup Rootfs
         SetupRootfs(work_dir);
 
-        // 4. [编译器需求] 挂载 /tmp (tmpfs) 供 g++ 生成临时文件
+        // 4. [编译器需求] 挂载 /tmp
         if (mkdir("/tmp", 0777) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
-        // 挂载 tmpfs, 限制 128MB
         if (mount("tmpfs", "/tmp", "tmpfs", 0, "size=128m") == -1) {
-             _exit(ERR_MOUNT_TMP);
+            _exit(ERR_MOUNT_TMP);
         }
 
-        // 5. 重定向 stderr 到日志文件
-        // 注意: Pivot Root 后路径变了
-        const char* log_filename = strrchr(args->log_path, '/');
-        log_filename = log_filename ? log_filename + 1 : args->log_path;
+        // 5. 重定向 stderr
+        const char* log_filename = strrchr(config->log_path, '/');
+        log_filename = log_filename ? log_filename + 1 : config->log_path;
 
         char new_log_path[512];
         snprintf(new_log_path, sizeof(new_log_path), "/%s", log_filename);
 
         int log_fd = open(new_log_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (log_fd != -1) {
-            dup2(log_fd, STDERR_FILENO); // 编译错误输出到 stderr
+            dup2(log_fd, STDERR_FILENO);
             close(log_fd);
         } else {
-             _exit(ERR_OPEN_OUTPUT);
+            _exit(ERR_OPEN_OUTPUT);
         }
 
-        // 6. [资源限制] 给编译器较宽松的限制
-        rlimit cpu_lim = { 10, 15 }; // 10s 软限制
-        setrlimit(RLIMIT_CPU, &cpu_lim);
+        // 6. [资源限制] 使用配置中的值，失败则直接退出
+        rlimit cpu_lim;
+        cpu_lim.rlim_cur = g_runner_config.compile_cpu_limit;
+        cpu_lim.rlim_max = g_runner_config.compile_real_limit;
+        if (setrlimit(RLIMIT_CPU, &cpu_lim) == -1) _exit(ERR_RLIMIT_CPU);
 
-        rlimit mem_lim = { 1024L * 1024 * 1024, 1024L * 1024 * 1024 }; // 1GB 内存
-        setrlimit(RLIMIT_AS, &mem_lim);
+        rlimit mem_lim;
+        mem_lim.rlim_cur = (rlim_t)g_runner_config.compile_mem_limit;
+        mem_lim.rlim_max = (rlim_t)g_runner_config.compile_mem_limit;
+        if (setrlimit(RLIMIT_AS, &mem_lim) == -1) _exit(ERR_RLIMIT_MEMORY);
 
-        rlimit fsize_lim = { 64 * 1024 * 1024, 64 * 1024 * 1024 }; // 64MB 输出限制
-        setrlimit(RLIMIT_FSIZE, &fsize_lim);
+        // 7. [安全] 降权，使用配置中的 UID/GID
+        if (setgid(g_runner_config.run_gid) != 0) _exit(ERR_SETGID_FAILED);
+        if (setuid(g_runner_config.run_uid) != 0) _exit(ERR_SETUID_FAILED);
 
-        // 7. [安全] 降权
-        if (setgid(65534) != 0) _exit(ERR_SETGID_FAILED);
-        if (setuid(65534) != 0) _exit(ERR_SETUID_FAILED);
-
-        // 8. 执行 g++
-        const char* src_filename = strrchr(args->source_path, '/');
-        src_filename = src_filename ? src_filename + 1 : args->source_path;
+        // 8. 准备 g++ 执行路径及参数，确保使用配置中的 compiler_path
+        const char* src_filename = strrchr(config->source_path, '/');
+        src_filename = src_filename ? src_filename + 1 : config->source_path;
         char new_src_path[512];
         snprintf(new_src_path, sizeof(new_src_path), "/%s", src_filename);
 
-        const char* exe_filename = strrchr(args->exe_path, '/');
-        exe_filename = exe_filename ? exe_filename + 1 : args->exe_path;
+        const char* exe_filename = strrchr(config->exe_path, '/');
+        exe_filename = exe_filename ? exe_filename + 1 : config->exe_path;
         char new_exe_path[512];
         snprintf(new_exe_path, sizeof(new_exe_path), "/%s", exe_filename);
 
-        char* const envp[] = { (char*)"PATH=/bin:/usr/bin", nullptr };
-        
-        // TODO
-        // 目前编译速度受限于 I/O 和头文件解析。
-        // 未来的优化方向：
-        // 1. 在宿主机 /usr/local/include/deep_oj_pch/ 生成 stdc++.h.gch
-        // 2. mount --bind 该目录到沙箱内
-        // 3. g++ 参数添加 -I /usr/local/include/deep_oj_pch
-        // 目前先加上 -pipe (使用管道代替临时文件) 略微提速
+        char* const compiler_argv[] =
+        {
+            (char*)g_runner_config.compiler_path,
+            (char*)"-std=c++20",
+            (char*)"-O2",
+            (char*)"-pipe",
+            (char*)new_src_path,
+            (char*)"-o",
+            (char*)new_exe_path,
+            nullptr
+        };
 
-        execlp("g++", "g++", 
-               "-std=c++20", "-O2", "-pipe",
-               new_src_path, "-o", new_exe_path, 
-               nullptr, envp);
+        // 执行编译器
+        execv(compiler_argv[0], compiler_argv);
 
-        // 错误处理
-        const char* msg = "Failed to launch g++: ";
-        write(STDERR_FILENO, msg, strlen(msg));
-        write(STDERR_FILENO, strerror(errno), strlen(strerror(errno)));
+        // 如果执行到这里，说明失败了
+        perror("execv compiler failed");
         _exit(ERR_EXEC_FAILED);
         return 0;
     }

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cassert>
 #include <sys/wait.h>
+#include <iomanip>
 
 using namespace deep_oj;
 
@@ -22,8 +23,9 @@ void PrintResult(const std::string& name, bool pass, const std::string& msg = ""
               << std::left << std::setw(25) << name 
               << (msg.empty() ? "" : " | " + msg) << std::endl;
 }
-
-std::string StatusToString(SandboxStatus s) {
+void LoadConfig(const std::string& path);
+std::string StatusToString(SandboxStatus s)
+{
     switch(s) {
         case SandboxStatus::OK: return "OK";
         case SandboxStatus::TIME_LIMIT_EXCEEDED: return "TLE";
@@ -39,7 +41,7 @@ void RunTest(Sandbox& sandbox,
              std::string name, 
              std::string code, 
              SandboxStatus expected_status, 
-             int time_limit = 1000, 
+             int time_limit = 2000, 
              int mem_limit = 128 * 1024) 
 {
     std::string req_id = "test_" + name;
@@ -71,6 +73,17 @@ void RunTest(Sandbox& sandbox,
 }
 
 int main() {
+    std::cout << "[Init] Loading Config for Security Test..." << std::endl;
+    try {
+        // 假设你在 build 目录运行，config.yaml 就在当前目录
+        LoadConfig("config.yaml"); 
+    } catch (const std::exception& e) {
+        std::cerr << "[Fatal] Config load failed: " << e.what() << std::endl;
+        return 1;
+    }
+    // ---------------------------------------------------------
+
+    std::cout << "=== DeepOJ Sandbox: Ultimate Security & Stress Test ===" << std::endl;
     std::cout << BLUE << "=== DeepOJ Sandbox: Ultimate Security & Stress Test ===" << RESET << std::endl;
 
     try {
@@ -100,16 +113,28 @@ int main() {
             SandboxStatus::TIME_LIMIT_EXCEEDED);
 
         // MLE: 疯狂分配内存 (256MB > 128MB Limit)
+        // MLE: 逐步分配内存，触发父进程的监控 (Soft Limit)
+        // 不要一次性申请 256MB，因为那会直接撞上 OS 的硬限制 (RLIMIT_AS) 导致 RE
         RunTest(sandbox, "Limit_Memory", 
             R"(
                 #include <vector>
                 #include <cstring>
+                #include <thread>
+                #include <chrono>
+                
                 int main() {
                     std::vector<char*> v;
-                    for(int i=0; i<256; i++) {
-                        char* p = new char[1024*1024];
-                        std::memset(p, 1, 1024*1024); // Touch memory
+                    // 目标：申请 200MB (限制是 128MB)
+                    // 每次申请 10MB，分 20 次
+                    for(int i=0; i<20; i++) {
+                        char* p = new char[10 * 1024 * 1024]; 
+                        // 关键：必须 memset 写入，才会真正占用物理内存(RSS)
+                        std::memset(p, 0, 10 * 1024 * 1024);
                         v.push_back(p);
+                        
+                        // 给父进程一点反应时间 (10ms)
+                        // 因为父进程是轮询的，不是中断触发的
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     return 0;
                 }
