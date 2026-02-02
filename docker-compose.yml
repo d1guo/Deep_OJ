@@ -1,0 +1,62 @@
+services:
+  # 1. 缓存数据库
+  redis:
+    image: redis:alpine
+    container_name: oj-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - deep-oj-net
+
+  # 2. 工作节点 (苦力) - 优先启动，因为调度器依赖它
+  worker:
+    build: .
+    image: deep-oj:v1
+    container_name: oj-worker
+    # 修正路径：加上 build/ 前缀
+    command: ./build/oj_worker
+    privileged: true 
+    ports:
+      - "50051:50051"
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      - deep-oj-net
+
+  # 3. 调度器 (大脑)
+  scheduler:
+    build: .
+    image: deep-oj:v1
+    container_name: oj-scheduler
+    # 修正路径：加上 build/ 前缀
+    command: ./build/oj_scheduler
+    ports:
+      - "50052:50052"
+    environment:
+      - WORKER_ADDR=oj-worker:50051
+    networks:
+      - deep-oj-net
+    depends_on:
+      - worker
+
+  # 4. API Server (大门)
+  api:
+    build: .
+    image: deep-oj:v1
+    container_name: oj-api
+    # 修正路径：加上 build/ 前缀，注意文件名是 oj_server
+    command: ./build/oj_server
+    ports:
+      - "18080:18080"
+    environment:
+      - REDIS_HOST=oj-redis
+      - SCHEDULER_ADDR=oj-scheduler:50052
+    networks:
+      - deep-oj-net
+    depends_on:
+      - redis
+      - scheduler
+
+networks:
+  deep-oj-net:
+    driver: bridge

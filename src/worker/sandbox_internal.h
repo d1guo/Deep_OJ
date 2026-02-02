@@ -47,26 +47,34 @@ namespace deep_oj {
     // ... namespace deep_oj ...
 
     struct GlobalConfig {
-        // 1. 路径
-        char workspace_root[128];
-        char compiler_path[128];
-        
-        // 2. 挂载目录白名单
-        char mount_dirs[16][64];
-        int mount_count;
+        // --- [新增] Server 配置 ---
+        int server_port;       // gRPC 监听端口
+        int parallelism;       // 最大并发任务数
 
-        // 3. [新增] 挂载文件白名单
-        char mount_files[16][64]; // 同样给16个槽位
+        // --- 原有配置 ---
+        char workspace_root[256];
+        char compiler_path[256];
+        
+        // 挂载目录
+        char mount_dirs[16][256];
+        int mount_count;
+        
+        // 挂载文件
+        char mount_files[16][256];
         int mount_file_count;
 
-        // ... (编译限制和安全身份保持不变) ...
+        // 编译限制
         int compile_cpu_limit;
         int compile_real_limit;
         long long compile_mem_limit;
+        
+        // 输出文件限制（字节）
+        long long max_output_size;
+
+        // 安全限制
         uid_t run_uid;
         gid_t run_gid;
     };
-
     extern GlobalConfig g_runner_config;
 
     /**
@@ -76,6 +84,9 @@ namespace deep_oj {
         char exe_path[256];     // 可执行文件路径
         int time_limit_ms;      // 时间限制 (毫秒)
         int memory_limit_kb;    // 内存限制 (KB)
+        int input_fd;  // 对应 stdin
+        int output_fd; // 对应 stdout
+        int error_fd;  // 对应 stderr
     };
 
     /**

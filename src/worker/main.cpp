@@ -1,164 +1,205 @@
 #include <iostream>
-#include <thread>
-#include <chrono>
 #include <memory>
-#include <string> // 显式引入 string
-#include <semaphore> 
-#include <sys/stat.h>
-#include <unistd.h>
-#include <grpcpp/grpcpp.h>
-#include "judge.grpc.pb.h"
-#include "sandbox.h"
+#include <string>
+#include <thread>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <filesystem>
+#include <algorithm> // for mismatch
 
+#include <grpcpp/grpcpp.h>
+#include <sw/redis++/redis++.h>
+#include <nlohmann/json.hpp>
+
+#include "judge.grpc.pb.h" 
+#include "sandbox.h"       
+
+using json = nlohmann::json;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
-using namespace deep_oj;
+namespace fs = std::filesystem;
 
-// 声明 LoadConfig（在 config.cpp 中定义）
-void LoadConfig(const std::string& path);
+// 全局 Redis 连接
+std::shared_ptr<sw::redis::Redis> g_redis = nullptr;
 
-// 全局信号量，限制最大并发数为 4 (C++20 特性，g++ 12 支持)
-static std::counting_semaphore<4> active_tasks_sem(4);
+// ---------------------------------------------------------
+// 🛠️ 判题核心：比对函数 (Diff / Check)
+// ---------------------------------------------------------
+// 读取文件全部内容并移除行末空格和文末换行 (Trim)
+std::string read_and_trim(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.is_open()) return "";
 
-// RAII 风格的信号量守卫
-struct SemaphoreGuard {
-    std::counting_semaphore<4>& sem;
-    SemaphoreGuard(std::counting_semaphore<4>& s) : sem(s) { 
-        sem.acquire(); 
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string s = ss.str();
+
+    // 简单实现：移除末尾空白
+    while (!s.empty() && std::isspace(s.back())) {
+        s.pop_back();
     }
-    ~SemaphoreGuard() { 
-        sem.release(); 
-    }
-};
+    // 实际生产中通常需要逐行 Trim Right，这里做个简化版
+    return s;
+}
 
-class WorkerImpl final : public JudgeService::Service
-{
-    Status Submit(ServerContext* context, const SubmitRequest* request, SubmitResponse* response) override
+// 返回 true 表示 AC，false 表示 WA
+bool check_output(const std::string& user_out_path, const std::string& std_ans_path) {
+    // 如果没有标准答案文件，甚至无法判题（视为系统错误或默认通过，视业务而定）
+    if (!fs::exists(std_ans_path)) return false; 
+
+    std::string user = read_and_trim(user_out_path);
+    std::string standard = read_and_trim(std_ans_path);
+
+    return user == standard;
+}
+
+// ---------------------------------------------------------
+// 🧵 后台工作线程：编译 -> 运行 -> 判题 -> 上报
+// ---------------------------------------------------------
+void process_task(deep_oj::TaskRequest task) {
+    std::string job_id = task.job_id();
+    std::cout << "[Worker] 🔥 开始后台处理: " << job_id << std::endl;
+
+    deep_oj::Sandbox sandbox;
+    json result_json;
+    result_json["job_id"] = job_id;
+
+    // 1. 准备文件 (Source Code)
+    // -------------------------------------------------
+    std::string src_filename = "solution.cpp"; // 目前写死 C++
     {
-        // 阻塞等待资源可用
-        SemaphoreGuard guard(active_tasks_sem);
+        std::ofstream out(src_filename, std::ios::binary);
+        out << task.code(); // bytes 自动转 string
+    }
 
-        // [改写 1] 使用流式输出替代 format
-        std::cout << "[Worker] 收到请求 ID: " << request->request_id() << std::endl;
+    // 2. 编译 (Compile)
+    // -------------------------------------------------
+    // 假设 Compile 接口：Compile(job_id, source_code) -> 返回 exe_path
+    deep_oj::CompileResult cres = sandbox.Compile(job_id, task.code());
 
-        response->set_request_id(request->request_id());
+    if (cres.status != deep_oj::JudgeStatus::ACCEPTED) {
+        result_json["status"] = "Compile Error";
+        result_json["error"] = cres.error_message;
+        goto REPORT; // 跳转到上报环节
+    }
 
-        if (request->language() != Language::CPP)
-        {
-            std::cout << "[Worker] 错误: 收到不支持的语言类型" << std::endl;
-            response->set_status(JudgeStatus::SYSTEM_ERROR);
-            response->set_error_message("Worker 目前仅支持 C++ (Language::CPP)");
-            return Status::OK;
+    // 3. 运行 (Run) & 判题 (Check)
+    // -------------------------------------------------
+    {
+        // 假设这里是单测试点逻辑。如果是多测，这里套个 for 循环。
+        // 测试数据路径 (通常需挂载或配置，这里假设在当前目录 data/ 下)
+        // 假设 Proto 里传了 problem_id，这里根据 problem_id 找数据
+        // std::string input_file = "data/" + task.problem_id() + "/1.in";
+        // std::string ans_file = "data/" + task.problem_id() + "/1.out";
+        
+        // MVP 阶段我们先随便造个简单的输入输出，或者让 Sandbox::Run 自己处理重定向
+        std::string input_data = "1 2"; // 假设题目是 A+B
+        // 实际项目里，Sandbox::Run 应该接受 input_file 路径，重定向 stdin
+        
+        // 运行沙箱
+        deep_oj::RunResult rres = sandbox.Run(
+            cres.exe_path, 
+            task.time_limit(), 
+            task.memory_limit()
+        );
+
+        result_json["time_used"] = rres.time_used;
+        result_json["memory_used"] = rres.memory_used;
+
+        if (rres.status == deep_oj::JudgeStatus::ACCEPTED) {
+            // 沙箱运行没挂，现在检查答案对不对
+            // 假设 sandbox 把用户输出写到了 "user.out"
+            // 假设标准答案是 "3" (对应 1+2)
+            // 实际上你需要去读取 std_ans_file
+            
+            // 为了跑通流程，我们先写死一个 check 逻辑，或者假设你本地有 "1.out"
+            // bool is_ac = check_output("user.out", "data/1.out");
+            
+            // 【MVP 模拟】假设只有不超时不 RE 就算 AC
+            result_json["status"] = "Accepted"; 
+            result_json["judge_result"] = 1; // AC
+        } else {
+            // TLE, MLE, RE
+            if (rres.status == deep_oj::JudgeStatus::TIME_LIMIT_EXCEEDED) result_json["status"] = "Time Limit Exceeded";
+            else if (rres.status == deep_oj::JudgeStatus::MEMORY_LIMIT_EXCEEDED) result_json["status"] = "Memory Limit Exceeded";
+            else result_json["status"] = "Runtime Error";
         }
+    }
 
-        try
-        {
-            Sandbox sandbox("/tmp/deep_oj_workspace");
+REPORT:
+    // 4. 结果上报 (Report to Redis)
+    // -------------------------------------------------
+    if (g_redis) {
+        try {
+            std::string res_str = result_json.dump();
+            
+            // A. 写当前结果
+            g_redis->set("result:" + job_id, res_str);
+            g_redis->expire("result:" + job_id, 3600);
 
-            struct RequestGuard {
-                Sandbox& sb;
-                std::string id;
-                ~RequestGuard() { 
-                    sb.Cleanup(id);
-                    std::cout << "[Worker] Cleaned up request " << id << std::endl; 
-                }
-            } request_guard(sandbox, request->request_id());
-
-            std::cout << "[Worker] Sandbox 初始化完成，开始编译..." << std::endl;
-
-            CompileResult compile_res = sandbox.Compile(request->request_id(), request->code());
-
-            if (compile_res.success)
-            {
-                // [改写 2] 编译成功的日志
-                std::cout << "[Worker] 编译成功: " << compile_res.exe_path << std::endl;
-                
-                std::cout << "[Worker] 开始运行 (Run)..." << std::endl;
-                RunResult run_res = sandbox.Run(
-                    compile_res.exe_path, 
-                    request->time_limit(), 
-                    request->memory_limit()
-                );
-
-                response->set_actual_time(run_res.time_used);
-                response->set_actual_memory(run_res.memory_used);
-
-                if (run_res.status == SandboxStatus::OK)
-                {
-                     response->set_status(JudgeStatus::ACCEPTED);
-                     std::cout << "[Worker] 运行结束: ACCEPTED" << std::endl;
-                }
-                else if (run_res.status == SandboxStatus::TIME_LIMIT_EXCEEDED)
-                {
-                    response->set_status(JudgeStatus::TIME_LIMIT_EXCEEDED);
-                    std::cout << "[Worker] 运行结束: TLE" << std::endl;
-                }
-                else if (run_res.status == SandboxStatus::MEMORY_LIMIT_EXCEEDED)
-                {
-                    response->set_status(JudgeStatus::MEMORY_LIMIT_EXCEEDED);
-                    std::cout << "[Worker] 运行结束: MLE" << std::endl;
-                }
-                else if (run_res.status == SandboxStatus::RUNTIME_ERROR)
-                {
-                    response->set_status(JudgeStatus::RUNTIME_ERROR);
-                    // [改写 3] 错误消息拼接
-                    response->set_error_message("运行时错误 (退出码: " + std::to_string(run_res.exit_code) + ")");
-                    std::cout << "[Worker] 运行结束: RE" << std::endl;
-                }
-                else
-                {
-                    response->set_status(JudgeStatus::SYSTEM_ERROR);
-                    if (!run_res.error_message.empty()) {
-                        response->set_error_message(run_res.error_message);
-                    } else {
-                        response->set_error_message("执行过程中发生沙箱系统错误");
-                    }
-                     std::cout << "[Worker] 运行结束: SE (" << run_res.error_message << ")" << std::endl;
-                }
+            // B. 写查重缓存 (只有非系统错误且有 cache_key 时)
+            if (task.has_cache_key() && !task.cache_key().empty() && result_json["status"] != "System Error") {
+                g_redis->set(task.cache_key(), res_str);
+                g_redis->expire(task.cache_key(), 86400); // 缓存一天
+                std::cout << "[Worker] 📝 更新缓存: " << task.cache_key() << std::endl;
             }
-            else
-            {
-                std::cout << "[Worker] 编译失败!" << std::endl;
-                response->set_status(JudgeStatus::COMPILE_ERROR);
-                response->set_error_message(compile_res.error_message);
-            }
-        }
-        catch (const std::exception& e)
-        {
-            std::cerr << "[Worker] 发生严重异常: " << e.what() << std::endl;
-            response->set_status(JudgeStatus::SYSTEM_ERROR);
-            // [改写 4] 内部异常消息拼接
-            response->set_error_message("Worker 内部异常: " + std::string(e.what()));
-        }
 
+            // C. 发送完成通知 (Fast Path)
+            g_redis->publish("job_done", job_id);
+            std::cout << "[Worker] ✅ 完成: " << job_id << " (" << result_json["status"] << ")" << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cerr << "❌ [Worker] Redis 操作失败: " << e.what() << std::endl;
+        }
+    }
+}
+
+// ---------------------------------------------------------
+// gRPC 服务实现 (只负责接单)
+// ---------------------------------------------------------
+class WorkerServiceImpl final : public deep_oj::JudgeService::Service {
+    Status ExecuteTask(ServerContext* context, const deep_oj::TaskRequest* request,
+                  deep_oj::TaskResponse* response) override {
+        
+        // 1. 收到请求，打印日志
+        std::cout << "[Worker] 收到调度请求 (ID: " << request->job_id() << ")" << std::endl;
+
+        // 2. 启动分离线程，立刻干活
+        // 注意：这里没有用信号量控制并发，依靠 Scheduler 的负载均衡
+        // 如果要做本地保护，可以在这里加个 atomic 计数器，超过 100 直接 return Status::RESOURCE_EXHAUSTED
+        std::thread(process_task, *request).detach();
+
+        // 3. 立即回复 OK
         return Status::OK;
     }
 };
 
-void RunServer()
-{
+int main(int argc, char** argv) {
+    // 1. Redis 连接
+    try {
+        const char* env_redis = std::getenv("REDIS_HOST");
+        std::string redis_host = env_redis ? env_redis : "127.0.0.1";
+        g_redis = std::make_shared<sw::redis::Redis>("tcp://" + redis_host + ":6379");
+        std::cout << "[Worker] Redis 连接成功" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ [Fatal] Redis 连接失败" << std::endl;
+        return 1;
+    }
+
+    // 2. 启动 gRPC Server
     std::string server_address("0.0.0.0:50051");
-    WorkerImpl service;
+    WorkerServiceImpl service;
 
     ServerBuilder builder;
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
     
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    
-    if (chmod("/tmp/deep_oj_worker.sock", 0666) != 0) {
-        perror("chmod failed");
-    }
-
-    std::cout << "[Worker] 服务已启动，监听地址: " << server_address << std::endl;
+    std::cout << "🚀 [Worker] 启动监听: " << server_address << std::endl;
     server->Wait();
-}
 
-int main()
-{
-    LoadConfig("config.yaml");
-    RunServer();
     return 0;
 }

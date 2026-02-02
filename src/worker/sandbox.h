@@ -68,7 +68,12 @@ namespace deep_oj
          * @param memory_limit_kb 内存限制 (KB)
          * @return RunResult 运行结果
          */
-        RunResult Run(const std::string& exe_path, int time_limit_ms, int memory_limit_kb);
+        RunResult Run(const std::string& exe_path, 
+                      const std::string& stdin_path,
+                      const std::string& stdout_path,
+                      const std::string& stderr_path,
+                      int time_limit_ms, 
+                      int memory_limit_kb);
 
         /**
          * @brief 清理请求临时目录

@@ -1,68 +1,79 @@
-# ===================================================
-# Stage 1: 构建环境 (Builder)
-# ===================================================
+# Multi-stage Dockerfile for Deep-OJ
+
+# ============================
+# Stage 1: Builder (编译环境)
+# ============================
 FROM ubuntu:22.04 AS builder
-
-# 1. 防止 apt 交互界面卡住
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 2. 安装编译工具和依赖库 (一次性装全)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    git \
-    libgrpc++-dev \
-    libprotobuf-dev \
+# 1. 安装编译依赖
+
+RUN sed -i 's/[a-z]\+.ubuntu.com/mirror.nju.edu.cn/g' /etc/apt/sources.list && \
+    export http_proxy="http://192.168.0.103:7890" && \
+    export https_proxy="http://192.168.0.103:7890" && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential cmake g++ make pkg-config git wget ca-certificates \
+    libgrpc++-dev libprotobuf-dev protobuf-compiler \
     protobuf-compiler-grpc \
-    libyaml-cpp-dev \
+    libabsl-dev libc-ares-dev \
+    libhiredis-dev libssl-dev libyaml-cpp-dev \
+    libboost-all-dev \
+    nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 准备工作目录
-WORKDIR /app
+# 🔥 核心补丁：确保 gRPC 插件绝对可用且可执行
+RUN ln -s /usr/bin/protoc-gen-grpc-cpp /usr/bin/grpc_cpp_plugin || true && \
+    chmod +x /usr/bin/grpc_cpp_plugin
 
-# 4. 复制源码
-COPY . .
+WORKDIR /workspace
 
-# 5. 编译项目
-# -B build: 指定构建目录
-# -D CMAKE_BUILD_TYPE=Release: 开启优化
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build build --parallel $(nproc)
+# 2. 编译 redis-plus-plus (保持 C++20 一致性)
+RUN git clone https://github.com/sewenew/redis-plus-plus.git && \
+    cd redis-plus-plus && \
+    mkdir build && cd build && \
+    cmake -DREDIS_PLUS_PLUS_BUILD_TEST=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 .. && \
+    make -j"$(nproc)" && \
+    make install && \
+    cd ../.. && rm -rf redis-plus-plus
 
-# ===================================================
-# Stage 2: 生产环境 (Runtime)
-# ===================================================
-FROM ubuntu:22.04
+# 3. 编译项目代码
+COPY . /workspace
+# 保持 rm -rf build 以清理潜在的本地污染
+RUN rm -rf build && mkdir -p build && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j"$(nproc)"
 
+# ============================
+# Stage 2: Runtime (运行环境)
+# ============================
+FROM ubuntu:22.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 1. 安装运行时必须的库 (Runtime Deps)
-# 注意：必须安装 g++，因为沙箱里需要调用它来编译用户代码！
-RUN apt-get update && apt-get install -y \
-    libgrpc++1 \
-    libprotobuf23 \
-    libyaml-cpp0.7 \
-    g++ \
+# 4. 安装运行时必要的动态库 (注意：去掉了 builder 专用的开发工具)
+# - g++: Worker 运行用户代码必选
+# - libgrpc++ / libyaml-cpp: 确保程序能加载 .so 文件
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates g++ \
+    libgrpc++-dev libprotobuf-dev \
+    libabsl-dev \
+    libhiredis-dev libssl-dev libyaml-cpp-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 创建非特权用户 (nobody 通常 ID 是 65534，Ubuntu 自带，不用创建)
-# 只要确保 config.yaml 里写的是 65534 即可
+WORKDIR /workspace
 
-# 3. 准备工作目录
-WORKDIR /app
+# 5. 从 Builder 搬运手工编译的库 (Redis++)
+COPY --from=builder /usr/local/lib/libredis++* /usr/local/lib/
+COPY --from=builder /usr/local/include/sw /usr/local/include/sw
+# 刷新动态库缓存
+RUN ldconfig
 
-# 4. 从构建层复制二进制文件
-COPY --from=builder /app/build/worker /app/worker
-# 同时也把测试程序拷进来，方便在容器里自测
-COPY --from=builder /app/build/security_test /app/security_test
+# 6. 搬运编译好的二进制文件和配置
+COPY --from=builder /workspace/build /workspace/build
+COPY --from=builder /workspace/config.yaml /workspace/config.yaml
 
-# 5. 复制配置文件 (关键！)
-# CMake 里的 configure_file 只在 build 时生效，
-# 这里我们直接把源码里的 config.yaml 拷进去，或者拷 build 生成的也行
-COPY --from=builder /app/build/config.yaml /app/config.yaml
+# 暴露常用的 API 和 gRPC 端口
+EXPOSE 8080 18080 50051 50052
 
-# 6. 暴露 gRPC 端口 (虽然你是 Unix Socket，但保留端口以防未来改 TCP)
-EXPOSE 50051
-
-# 7. 启动命令
-CMD ["./worker"]
+# 保持默认进入 bash，由 docker-compose 指定具体运行哪个程序
+CMD ["/bin/bash"]

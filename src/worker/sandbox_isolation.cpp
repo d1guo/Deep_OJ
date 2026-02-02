@@ -128,6 +128,47 @@ namespace deep_oj {
     {
         auto* args = (RunChildArgs*)(arg);
 
+        // -----------------------------------------------------
+        // 1. IO 重定向 (最先执行)
+        // -----------------------------------------------------
+        // 此时我们还在父进程的文件系统命名空间中，父进程传来的 FD 是有效的。
+        
+        // (A) 设置 Stdin
+        if (args->input_fd >= 0) {
+            if (dup2(args->input_fd, STDIN_FILENO) == -1) _exit(ERR_DUP2);
+        } else {
+            // 如果没有输入，接 /dev/null 防止程序读卡死
+            int null_fd = open("/dev/null", O_RDWR);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDIN_FILENO);
+                close(null_fd);
+            } else _exit(ERR_OPEN_OUTPUT);
+        }
+
+        // (B) 设置 Stdout
+        if (args->output_fd >= 0) {
+            if (dup2(args->output_fd, STDOUT_FILENO) == -1) _exit(ERR_DUP2);
+        } else {
+            int null_fd = open("/dev/null", O_RDWR);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDOUT_FILENO);
+                close(null_fd);
+            } else _exit(ERR_OPEN_OUTPUT);
+        }
+
+        // (C) 设置 Stderr
+        if (args->error_fd >= 0) {
+            if (dup2(args->error_fd, STDERR_FILENO) == -1) _exit(ERR_DUP2);
+        } else {
+            // 默认丢弃 stderr
+            int null_fd = open("/dev/null", O_RDWR);
+            if (null_fd >= 0) {
+                dup2(null_fd, STDERR_FILENO);
+                close(null_fd);
+            } else _exit(ERR_OPEN_OUTPUT);
+        }
+
+        
         // [安全]: 关闭除 0,1,2 以外的所有文件描述符
         #ifdef __NR_close_range
             syscall(__NR_close_range, 3, ~0U, 0);
@@ -135,42 +176,43 @@ namespace deep_oj {
             for (int fd = 3; fd < 256; ++fd) close(fd); 
         #endif
 
-        // 打开 /dev/null 备用
-        int null_fd = open("/dev/null", O_RDWR);
-        if (null_fd == -1) _exit(ERR_OPEN_OUTPUT);
-
-        // 准备 work_dir (字符串操作)
+        
+        // -----------------------------------------------------
+        // 3. 准备工作区路径
+        // -----------------------------------------------------
         char work_dir[256];
         strncpy(work_dir, args->exe_path, sizeof(work_dir) - 1);
         work_dir[sizeof(work_dir)-1] = '\0';
         
-        // 截断路径以获取目录名 (例如 /tmp/xxx/main -> /tmp/xxx)
         char* last_slash = strrchr(work_dir, '/');
         if (last_slash) *last_slash = '\0'; 
-        else _exit(ERR_CHDIR_FAILED); // 必须是绝对路径
+        else _exit(ERR_CHDIR_FAILED);
 
-        // 1. 设置 Rootfs / Pivot Root
+        // -----------------------------------------------------
+        // 4. 构建隔离环境 (Rootfs)
+        // -----------------------------------------------------
         SetupRootfs(work_dir);
 
-        // 2. 挂载 /proc (ps 等命令需要)
+       // -----------------------------------------------------
+        // 5. 挂载 /proc (只读)
+        // -----------------------------------------------------
         if (mkdir("/proc", 0755) == -1 && errno != EEXIST) _exit(ERR_MOUNT_PROC);
         if (mount("proc", "/proc", "proc", 0, nullptr) == -1) _exit(ERR_MOUNT_PROC);
         
-        // [Security] Remount /proc as Read-Only
         if (mount("proc", "/proc", "proc", MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, nullptr) == -1) 
             _exit(ERR_MOUNT_PROC);
 
 
-        // 3. IO 重定向
-        int out_fd = open("/output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (out_fd == -1) _exit(ERR_OPEN_OUTPUT);
+        // // 3. IO 重定向
+        // int out_fd = open("/output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        // if (out_fd == -1) _exit(ERR_OPEN_OUTPUT);
         
-        if (dup2(out_fd, STDOUT_FILENO) == -1) _exit(ERR_DUP2);
-        close(out_fd);
+        // if (dup2(out_fd, STDOUT_FILENO) == -1) _exit(ERR_DUP2);
+        // close(out_fd);
         
-        if (dup2(null_fd, STDIN_FILENO) == -1) _exit(ERR_DUP2);
-        if (dup2(null_fd, STDERR_FILENO) == -1) _exit(ERR_DUP2);
-        close(null_fd);
+        // if (dup2(null_fd, STDIN_FILENO) == -1) _exit(ERR_DUP2);
+        // if (dup2(null_fd, STDERR_FILENO) == -1) _exit(ERR_DUP2);
+        // close(null_fd);
 
         // 4. 资源限制 (setrlimit)
         rlimit cpu_limit;
@@ -240,8 +282,8 @@ namespace deep_oj {
 
         // 2. 准备 work_dir
         char work_dir[256];
-        strncpy(work_dir, config->source_path, sizeof(work_dir)-1);
-        work_dir[sizeof(work_dir)-1] = '\0';
+        strncpy(work_dir, config->source_path, sizeof(work_dir) - 1);
+        work_dir[sizeof(work_dir) - 1] = '\0';
         char* p = strrchr(work_dir, '/');
         if (p) *p = '\0';
 
@@ -311,7 +353,6 @@ namespace deep_oj {
         execv(compiler_argv[0], compiler_argv);
 
         // 如果执行到这里，说明失败了
-        perror("execv compiler failed");
         _exit(ERR_EXEC_FAILED);
         return 0;
     }

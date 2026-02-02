@@ -41,7 +41,7 @@ namespace deep_oj
         {
             switch (code)
             {
-                // Stage 1
+                // Stage 1: Basic Setup / Exec
                 case ERR_OPEN_OUTPUT:   return "无法打开输出文件 (IO Redirect)";
                 case ERR_DUP2:          return "dup2 调用失败 (IO Redirect)";
                 case ERR_EXEC_FAILED:   return "execle 调用失败 (程序启动失败)";
@@ -49,24 +49,24 @@ namespace deep_oj
                 case ERR_SETGID_FAILED: return "setgid 失败 (降权失败)";
                 case ERR_SETUID_FAILED: return "setuid 失败 (降权失败)";
 
-                // Stage 2
+                // Stage 2: Resource Limits
                 case ERR_RLIMIT_CPU:    return "setrlimit(CPU) 失败";
                 case ERR_RLIMIT_MEMORY: return "setrlimit(AS) 失败";
                 case ERR_RLIMIT_STACK:  return "setrlimit(STACK) 失败";
                 case ERR_RLIMIT_NPROC:  return "setrlimit(NPROC) 失败";
                 case ERR_RLIMIT_FSIZE:  return "setrlimit(FSIZE) 失败";
 
-                // Stage 3
-                case ERR_MOUNT_PRIVATE:   return "mount --make-rprivate 失败";
-                case ERR_MOUNT_BIND_SELF: return "bind mount 工作目录失败";
-                case ERR_MOUNT_BIND_LIB:  return "bind mount 系统库失败";
-                case ERR_REMOUNT_RO:      return "remount 系统库 (RO) 失败";
-                case ERR_PIVOT_ROOT:      return "pivot_root 系统调用失败";
-                case ERR_CHDIR_NEW_ROOT:  return "切换到新根目录失败";
-                case ERR_UMOUNT_OLD:      return "umount /old_root 失败";
-                case ERR_MOUNT_PROC:      return "mount /proc 失败";
-                case ERR_MOUNT_TMP:       return "mount /tmp (tmpfs) 失败";
-                case ERR_MKDIR_FAILED:    return "mkdir (构建 Rootfs) 失败";
+                // Stage 3: Isolation / Rootfs
+                case ERR_MOUNT_PRIVATE:     return "mount --make-rprivate 失败";
+                case ERR_MOUNT_BIND_SELF:   return "bind mount 工作目录失败";
+                case ERR_MOUNT_BIND_LIB:    return "bind mount 系统库失败";
+                case ERR_REMOUNT_RO:        return "remount 系统库 (RO) 失败";
+                case ERR_PIVOT_ROOT:        return "pivot_root 系统调用失败";
+                case ERR_CHDIR_NEW_ROOT:    return "切换到新根目录失败";
+                case ERR_UMOUNT_OLD:        return "umount /old_root 失败";
+                case ERR_MOUNT_PROC:        return "mount /proc 失败";
+                case ERR_MOUNT_TMP:         return "mount /tmp (tmpfs) 失败";
+                case ERR_MKDIR_FAILED:      return "mkdir (构建 Rootfs) 失败";
                 case ERR_SANDBOX_EXCEPTION: return "沙箱内部异常 (C++ Throw)";
 
                 default: return "与系统相关的未知错误";
@@ -79,6 +79,7 @@ namespace deep_oj
         }
 
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
+        // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
         class ProcessGuard
         {
         public:
@@ -88,7 +89,7 @@ namespace deep_oj
             ProcessGuard(const ProcessGuard&) = delete;
             ProcessGuard& operator=(const ProcessGuard&) = delete;
 
-            // 移动构造：窃取资源并将 other 置为安全状态
+            // 移动构造
             ProcessGuard(ProcessGuard&& other) noexcept
                 : pid_(other.pid_), released_(other.released_)
             {
@@ -96,23 +97,12 @@ namespace deep_oj
                 other.released_ = true;
             }
 
-            // 移动赋值：先清理自身资源（如果有），然后窃取 other 并置为安全状态
+            // 移动赋值：使用 cleanup() 复用逻辑
             ProcessGuard& operator=(ProcessGuard&& other) noexcept
             {
                 if (this != &other) {
-                    if (!released_ && pid_ > 0) {
-                        ::kill(pid_, SIGKILL);
-                        int status;
-                        for (;;) {
-                            pid_t r = waitpid(pid_, &status, 0);
-                            if (r == -1) {
-                                if (errno == EINTR) continue;
-                                break;
-                            }
-                            break;
-                        }
-                    }
-
+                    cleanup(); // <--- 核心修改：复用清理逻辑
+                    
                     pid_ = other.pid_;
                     released_ = other.released_;
 
@@ -124,84 +114,40 @@ namespace deep_oj
 
             ~ProcessGuard()
             {
+                cleanup(); // <--- 核心修改：复用清理逻辑
+            }
+
+            // ... wait_nonblock 等函数保持不变，无需修改 ...
+            
+            // 为了完整性，保留这里的辅助函数
+            pid_t wait_nonblock(int &status) { /* ... */ if (pid_ <= 0) return -1; for(;;) { pid_t w = waitpid(pid_, &status, WNOHANG); if(w==-1 && errno==EINTR) continue; return w; } }
+            pid_t wait_nonblock_rusage(int &status, struct rusage *usage) { /* ... */ if (pid_ <= 0) return -1; for(;;) { pid_t w = wait4(pid_, &status, WNOHANG, usage); if(w==-1 && errno==EINTR) continue; return w; } }
+            pid_t wait(int &status) { /* ... */ if (pid_ <= 0) return -1; for(;;) { pid_t w = waitpid(pid_, &status, 0); if(w==-1 && errno==EINTR) continue; return w; } }
+            pid_t wait_rusage(int &status, struct rusage *usage) { /* ... */ if (pid_ <= 0) return -1; for(;;) { pid_t w = wait4(pid_, &status, 0, usage); if(w==-1 && errno==EINTR) continue; return w; } }
+            bool kill() { if (pid_ <= 0) return false; return ::kill(pid_, SIGKILL) == 0; }
+            void release() { released_ = true; pid_ = -1; }
+
+        private:
+            // 核心私有函数：统一处理进程收割
+            void cleanup() 
+            {
                 if (released_ || pid_ <= 0) return;
 
                 int status;
-                // 检查子进程是否已经退出
+                // 1. 检查是否已退出
                 pid_t w = waitpid(pid_, &status, WNOHANG);
                 if (w == 0) {
-                    // 仍在运行，尝试强杀并回收
+                    // 2. 仍在运行 -> 强杀
                     ::kill(pid_, SIGKILL);
-                    // 阻塞等待回收（忽略 EINTR）
+                    // 3. 阻塞收尸
                     for (;;) {
                         pid_t r = waitpid(pid_, &status, 0);
-                        if (r == -1) {
-                            if (errno == EINTR) continue;
-                            break;
-                        }
+                        if (r == -1 && errno == EINTR) continue;
                         break;
                     }
                 }
-                // w > 0 或者 ECHILD 表示已经退出/被回收
             }
 
-            // 非阻塞地检查是否退出，返回 waitpid 的返回值 (pid, 0, -1)
-            pid_t wait_nonblock(int &status)
-            {
-                if (pid_ <= 0) return -1;
-                for (;;) {
-                    pid_t w = waitpid(pid_, &status, WNOHANG);
-                    if (w == -1 && errno == EINTR) continue;
-                    return w;
-                }
-            }
-
-            // 非阻塞获取 rusage
-            pid_t wait_nonblock_rusage(int &status, struct rusage *usage)
-            {
-                if (pid_ <= 0) return -1;
-                for (;;) {
-                    pid_t w = wait4(pid_, &status, WNOHANG, usage);
-                    if (w == -1 && errno == EINTR) continue;
-                    return w;
-                }
-            }
-
-            // 阻塞等待并返回 (用于超时后强制回收)
-            pid_t wait(int &status)
-            {
-                if (pid_ <= 0) return -1;
-                for (;;) {
-                    pid_t w = waitpid(pid_, &status, 0);
-                    if (w == -1 && errno == EINTR) continue;
-                    return w;
-                }
-            }
-
-            // 阻塞等待并收集 rusage
-            pid_t wait_rusage(int &status, struct rusage *usage)
-            {
-                if (pid_ <= 0) return -1;
-                for (;;) {
-                    pid_t w = wait4(pid_, &status, 0, usage);
-                    if (w == -1 && errno == EINTR) continue;
-                    return w;
-                }
-            }
-
-            bool kill()
-            {
-                if (pid_ <= 0) return false;
-                return ::kill(pid_, SIGKILL) == 0;
-            }
-
-            void release()
-            {
-                released_ = true;
-                pid_ = -1;
-            }
-
-        private:
             pid_t pid_;
             bool released_;
         };
@@ -215,30 +161,15 @@ namespace deep_oj
             DirectoryGuard(const DirectoryGuard&) = delete;
             DirectoryGuard& operator=(const DirectoryGuard&) = delete;
 
-            // 移动构造：窃取 path 并将 other 标记为已提交以防止析构时删除
+            // 移动构造
             DirectoryGuard(DirectoryGuard&& other) noexcept
                 : path_(std::move(other.path_)), committed_(other.committed_)
             {
                 other.committed_ = true;
             }
 
-            // 移动赋值：先清理自身未提交的目录，然后窃取 other
-            DirectoryGuard& operator=(DirectoryGuard&& other) noexcept
-            {
-                if (this != &other) {
-                    if (!committed_) {
-                        std::error_code ec;
-                        if (fs::exists(path_, ec)) {
-                            fs::remove_all(path_, ec);
-                        }
-                    }
-
-                    path_ = std::move(other.path_);
-                    committed_ = other.committed_;
-                    other.committed_ = true;
-                }
-                return *this;
-            }
+            // 核心修改：明确禁止移动赋值，防止作用域哨兵被误用
+            DirectoryGuard& operator=(DirectoryGuard&&) = delete;
 
             ~DirectoryGuard()
             {
@@ -310,15 +241,12 @@ namespace deep_oj
         }
 
         // [安全修复]: 更改目录所有者为 nobody (UID 65534)，并限制权限为 700
-        // 700 : 所有者（Owner）拥有完全控制权。同组/系统其他用户没有任何权限。
-        // 这样只有 nobody 用户可以访问该目录，防止 Time-of-Check to Time-of-Use 攻击
         if (chown(request_dir.c_str(), 65534, 65534) != 0)
         {
              result.error_message = FormatSystemError("无法修改目录所有者为 nobody");
              return result;
         }
         
-        // 仅允许所有者 (nobody) 读写执行
         fs::permissions(request_dir, fs::perms::owner_all, ec);
         if (ec)
         {
@@ -353,11 +281,10 @@ namespace deep_oj
         }
 
         // ================= 父进程 =================
-        // RAII guard for child process lifecycle
         ProcessGuard proc(pid);
 
         int status;
-        const int COMPILE_TIME_LIMIT_MS = g_runner_config.compile_real_limit * 1000; // milliseconds
+        const int COMPILE_TIME_LIMIT_MS = g_runner_config.compile_real_limit * 1000;
         auto start_time = std::chrono::steady_clock::now();
         
         while (true)
@@ -463,7 +390,6 @@ namespace deep_oj
         }
         
         // ================= 父进程 =================
-        // RAII guard for child
         ProcessGuard proc(pid);
 
         int status;
@@ -473,7 +399,7 @@ namespace deep_oj
             
         int real_time_limit_ms = time_limit_ms + 1000;
 
-        // Flag to mark that parent killed process for MLE (avoid ambiguous interpretation later)
+        // Flag to mark that parent killed process for MLE
         bool parent_killed_for_mle = false;
 
         while (true)
@@ -523,7 +449,7 @@ namespace deep_oj
                 return result;
             }
 
-            // Adaptive polling: if process is close to memory limit, poll faster to reduce risk window
+            // Adaptive polling
             double mem_ratio = 0.0;
             if (memory_limit_kb > 0) mem_ratio = usage.ru_maxrss / (double)memory_limit_kb;
             if (mem_ratio > 0.8) {
@@ -540,7 +466,7 @@ namespace deep_oj
         
         result.memory_used = usage.ru_maxrss;
 
-        // Post-exit Output Limit check (robust OLE detection)
+        // Post-exit Output Limit check
         std::error_code ec;
         if (fs::exists(output_path, ec)) {
             uint64_t out_size = 0;
@@ -552,7 +478,6 @@ namespace deep_oj
             }
         }
 
-        // If parent already killed for MLE we returned earlier; otherwise continue
         if (result.memory_used > memory_limit_kb)
         {
             result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
@@ -597,11 +522,11 @@ namespace deep_oj
                 }
                 else
                 {
-                    result.status = SandboxStatus::RUNTIME_ERROR; 
+                    result.status = SandboxStatus::RUNTIME_ERROR;
+                    result.error_message = std::string("Runtime Error (Signal ") + std::to_string(signal) + ": " + strsignal(signal) + ")";
                 }
             }
             else if (signal == SIGXFSZ) {
-                 // 文件大小超限 (Output Limit Exceeded)
                  result.status = SandboxStatus::OUTPUT_LIMIT_EXCEEDED; 
             }
             else if (signal == SIGABRT || signal == SIGSEGV) {
@@ -610,12 +535,14 @@ namespace deep_oj
                     result.status = SandboxStatus::MEMORY_LIMIT_EXCEEDED;
                 } else {
                     result.status = SandboxStatus::RUNTIME_ERROR;
+                    result.error_message = std::string("Runtime Error (Signal ") + std::to_string(signal) + ": " + strsignal(signal) + ")";
                 }
             }
             else
             {
-                // 其他信号 (SIGFPE, SIGBUS...) 统一归类为 Runtime Error
+                // 其他信号 (SIGFPE, SIGBUS...) 统一归类为 Runtime Error，并附带详细描述
                 result.status = SandboxStatus::RUNTIME_ERROR;
+                result.error_message = std::string("Runtime Error (Signal ") + std::to_string(signal) + ": " + strsignal(signal) + ")";
             }
         }
         else
@@ -630,7 +557,6 @@ namespace deep_oj
     {
         if (request_id.empty()) return;
         
-        // 双重校验，尽管 Compile 里校验过，这里再校验一次防止意外调用
         if (!IsValidRequestId(request_id)) return;
 
         std::error_code ec;
