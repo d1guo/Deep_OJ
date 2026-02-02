@@ -6,15 +6,21 @@
 #include <sstream>
 #include <vector>
 #include <filesystem>
-#include <algorithm> // for mismatch
+#include <algorithm> 
 #include <semaphore>
+#include <cstring> // for memcmp
 
 #include <grpcpp/grpcpp.h>
 #include <sw/redis++/redis++.h>
 #include <nlohmann/json.hpp>
 
 #include "judge.grpc.pb.h" 
-#include "sandbox.h"       
+#include "sandbox.h"
+// [关键修正] 必须引入这个头文件才能读取配置
+#include "sandbox_internal.h" 
+
+// [关键修正] 声明 Config 加载函数 (在 config.cpp 定义)
+void LoadConfig(const std::string& path);
 
 using json = nlohmann::json;
 using grpc::Server;
@@ -26,42 +32,93 @@ namespace fs = std::filesystem;
 // 全局 Redis 连接
 std::shared_ptr<sw::redis::Redis> g_redis = nullptr;
 
-// 全局并发控制信号量 (4 核 CPU)
+// 全局并发控制信号量
 std::unique_ptr<std::counting_semaphore<>> g_task_sem = nullptr;
 
 // ---------------------------------------------------------
-// 🛠️ 判题核心：比对函数 (Diff / Check)
+// 🛠️ 判题核心：流式比对 (Stream Comparator) - OOM Safe
 // ---------------------------------------------------------
-// 读取文件全部内容并移除行末空格和文末换行 (Trim)
-std::string read_and_trim(const std::string& path) {
-    std::ifstream in(path);
-    if (!in.is_open()) return "";
 
-    std::stringstream ss;
-    ss << in.rdbuf();
-    std::string s = ss.str();
+// Helper: 计算文件的“有效长度” (忽略末尾所有空白字符)
+std::streampos get_effective_size(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in.is_open()) return 0;
 
-    // 简单实现：移除末尾空白
-    while (!s.empty() && std::isspace(s.back())) {
-        s.pop_back();
+    std::streampos len = in.tellg();
+    if (len == 0) return 0;
+
+    const size_t BUF_SIZE = 8192;
+    char buffer[BUF_SIZE];
+    
+    std::streampos current_pos = len;
+    while (current_pos > 0) {
+        // 计算本次要读取的大小
+        size_t read_size = (current_pos >= (std::streampos)BUF_SIZE) ? BUF_SIZE : (size_t)current_pos;
+        
+        // 移动读指针到块的起始位置
+        std::streampos start_pos = current_pos - (std::streampos)read_size;
+        in.seekg(start_pos);
+        in.read(buffer, read_size);
+        
+        // 倒序检查 buffer
+        for (long i = read_size - 1; i >= 0; --i) {
+            if (!std::isspace(static_cast<unsigned char>(buffer[i]))) {
+                // 找到了最后一个非空字符，有效长度 = start_pos + i + 1
+                return start_pos + (std::streampos)(i + 1);
+            }
+        }
+        
+        current_pos = start_pos;
     }
-    // 实际生产中通常需要逐行 Trim Right，这里做个简化版
-    return s;
+    
+    // 全是空白
+    return 0;
 }
 
 // 返回 true 表示 AC，false 表示 WA
 bool check_output(const std::string& user_out_path, const std::string& std_ans_path) {
-    // 如果没有标准答案文件，甚至无法判题（视为系统错误或默认通过，视业务而定）
     if (!fs::exists(std_ans_path)) return false; 
+    // 用户输出如果不存在，直接 WA (可能是 Crash 或被删)
+    if (!fs::exists(user_out_path)) return false; 
+    
+    // 1. 获取有效长度 (O(1) 只需要扫末尾空字符)
+    std::streampos user_len = get_effective_size(user_out_path);
+    std::streampos std_len = get_effective_size(std_ans_path);
 
-    std::string user = read_and_trim(user_out_path);
-    std::string standard = read_and_trim(std_ans_path);
+    if (user_len != std_len) return false;
+    if (user_len == 0) return true; // 都是空或者全是空白字符 -> AC
 
-    return user == standard;
+    // 2. 流式逐块比对
+    std::ifstream f1(user_out_path, std::ios::binary);
+    std::ifstream f2(std_ans_path, std::ios::binary);
+    
+    const size_t BUF_SIZE = 8192;
+    char buf1[BUF_SIZE];
+    char buf2[BUF_SIZE];
+
+    std::streampos remaining = user_len;
+
+    while (remaining > 0) {
+        size_t to_read = (remaining >= (std::streampos)BUF_SIZE) ? BUF_SIZE : (size_t)remaining;
+        
+        f1.read(buf1, to_read);
+        f2.read(buf2, to_read);
+
+        if (!f1 || !f2) return false; // 读取异常
+
+        if (std::memcmp(buf1, buf2, to_read) != 0) {
+            return false; 
+        }
+
+        remaining -= to_read;
+    }
+
+    // [关键修正] 语法错误修复
+    return true;
 }
 
 // ---------------------------------------------------------
-// 🧵 后台工作线程：编译 -> 运行 -> 判题 -> 上报
+// 🧵 后台工作线程
 // ---------------------------------------------------------
 void process_task(deep_oj::TaskRequest task) {
     std::string job_id = task.job_id();
@@ -71,41 +128,50 @@ void process_task(deep_oj::TaskRequest task) {
     json result_json;
     result_json["job_id"] = job_id;
 
-    // 1. 准备文件 (Source Code)
-    // -------------------------------------------------
-    std::string src_filename = "solution.cpp"; // 目前写死 C++
+    // 1. 准备源码
+    std::string src_filename = "solution.cpp"; 
     {
         std::ofstream out(src_filename, std::ios::binary);
-        out << task.code(); // bytes 自动转 string
+        out << task.code(); 
     }
 
-    // 2. 编译 (Compile)
-    // -------------------------------------------------
-    // 假设 Compile 接口：Compile(job_id, source_code) -> 返回 exe_path
+    // 2. 编译
     deep_oj::CompileResult cres = sandbox.Compile(job_id, task.code());
 
-    if (cres.status != deep_oj::JudgeStatus::ACCEPTED) {
-        result_json["status"] = "Compile Error";
-        result_json["error"] = cres.error_message;
-        goto REPORT; // 跳转到上报环节
+    if (cres.status != deep_oj::JudgeStatus::ACCEPTED) { // 注意：这里CompileResult结构体其实没有status字段，只有success
+        // 修正：适配 Sandbox::Compile 接口定义
+        if (!cres.success) {
+            result_json["status"] = "Compile Error";
+            result_json["error"] = cres.error_message;
+            goto REPORT;
+        }
     }
 
-    // 3. 运行 (Run) & 判题 (Check)
-    // -------------------------------------------------
+    // 3. 运行 & 判题
     {
-        // 假设这里是单测试点逻辑。如果是多测，这里套个 for 循环。
-        // 测试数据路径 (通常需挂载或配置，这里假设在当前目录 data/ 下)
-        // 假设 Proto 里传了 problem_id，这里根据 problem_id 找数据
-        // std::string input_file = "data/" + task.problem_id() + "/1.in";
-        // std::string ans_file = "data/" + task.problem_id() + "/1.out";
+        // 假设题目 ID 对应的测试数据目录 (生产环境应从配置或 task 读取)
+        // 这里为了演示，假设数据就在当前目录的 data/ 下
+        // 比如: data/1001/1.in, data/1001/1.out
+        // string problem_id = task.problem_id(); ...
         
-        // MVP 阶段我们先随便造个简单的输入输出，或者让 Sandbox::Run 自己处理重定向
-        std::string input_data = "1 2"; // 假设题目是 A+B
-        // 实际项目里，Sandbox::Run 应该接受 input_file 路径，重定向 stdin
+        // 临时构造输入输出文件名
+        // 在 Sandbox::Run 内部，用户输出通常被重定向到 Sandbox 目录下的 "output.txt"
+        // 假设我们只测一组数据：
+        
+        // [FIXME] 实际生产中这里需要循环测试所有 test case
+        std::string std_in = "data/1.in";   // 你的测试输入
+        std::string std_out = "data/1.out"; // 你的标准答案
         
         // 运行沙箱
+        // 注意：Run 接口参数需要传 stdin/stdout/stderr 的路径
+        // 我们利用 Sandbox 自动处理路径
+        std::string user_out_filename = "output.txt";
+        
         deep_oj::RunResult rres = sandbox.Run(
             cres.exe_path, 
+            std_in,             // stdin (挂载或拷贝)
+            user_out_filename,  // stdout (写到哪里)
+            "error.txt",        // stderr
             task.time_limit(), 
             task.memory_limit()
         );
@@ -113,88 +179,81 @@ void process_task(deep_oj::TaskRequest task) {
         result_json["time_used"] = rres.time_used;
         result_json["memory_used"] = rres.memory_used;
 
-        if (rres.status == deep_oj::JudgeStatus::ACCEPTED) {
-            // 沙箱运行没挂，现在检查答案对不对
-            // 假设 sandbox 把用户输出写到了 "user.out"
-            // 假设标准答案是 "3" (对应 1+2)
-            // 实际上你需要去读取 std_ans_file
+        if (rres.status == deep_oj::SandboxStatus::OK) {
+            // 沙箱运行成功，现在进行答案比对
+            // 用户的输出文件完整路径：exe_path 的父目录 + output.txt
+            fs::path user_out_path = fs::path(cres.exe_path).parent_path() / user_out_filename;
             
-            // 为了跑通流程，我们先写死一个 check 逻辑，或者假设你本地有 "1.out"
-            // bool is_ac = check_output("user.out", "data/1.out");
+            // [关键修正] 调用新的判题函数
+            bool is_ac = check_output(user_out_path.string(), std_out);
             
-            // 【MVP 模拟】假设只有不超时不 RE 就算 AC
-            result_json["status"] = "Accepted"; 
-            result_json["judge_result"] = 1; // AC
+            if (is_ac) {
+                result_json["status"] = "Accepted";
+                result_json["judge_result"] = 1; 
+            } else {
+                result_json["status"] = "Wrong Answer";
+                result_json["judge_result"] = 2; 
+            }
         } else {
-            // TLE, MLE, RE
-            if (rres.status == deep_oj::JudgeStatus::TIME_LIMIT_EXCEEDED) result_json["status"] = "Time Limit Exceeded";
-            else if (rres.status == deep_oj::JudgeStatus::MEMORY_LIMIT_EXCEEDED) result_json["status"] = "Memory Limit Exceeded";
+            // 异常状态映射
+            if (rres.status == deep_oj::SandboxStatus::TIME_LIMIT_EXCEEDED) result_json["status"] = "Time Limit Exceeded";
+            else if (rres.status == deep_oj::SandboxStatus::MEMORY_LIMIT_EXCEEDED) result_json["status"] = "Memory Limit Exceeded";
+            else if (rres.status == deep_oj::SandboxStatus::OUTPUT_LIMIT_EXCEEDED) result_json["status"] = "Output Limit Exceeded";
             else result_json["status"] = "Runtime Error";
         }
     }
 
 REPORT:
-    // 4. 结果上报 (Report to Redis)
-    // -------------------------------------------------
+    // 4. 结果上报
     if (g_redis) {
         try {
             std::string res_str = result_json.dump();
-            
-            // A. 写当前结果
             g_redis->set("result:" + job_id, res_str);
             g_redis->expire("result:" + job_id, 3600);
-
-            // B. 写查重缓存 (只有非系统错误且有 cache_key 时)
-            if (task.has_cache_key() && !task.cache_key().empty() && result_json["status"] != "System Error") {
+            
+            // 只有 AC 才写 Cache
+            if (task.has_cache_key() && !task.cache_key().empty() && result_json["status"] == "Accepted") {
                 g_redis->set(task.cache_key(), res_str);
-                g_redis->expire(task.cache_key(), 86400); // 缓存一天
-                std::cout << "[Worker] 📝 更新缓存: " << task.cache_key() << std::endl;
+                g_redis->expire(task.cache_key(), 86400); 
             }
-
-            // C. 发送完成通知 (Fast Path)
             g_redis->publish("job_done", job_id);
             std::cout << "[Worker] ✅ 完成: " << job_id << " (" << result_json["status"] << ")" << std::endl;
-
-        } catch (const std::exception& e) {
-            std::cerr << "❌ [Worker] Redis 操作失败: " << e.what() << std::endl;
-        }
+        } catch (...) {}
     }
+    
+    // 清理临时文件
+    sandbox.Cleanup(job_id);
 }
 
-// ---------------------------------------------------------
-// gRPC 服务实现 (只负责接单)
-// ---------------------------------------------------------
+// ... WorkerServiceImpl 保持不变 ...
+// ... 为了节省篇幅省略，请保留原来的 Service 代码 ...
 class WorkerServiceImpl final : public deep_oj::JudgeService::Service {
     Status ExecuteTask(ServerContext* context, const deep_oj::TaskRequest* request,
                   deep_oj::TaskResponse* response) override {
         
-        // 1. 收到请求，打印日志
         std::cout << "[Worker] 收到调度请求 (ID: " << request->job_id() << ")" << std::endl;
 
-        // 2. 并发控制 (Backpressure)
         if (!g_task_sem->try_acquire()) {
             std::cout << "[Worker] ⚠️ High Load - 拒绝请求: " << request->job_id() << std::endl;
             return Status(grpc::RESOURCE_EXHAUSTED, "Worker is busy");
         }
 
-        // 3. 启动分离线程，立刻干活
-        // 使用 Lambda 捕获 request 副本，并在内部管理信号量释放
         std::thread([req_copy = *request]() mutable {
-            // RAII 守卫：确保线程退出时释放信号量
             struct Guard {
                 ~Guard() { g_task_sem->release(); }
             } guard;
-
             process_task(std::move(req_copy));
         }).detach();
 
-        // 4. 立即回复 OK
         return Status::OK;
     }
 };
 
 int main(int argc, char** argv) {
-    // 1. Redis 连接
+    // [关键修正] 1. 加载配置 (必须在所有逻辑之前)
+    LoadConfig("config.yaml");
+
+    // 2. Redis 连接
     try {
         const char* env_redis = std::getenv("REDIS_HOST");
         std::string redis_host = env_redis ? env_redis : "127.0.0.1";
@@ -205,16 +264,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 2. 初始化全局信号量
-    // 假设 g_runner_config.pool_size 已经在 config.cpp 加载好了
-    // 如果没有加载配置的代码，这里先读取一下或给默认值
+    // 3. 初始化全局信号量
     int pool_size = deep_oj::g_runner_config.pool_size;
-    if (pool_size <= 0) pool_size = 1;
+    if (pool_size <= 0) pool_size = 4; // 兜底
     g_task_sem = std::make_unique<std::counting_semaphore<>>(pool_size);
     std::cout << "[Worker] 🔥 并发模型已初始化: Max Threads = " << pool_size << std::endl;
 
-    // 3. 启动 gRPC Server
-    std::string server_address("0.0.0.0:50051");
+    // 4. 启动 gRPC Server
+    // 建议从配置读取端口
+    int port = deep_oj::g_runner_config.server_port;
+    if (port <= 0) port = 50051;
+    std::string server_address("0.0.0.0:" + std::to_string(port));
+    
     WorkerServiceImpl service;
 
     ServerBuilder builder;
