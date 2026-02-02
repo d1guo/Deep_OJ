@@ -74,6 +74,8 @@ namespace deep_oj {
         // 安全限制
         uid_t run_uid;
         gid_t run_gid;
+
+        int pool_size; // 核心判题并发数
     };
     extern GlobalConfig g_runner_config;
 

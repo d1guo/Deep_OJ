@@ -7,6 +7,7 @@
 #include <vector>
 #include <filesystem>
 #include <algorithm> // for mismatch
+#include <semaphore>
 
 #include <grpcpp/grpcpp.h>
 #include <sw/redis++/redis++.h>
@@ -24,6 +25,9 @@ namespace fs = std::filesystem;
 
 // 全局 Redis 连接
 std::shared_ptr<sw::redis::Redis> g_redis = nullptr;
+
+// 全局并发控制信号量 (4 核 CPU)
+std::unique_ptr<std::counting_semaphore<>> g_task_sem = nullptr;
 
 // ---------------------------------------------------------
 // 🛠️ 判题核心：比对函数 (Diff / Check)
@@ -167,12 +171,24 @@ class WorkerServiceImpl final : public deep_oj::JudgeService::Service {
         // 1. 收到请求，打印日志
         std::cout << "[Worker] 收到调度请求 (ID: " << request->job_id() << ")" << std::endl;
 
-        // 2. 启动分离线程，立刻干活
-        // 注意：这里没有用信号量控制并发，依靠 Scheduler 的负载均衡
-        // 如果要做本地保护，可以在这里加个 atomic 计数器，超过 100 直接 return Status::RESOURCE_EXHAUSTED
-        std::thread(process_task, *request).detach();
+        // 2. 并发控制 (Backpressure)
+        if (!g_task_sem->try_acquire()) {
+            std::cout << "[Worker] ⚠️ High Load - 拒绝请求: " << request->job_id() << std::endl;
+            return Status(grpc::RESOURCE_EXHAUSTED, "Worker is busy");
+        }
 
-        // 3. 立即回复 OK
+        // 3. 启动分离线程，立刻干活
+        // 使用 Lambda 捕获 request 副本，并在内部管理信号量释放
+        std::thread([req_copy = *request]() mutable {
+            // RAII 守卫：确保线程退出时释放信号量
+            struct Guard {
+                ~Guard() { g_task_sem->release(); }
+            } guard;
+
+            process_task(std::move(req_copy));
+        }).detach();
+
+        // 4. 立即回复 OK
         return Status::OK;
     }
 };
@@ -189,7 +205,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 2. 启动 gRPC Server
+    // 2. 初始化全局信号量
+    // 假设 g_runner_config.pool_size 已经在 config.cpp 加载好了
+    // 如果没有加载配置的代码，这里先读取一下或给默认值
+    int pool_size = deep_oj::g_runner_config.pool_size;
+    if (pool_size <= 0) pool_size = 1;
+    g_task_sem = std::make_unique<std::counting_semaphore<>>(pool_size);
+    std::cout << "[Worker] 🔥 并发模型已初始化: Max Threads = " << pool_size << std::endl;
+
+    // 3. 启动 gRPC Server
     std::string server_address("0.0.0.0:50051");
     WorkerServiceImpl service;
 

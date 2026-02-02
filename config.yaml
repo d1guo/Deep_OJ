@@ -29,7 +29,10 @@ compile:
   cpu_limit_s: 10
   real_time_limit_s: 15
   memory_limit_mb: 1024
-  
+
+runner:
+  pool_size: 4 # 根据物理核数自动调整，通常 = CPU核数
+
 security:
   # 容器内运行的用户 ID (nobody)
   run_as_uid: 65534
