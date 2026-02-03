@@ -69,7 +69,10 @@ namespace deep_oj {
             for (int i = 0; i < g_runner_config.mount_count; ++i)
             {
                 const char* src = g_runner_config.mount_dirs[i];
-                if (access(src, F_OK) != 0) continue; 
+                if (access(src, F_OK) != 0) {
+                    fprintf(stderr, "[Sandbox] Config Error: Mount dir not found: %s\n", src);
+                    _exit(ERR_MOUNT_BIND_LIB);
+                }
 
                 int n = snprintf(target, sizeof(target), "%s%s", work_dir, src);
                 if (n >= (int)sizeof(target)) _exit(ERR_MKDIR_FAILED);
@@ -93,7 +96,10 @@ namespace deep_oj {
             for (int i = 0; i < g_runner_config.mount_file_count; ++i)
             {
                 const char* src = g_runner_config.mount_files[i];
-                if (access(src, F_OK) != 0) continue;
+                if (access(src, F_OK) != 0) {
+                     fprintf(stderr, "[Sandbox] Config Error: Mount file not found: %s\n", src);
+                     _exit(ERR_MOUNT_BIND_LIB);
+                }
 
                 snprintf(target, sizeof(target), "%s%s", work_dir, src);
 
@@ -132,48 +138,25 @@ namespace deep_oj {
         // 1. IO 重定向 (最先执行)
         // -----------------------------------------------------
         // 此时我们还在父进程的文件系统命名空间中，父进程传来的 FD 是有效的。
+        // 父进程已经处理好所有 FD（包括 fallback 到 /dev/null），这里禁止 open。
         
         // (A) 设置 Stdin
-        if (args->input_fd >= 0) {
-            if (dup2(args->input_fd, STDIN_FILENO) == -1) _exit(ERR_DUP2);
-        } else {
-            // 如果没有输入，接 /dev/null 防止程序读卡死
-            int null_fd = open("/dev/null", O_RDWR);
-            if (null_fd >= 0) {
-                dup2(null_fd, STDIN_FILENO);
-                close(null_fd);
-            } else _exit(ERR_OPEN_OUTPUT);
-        }
+        if (dup2(args->input_fd, STDIN_FILENO) == -1) _exit(101);
 
         // (B) 设置 Stdout
-        if (args->output_fd >= 0) {
-            if (dup2(args->output_fd, STDOUT_FILENO) == -1) _exit(ERR_DUP2);
-        } else {
-            int null_fd = open("/dev/null", O_RDWR);
-            if (null_fd >= 0) {
-                dup2(null_fd, STDOUT_FILENO);
-                close(null_fd);
-            } else _exit(ERR_OPEN_OUTPUT);
-        }
+        if (dup2(args->output_fd, STDOUT_FILENO) == -1) _exit(102);
 
         // (C) 设置 Stderr
-        if (args->error_fd >= 0) {
-            if (dup2(args->error_fd, STDERR_FILENO) == -1) _exit(ERR_DUP2);
-        } else {
-            // 默认丢弃 stderr
-            int null_fd = open("/dev/null", O_RDWR);
-            if (null_fd >= 0) {
-                dup2(null_fd, STDERR_FILENO);
-                close(null_fd);
-            } else _exit(ERR_OPEN_OUTPUT);
-        }
+        if (dup2(args->error_fd, STDERR_FILENO) == -1) _exit(103);
 
         
         // [安全]: 关闭除 0,1,2 以外的所有文件描述符
         #ifdef __NR_close_range
             syscall(__NR_close_range, 3, ~0U, 0);
         #else
-            for (int fd = 3; fd < 256; ++fd) close(fd); 
+            int max_fd = sysconf(_SC_OPEN_MAX);
+            if (max_fd < 0) max_fd = 4096;
+            for (int fd = 3; fd < max_fd; ++fd) close(fd); 
         #endif
 
         
@@ -192,6 +175,14 @@ namespace deep_oj {
         // 4. 构建隔离环境 (Rootfs)
         // -----------------------------------------------------
         SetupRootfs(work_dir);
+
+        // -----------------------------------------------------
+        // 4.1 挂载 /tmp (运行时必需)
+        // 增加 /tmp 挂载，使得 Python/Java 等运行时可以正常启动
+        // -----------------------------------------------------
+        if (mkdir("/tmp", 0777) == -1 && errno != EEXIST) _exit(ERR_MOUNT_TMP);
+        // 限制大小为 64MB，防止 DoS
+        if (mount("tmpfs", "/tmp", "tmpfs", 0, "size=64m") == -1) _exit(ERR_MOUNT_TMP);
 
        // -----------------------------------------------------
         // 5. 挂载 /proc (只读)

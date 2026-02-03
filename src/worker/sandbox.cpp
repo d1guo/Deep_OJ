@@ -15,6 +15,7 @@
 #include <cctype>
 
 // 父进程使用的系统调用
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
@@ -150,6 +151,17 @@ namespace deep_oj
 
             pid_t pid_;
             bool released_;
+        };
+
+        class AutoCloseFd {
+        public:
+            explicit AutoCloseFd(int fd) : fd_(fd) {}
+            ~AutoCloseFd() { if (fd_ >= 0) ::close(fd_); }
+            AutoCloseFd(const AutoCloseFd&) = delete;
+            AutoCloseFd& operator=(const AutoCloseFd&) = delete;
+            int get() const { return fd_; }
+        private:
+            int fd_;
         };
 
         class DirectoryGuard
@@ -360,26 +372,75 @@ namespace deep_oj
         return result;
     }
 
-    RunResult Sandbox::Run(const std::string& exe_path, int time_limit_ms, int memory_limit_kb)
+    RunResult Sandbox::Run(const std::string& exe_path, 
+                           const std::string& stdin_path,
+                           const std::string& stdout_path,
+                           const std::string& stderr_path,
+                           int time_limit_ms, 
+                           int memory_limit_kb)
     {
         RunResult result;
         
-        // Prepare output path: child writes to /output.txt relative to sandbox root
-        fs::path output_path = fs::path(exe_path).parent_path() / "output.txt";
+        // 使用传入的 stdout_path 作为输出检查路径
+        fs::path output_path = stdout_path;
+        if (output_path.empty()) {
+            output_path = fs::path(exe_path).parent_path() / "output.txt"; // Fallback for safety
+        }
+
         const uint64_t OUTPUT_LIMIT_BYTES = 10ULL * 1024ULL * 1024ULL; // 10MB logical limit
 
-        // 1. 准备参数与栈
+        // 1. 准备 FD (Pure FD Mode)
+        // 1.1 /dev/null
+        int dev_null_fd = open("/dev/null", O_RDWR);
+        if (dev_null_fd < 0) {
+             result.status = SandboxStatus::SYSTEM_ERROR;
+             result.error_message = FormatSystemError("open /dev/null");
+             return result;
+        }
+        AutoCloseFd null_guard(dev_null_fd);
+
+        // 1.2 Input
+        int input_fd = -1;
+        if (!stdin_path.empty()) {
+            input_fd = open(stdin_path.c_str(), O_RDONLY);
+        }
+        // 如果打开失败或路径为空，回退到 /dev/null
+        if (input_fd < 0) input_fd = dup(dev_null_fd); 
+        AutoCloseFd input_guard(input_fd);
+
+        // 1.3 Output
+        int output_fd = -1;
+        if (!stdout_path.empty()) {
+             output_fd = open(stdout_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        }
+        if (output_fd < 0) output_fd = dup(dev_null_fd);
+        AutoCloseFd output_guard(output_fd);
+
+        // 1.4 Error
+        int error_fd = -1;
+        if (!stderr_path.empty()) {
+            error_fd = open(stderr_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        }
+        if (error_fd < 0) error_fd = dup(dev_null_fd);
+        AutoCloseFd error_guard(error_fd);
+
+        // 2. 准备参数与栈
         RunChildArgs args;
+        std::memset(&args, 0, sizeof(args)); 
         std::strncpy(args.exe_path, exe_path.c_str(), sizeof(args.exe_path) - 1);
-        args.exe_path[sizeof(args.exe_path) - 1] = '\0';
         
         args.time_limit_ms = time_limit_ms;
         args.memory_limit_kb = memory_limit_kb;
         
+        // Pass FDs
+        args.input_fd = input_fd;
+        args.output_fd = output_fd;
+        args.error_fd = error_fd;
+
         auto stack_mem = std::make_unique<char[]>(STACK_SIZE);
         char* stack_top = stack_mem.get() + STACK_SIZE; 
 
-        // 2. Clone 子进程 (隔离层)
+        // 3. Clone 子进程 (隔离层)
         pid_t pid = clone(RunChildFn, stack_top, CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD, &args);
 
         if (pid == -1)

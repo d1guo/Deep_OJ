@@ -84,8 +84,13 @@ namespace deep_oj {
      */
     struct RunChildArgs {
         char exe_path[256];     // 可执行文件路径
+        char input_file[256];  
+        char output_file[256];
+        char error_file[256];
+
         int time_limit_ms;      // 时间限制 (毫秒)
         int memory_limit_kb;    // 内存限制 (KB)
+        
         int input_fd;  // 对应 stdin
         int output_fd; // 对应 stdout
         int error_fd;  // 对应 stderr
