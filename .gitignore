@@ -37,4 +37,5 @@ generated/
 # 不要把运行时的日志和临时目录传上去
 logs/
 *.log
+change.txt
 /tmp/deep_oj_workspace/
