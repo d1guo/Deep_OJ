@@ -2,6 +2,7 @@
 #define DEEP_OJ_SANDBOX_INTERNAL_H
 
 #include <sys/types.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace deep_oj {
@@ -49,8 +50,7 @@ namespace deep_oj {
     struct GlobalConfig {
         // --- [新增] Server 配置 ---
         int server_port;       // gRPC 监听端口
-        int parallelism;       // 最大并发任务数
-
+        
         // --- 原有配置 ---
         char workspace_root[256];
         char compiler_path[256];
@@ -70,6 +70,7 @@ namespace deep_oj {
         
         // 输出文件限制（字节）
         long long max_output_size;
+        long long output_buffer_size; // [新增] 超限缓冲大小 (Soft->Hard)
 
         // 安全限制
         uid_t run_uid;
@@ -90,6 +91,7 @@ namespace deep_oj {
 
         int time_limit_ms;      // 时间限制 (毫秒)
         int memory_limit_kb;    // 内存限制 (KB)
+        rlim_t output_limit_bytes; // [新增] 输出文件大小限制
         
         int input_fd;  // 对应 stdin
         int output_fd; // 对应 stdout

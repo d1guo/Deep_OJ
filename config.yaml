@@ -2,7 +2,7 @@
 
 server:
   port: 50051                  # gRPC 监听端口
-  parallelism: 4               # 并发判题数 (信号量大小)
+  pool_size: 4                 # 并发判题数 (信号量大小)
 
 path:
   workspace_root: "/tmp/deep_oj_workspace"

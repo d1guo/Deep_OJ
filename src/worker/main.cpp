@@ -39,82 +39,41 @@ std::unique_ptr<std::counting_semaphore<>> g_task_sem = nullptr;
 // 🛠️ 判题核心：流式比对 (Stream Comparator) - OOM Safe
 // ---------------------------------------------------------
 
-// Helper: 计算文件的“有效长度” (忽略末尾所有空白字符)
-std::streampos get_effective_size(const std::string& path) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in.is_open()) return 0;
-
-    std::streampos len = in.tellg();
-    if (len == 0) return 0;
-
-    const size_t BUF_SIZE = 8192;
-    char buffer[BUF_SIZE];
-    
-    std::streampos current_pos = len;
-    while (current_pos > 0) {
-        // 计算本次要读取的大小
-        size_t read_size = (current_pos >= (std::streampos)BUF_SIZE) ? BUF_SIZE : (size_t)current_pos;
-        
-        // 移动读指针到块的起始位置
-        std::streampos start_pos = current_pos - (std::streampos)read_size;
-        in.seekg(start_pos);
-        in.read(buffer, read_size);
-        
-        // 倒序检查 buffer
-        for (long i = read_size - 1; i >= 0; --i) {
-            if (!std::isspace(static_cast<unsigned char>(buffer[i]))) {
-                // 找到了最后一个非空字符，有效长度 = start_pos + i + 1
-                return start_pos + (std::streampos)(i + 1);
-            }
-        }
-        
-        current_pos = start_pos;
-    }
-    
-    // 全是空白
-    return 0;
-}
-
 // 返回 true 表示 AC，false 表示 WA
 bool check_output(const std::string& user_out_path, const std::string& std_ans_path) {
-    if (!fs::exists(std_ans_path)) return false; 
-    // 用户输出如果不存在，直接 WA (可能是 Crash 或被删)
-    if (!fs::exists(user_out_path)) return false; 
-    
-    // 1. 获取有效长度 (O(1) 只需要扫末尾空字符)
-    std::streampos user_len = get_effective_size(user_out_path);
-    std::streampos std_len = get_effective_size(std_ans_path);
-
-    if (user_len != std_len) return false;
-    if (user_len == 0) return true; // 都是空或者全是空白字符 -> AC
-
-    // 2. 流式逐块比对
-    std::ifstream f1(user_out_path, std::ios::binary);
-    std::ifstream f2(std_ans_path, std::ios::binary);
-    
-    const size_t BUF_SIZE = 8192;
-    char buf1[BUF_SIZE];
-    char buf2[BUF_SIZE];
-
-    std::streampos remaining = user_len;
-
-    while (remaining > 0) {
-        size_t to_read = (remaining >= (std::streampos)BUF_SIZE) ? BUF_SIZE : (size_t)remaining;
-        
-        f1.read(buf1, to_read);
-        f2.read(buf2, to_read);
-
-        if (!f1 || !f2) return false; // 读取异常
-
-        if (std::memcmp(buf1, buf2, to_read) != 0) {
-            return false; 
-        }
-
-        remaining -= to_read;
+    if (!fs::exists(std_ans_path)) {
+        std::cerr << "[Diff] Standard answer missing: " << std_ans_path << std::endl;
+        return false;
+    }
+    if (!fs::exists(user_out_path)) {
+        std::cerr << "[Diff] User output missing: " << user_out_path << std::endl;
+        return false;
     }
 
-    // [关键修正] 语法错误修复
-    return true;
+    std::ifstream f_user(user_out_path);
+    std::ifstream f_std(std_ans_path);
+
+    // 自动跳过 whitespace 进行 token-based 比较
+    std::string s_u, s_s;
+    while (true) {
+        bool b_u = (bool)(f_user >> s_u);
+        bool b_s = (bool)(f_std >> s_s);
+
+        // 如果一个读完了，另一个没读完 -> WA
+        if (b_u != b_s) {
+            std::cout << "[Diff] Length Mismatch! (One stream ended early)" << std::endl;
+            return false;
+        }
+
+        // 如果都读完了 -> AC
+        if (!b_u) return true;
+
+        // 如果内容不一样 -> WA
+        if (s_u != s_s) {
+            std::cout << "[Diff] Mismatch! User: [" << s_u << "] vs Std: [" << s_s << "]" << std::endl;
+            return false;
+        }
+    }
 }
 
 // ---------------------------------------------------------
@@ -124,7 +83,8 @@ void process_task(deep_oj::TaskRequest task) {
     std::string job_id = task.job_id();
     std::cout << "[Worker] 🔥 开始后台处理: " << job_id << std::endl;
 
-    deep_oj::Sandbox sandbox;
+    // 1. 初始化沙箱 (使用配置中的工作目录)
+    deep_oj::Sandbox sandbox(deep_oj::g_runner_config.workspace_root);
     json result_json;
     result_json["job_id"] = job_id;
 
@@ -138,13 +98,10 @@ void process_task(deep_oj::TaskRequest task) {
     // 2. 编译
     deep_oj::CompileResult cres = sandbox.Compile(job_id, task.code());
 
-    if (cres.status != deep_oj::JudgeStatus::ACCEPTED) { // 注意：这里CompileResult结构体其实没有status字段，只有success
-        // 修正：适配 Sandbox::Compile 接口定义
-        if (!cres.success) {
-            result_json["status"] = "Compile Error";
-            result_json["error"] = cres.error_message;
-            goto REPORT;
-        }
+    if (!cres.success) {
+        result_json["status"] = "Compile Error";
+        result_json["error"] = cres.error_message;
+        goto REPORT;
     }
 
     // 3. 运行 & 判题
@@ -152,26 +109,21 @@ void process_task(deep_oj::TaskRequest task) {
         // 假设题目 ID 对应的测试数据目录 (生产环境应从配置或 task 读取)
         // 这里为了演示，假设数据就在当前目录的 data/ 下
         // 比如: data/1001/1.in, data/1001/1.out
-        // string problem_id = task.problem_id(); ...
-        
-        // 临时构造输入输出文件名
-        // 在 Sandbox::Run 内部，用户输出通常被重定向到 Sandbox 目录下的 "output.txt"
-        // 假设我们只测一组数据：
         
         // [FIXME] 实际生产中这里需要循环测试所有 test case
         std::string std_in = "data/1.in";   // 你的测试输入
         std::string std_out = "data/1.out"; // 你的标准答案
         
-        // 运行沙箱
-        // 注意：Run 接口参数需要传 stdin/stdout/stderr 的路径
-        // 我们利用 Sandbox 自动处理路径
-        std::string user_out_filename = "output.txt";
+        // 获取工作目录并构建绝对路径
+        fs::path work_dir = fs::path(cres.exe_path).parent_path();
+        fs::path output_path = work_dir / "output.txt";
+        fs::path error_path = work_dir / "error.txt";
         
         deep_oj::RunResult rres = sandbox.Run(
             cres.exe_path, 
-            std_in,             // stdin (挂载或拷贝)
-            user_out_filename,  // stdout (写到哪里)
-            "error.txt",        // stderr
+            std_in,                 // stdin 
+            output_path.string(),   // stdout (绝对路径)
+            error_path.string(),    // stderr (绝对路径)
             task.time_limit(), 
             task.memory_limit()
         );
@@ -181,11 +133,8 @@ void process_task(deep_oj::TaskRequest task) {
 
         if (rres.status == deep_oj::SandboxStatus::OK) {
             // 沙箱运行成功，现在进行答案比对
-            // 用户的输出文件完整路径：exe_path 的父目录 + output.txt
-            fs::path user_out_path = fs::path(cres.exe_path).parent_path() / user_out_filename;
-            
-            // [关键修正] 调用新的判题函数
-            bool is_ac = check_output(user_out_path.string(), std_out);
+            // [Diff Debug]
+            bool is_ac = check_output(output_path.string(), std_out);
             
             if (is_ac) {
                 result_json["status"] = "Accepted";
@@ -212,7 +161,7 @@ REPORT:
             g_redis->expire("result:" + job_id, 3600);
             
             // 只有 AC 才写 Cache
-            if (task.has_cache_key() && !task.cache_key().empty() && result_json["status"] == "Accepted") {
+            if (!task.cache_key().empty() && result_json["status"] == "Accepted") {
                 g_redis->set(task.cache_key(), res_str);
                 g_redis->expire(task.cache_key(), 86400); 
             }
@@ -226,7 +175,6 @@ REPORT:
 }
 
 // ... WorkerServiceImpl 保持不变 ...
-// ... 为了节省篇幅省略，请保留原来的 Service 代码 ...
 class WorkerServiceImpl final : public deep_oj::JudgeService::Service {
     Status ExecuteTask(ServerContext* context, const deep_oj::TaskRequest* request,
                   deep_oj::TaskResponse* response) override {
@@ -250,7 +198,7 @@ class WorkerServiceImpl final : public deep_oj::JudgeService::Service {
 };
 
 int main(int argc, char** argv) {
-    // [关键修正] 1. 加载配置 (必须在所有逻辑之前)
+    // 1. 加载配置 (必须在所有逻辑之前)
     LoadConfig("config.yaml");
 
     // 2. Redis 连接

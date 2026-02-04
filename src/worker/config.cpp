@@ -34,28 +34,30 @@ void LoadConfig(const std::string& path) {
         if (config["server"]) {
             YAML::Node srv = config["server"];
             deep_oj::g_runner_config.server_port = srv["port"] ? srv["port"].as<int>() : 50051;
-            // gRPC 内部线程池大小 (网络 IO)
-            deep_oj::g_runner_config.parallelism = srv["parallelism"] ? srv["parallelism"].as<int>() : 4;
+            // gRPC 内部线程池大小 (网络 IO) -> 改为从 server.pool_size 读取
+            deep_oj::g_runner_config.pool_size = srv["pool_size"] ? srv["pool_size"].as<int>() : 4;
         } else {
             deep_oj::g_runner_config.server_port = 50051;
-            deep_oj::g_runner_config.parallelism = 4;
-            std::cout << "[配置] 未找到 server 节点，使用默认值 (Port: 50051, NetThreads: 4)" << std::endl;
+            deep_oj::g_runner_config.pool_size = 4;
+            std::cout << "[配置] 未找到 server 节点，使用默认值 (Port: 50051, PoolSize: 4)" << std::endl;
         }
 
         // --- [新增] 1.5 Runner 节点 (核心判题线程池) ---
+        // 兼容旧逻辑：如果 runner 下也配了 pool_size，优先使用 runner 下的配置
         if (config["runner"]) {
             YAML::Node runner = config["runner"];
-            // 读取 pool_size，如果没有则默认 4
             if (runner["pool_size"]) {
                 deep_oj::g_runner_config.pool_size = runner["pool_size"].as<int>();
-            } else {
-                deep_oj::g_runner_config.pool_size = 4;
-                std::cout << "[配置] runner.pool_size 未设置，默认为 4" << std::endl;
-            }
+            } 
+            // 读取 max_output_size (默认 10MB)
+            deep_oj::g_runner_config.max_output_size = runner["max_output_size"] ? runner["max_output_size"].as<long long>() : 10 * 1024 * 1024;
+            // 读取 output_buffer_size (默认 2MB)
+            deep_oj::g_runner_config.output_buffer_size = runner["output_buffer_size"] ? runner["output_buffer_size"].as<long long>() : 2 * 1024 * 1024;
+
         } else {
-            // 完全没有 runner 节点时的默认策略
-            deep_oj::g_runner_config.pool_size = 4;
-            std::cout << "[配置] runner 节点缺失，pool_size 默认为 4" << std::endl;
+             // 默认值
+             deep_oj::g_runner_config.max_output_size = 10 * 1024 * 1024;
+             deep_oj::g_runner_config.output_buffer_size = 2 * 1024 * 1024;
         }
 
         // --- 2. Path 节点 (必须存在) ---

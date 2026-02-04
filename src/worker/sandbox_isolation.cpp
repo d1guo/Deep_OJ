@@ -134,6 +134,13 @@ namespace deep_oj {
     {
         auto* args = (RunChildArgs*)(arg);
 
+        // 🔥 [DEBUG] 子进程一上来就打印到屏幕 (fd 1 和 2 此时还没被重定向)
+        // 必须使用 write 系统调用，不能用 cout
+        // char buf[128];
+        // int len = snprintf(buf, sizeof(buf), 
+        //     "\n>>> DEBUG_CHILD: Received limit: %lu <<<\n", 
+        //     (unsigned long)args->output_limit_bytes);
+        // if (len > 0) write(2, buf, len); // 写到 stderr (屏幕)
         // -----------------------------------------------------
         // 1. IO 重定向 (最先执行)
         // -----------------------------------------------------
@@ -177,33 +184,37 @@ namespace deep_oj {
         SetupRootfs(work_dir);
 
         // -----------------------------------------------------
-        // 4.1 挂载 /tmp (运行时必需)
-        // 增加 /tmp 挂载，使得 Python/Java 等运行时可以正常启动
+        // 4.1 Prepare Mount Points & Permissions
+        // Important: Perform mkdir and chmod BEFORE remounting root as Read-Only
         // -----------------------------------------------------
+        // Provide mount points for /tmp and /proc
         if (mkdir("/tmp", 0777) == -1 && errno != EEXIST) _exit(ERR_MOUNT_TMP);
-        // 限制大小为 64MB，防止 DoS
+        if (mkdir("/proc", 0755) == -1 && errno != EEXIST) _exit(ERR_MOUNT_PROC);
+        
+        // [Security Fix] Lock down the root directory permissions.
+        // Change mode to 0555 (r-xr-xr-x) so nobody cannot write to /
+        if (chmod("/", 0555) == -1) {
+            _exit(ERR_CHDIR_FAILED); // Fail safe
+        }
+
+        // ----------------------------------------------------------------------------------
+        // [Critical Security] Make the root filesystem strictly Read-Only NOW.
+        // This is done ASAP to minimize the RW window.
+        // ----------------------------------------------------------------------------------
+        if (mount(nullptr, "/", nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY, nullptr) == -1) {
+            _exit(ERR_REMOUNT_RO);
+        }
+
+        // -----------------------------------------------------
+        // 4.2 Mount Runtime filesystems (On top of RO Root)
+        // -----------------------------------------------------
+        // 1. /tmp (RW tmpfs) - Limit size to 64MB to prevent DoS
         if (mount("tmpfs", "/tmp", "tmpfs", 0, "size=64m") == -1) _exit(ERR_MOUNT_TMP);
 
-       // -----------------------------------------------------
-        // 5. 挂载 /proc (只读)
-        // -----------------------------------------------------
-        if (mkdir("/proc", 0755) == -1 && errno != EEXIST) _exit(ERR_MOUNT_PROC);
+        // 2. /proc (RO)
         if (mount("proc", "/proc", "proc", 0, nullptr) == -1) _exit(ERR_MOUNT_PROC);
-        
         if (mount("proc", "/proc", "proc", MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, nullptr) == -1) 
             _exit(ERR_MOUNT_PROC);
-
-
-        // // 3. IO 重定向
-        // int out_fd = open("/output.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        // if (out_fd == -1) _exit(ERR_OPEN_OUTPUT);
-        
-        // if (dup2(out_fd, STDOUT_FILENO) == -1) _exit(ERR_DUP2);
-        // close(out_fd);
-        
-        // if (dup2(null_fd, STDIN_FILENO) == -1) _exit(ERR_DUP2);
-        // if (dup2(null_fd, STDERR_FILENO) == -1) _exit(ERR_DUP2);
-        // close(null_fd);
 
         // 4. 资源限制 (setrlimit)
         rlimit cpu_limit;
@@ -228,17 +239,18 @@ namespace deep_oj {
         if (setrlimit(RLIMIT_NPROC, &nproc_limit) == -1) _exit(ERR_RLIMIT_NPROC);
 
         rlimit fsize_limit;
-        // [软硬限优化]: OS 层放宽输出文件大小限制，增加 10MB 缓冲
-        fsize_limit.rlim_cur = 10 * 1024 * 1024 + 10 * 1024 * 1024; // 10MB + 10MB buffer
-        fsize_limit.rlim_max = 10 * 1024 * 1024 + 10 * 1024 * 1024;
+        // 使用父进程传递的 output_limit_bytes
+        fsize_limit.rlim_cur = args->output_limit_bytes;
+        fsize_limit.rlim_max = args->output_limit_bytes;
+        // char debug_msg[128];
+        // int debug_len = snprintf(debug_msg, sizeof(debug_msg), 
+        //     "[DEBUG] Child received limit: %lu bytes\n", 
+        //     (unsigned long)args->output_limit_bytes);
+        // if (debug_len > 0) {
+        //     write(STDERR_FILENO, debug_msg, debug_len);
+        // }
         if (setrlimit(RLIMIT_FSIZE, &fsize_limit) == -1) _exit(ERR_RLIMIT_FSIZE);
         
-        // [Security Fix] Lock down the root directory permissions.
-        // Change mode to 0555 (r-xr-xr-x) so nobody cannot write to /
-        if (chmod("/", 0555) == -1) {
-            _exit(ERR_CHDIR_FAILED); // Fail safe
-        }
-
         // 5. 降权 (nobody)
         if (chdir("/") != 0) _exit(ERR_CHDIR_FAILED);
         if (setgid(g_runner_config.run_gid) != 0) _exit(ERR_SETGID_FAILED);
@@ -313,6 +325,13 @@ namespace deep_oj {
         mem_lim.rlim_max = (rlim_t)g_runner_config.compile_mem_limit;
         if (setrlimit(RLIMIT_AS, &mem_lim) == -1) _exit(ERR_RLIMIT_MEMORY);
 
+        // [Log Bomb Defense] Limit stderr output file size to 16MB.
+        // Prevents recursive template errors from filling up the disk.
+        rlimit fsize_lim;
+        fsize_lim.rlim_cur = 16 * 1024 * 1024; // 16MB
+        fsize_lim.rlim_max = 16 * 1024 * 1024;
+        if (setrlimit(RLIMIT_FSIZE, &fsize_lim) == -1) _exit(ERR_RLIMIT_FSIZE);
+
         // 7. [安全] 降权，使用配置中的 UID/GID
         if (setgid(g_runner_config.run_gid) != 0) _exit(ERR_SETGID_FAILED);
         if (setuid(g_runner_config.run_uid) != 0) _exit(ERR_SETUID_FAILED);
@@ -334,6 +353,8 @@ namespace deep_oj {
             (char*)"-std=c++20",
             (char*)"-O2",
             (char*)"-pipe",
+            // [Log Bomb Defense] Limit max error messages to 10
+            (char*)"-fmax-errors=10",
             (char*)new_src_path,
             (char*)"-o",
             (char*)new_exe_path,

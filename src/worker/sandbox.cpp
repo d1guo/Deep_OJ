@@ -252,10 +252,10 @@ namespace deep_oj
             }
         }
 
-        // [安全修复]: 更改目录所有者为 nobody (UID 65534)，并限制权限为 700
-        if (chown(request_dir.c_str(), 65534, 65534) != 0)
+        // [安全修复]: 更改目录所有者为 nobody (配置的 run_uid)，并限制权限为 700
+        if (chown(request_dir.c_str(), g_runner_config.run_uid, g_runner_config.run_gid) != 0)
         {
-             result.error_message = FormatSystemError("无法修改目录所有者为 nobody");
+             result.error_message = FormatSystemError("无法修改目录所有者");
              return result;
         }
         
@@ -431,6 +431,12 @@ namespace deep_oj
         
         args.time_limit_ms = time_limit_ms;
         args.memory_limit_kb = memory_limit_kb;
+        // [OLE Fix] Hard Limit = Soft Limit + Buffer
+        // 允许程序写超过 Soft Limit，但在到达 Hard Limit 前被 OS 杀死
+        // 这样父进程可以在程序结束后检查文件大小，准确判定 OLE
+        args.output_limit_bytes = (rlim_t)(g_runner_config.max_output_size + g_runner_config.output_buffer_size);
+        // // DEBUG
+        // std::cout << "DEBUG_PARENT: output_limit_bytes set to: " << args.output_limit_bytes << std::endl;
         
         // Pass FDs
         args.input_fd = input_fd;
@@ -528,11 +534,14 @@ namespace deep_oj
         result.memory_used = usage.ru_maxrss;
 
         // Post-exit Output Limit check
+        // 判定逻辑：
+        // 1. 如果文件大小 > max_output_size -> OLE (优先级最高)
+        // 2. 否则即使收到 SIGXFSZ，也可能是恰好卡在缓冲区，统一由此处判定
         std::error_code ec;
         if (fs::exists(output_path, ec)) {
             uint64_t out_size = 0;
             out_size = fs::file_size(output_path, ec);
-            if (!ec && out_size >= OUTPUT_LIMIT_BYTES) {
+            if (!ec && out_size > (uint64_t)g_runner_config.max_output_size) {
                 result.status = SandboxStatus::OUTPUT_LIMIT_EXCEEDED;
                 result.memory_used = usage.ru_maxrss;
                 return result;

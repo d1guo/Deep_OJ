@@ -53,6 +53,7 @@ message TaskRequest {
     int32 time_limit = 4;      // ms
     int32 memory_limit = 5;    // KB
     
+    string cache_key = 6;
     // 可选：预留 test_case_id 或 problem_id
     // uint32 problem_id = 6; 
 }
