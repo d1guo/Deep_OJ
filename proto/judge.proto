@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package deep_oj;
+
+// 定义判题服务
+option go_package = "github.com/d1guo/deep_oj/pkg/proto";
+
+service JudgeService {
+    // -----------------------------------------------------------
+    // 动作 1: Scheduler -> Worker
+    // 调度器把任务派发给 Worker。Worker 收到后只回个 "收到"，然后异步去跑。
+    // -----------------------------------------------------------
+    rpc ExecuteTask (TaskRequest) returns (TaskResponse);
+
+    // -----------------------------------------------------------
+    // 动作 2: Worker -> API
+    // Worker 跑完后，主动调用 API 的这个接口汇报结果。
+    // -----------------------------------------------------------
+    rpc UpdateStatus (TaskResult) returns (Ack);
+}
+
+// -------------------- 枚举定义 --------------------
+
+enum Language {
+    LANGUAGE_UNSPECIFIED = 0;
+    CPP = 1;
+    JAVA = 2;
+    PYTHON = 3;
+    GO = 4;
+}
+
+enum JudgeStatus {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;              // AC
+    WRONG_ANSWER = 2;          // WA
+    COMPILE_ERROR = 3;         // CE
+    TIME_LIMIT_EXCEEDED = 4;   // TLE
+    MEMORY_LIMIT_EXCEEDED = 5; // MLE
+    RUNTIME_ERROR = 6;         // RE
+    SYSTEM_ERROR = 7;          // SE
+}
+
+// -------------------- 消息体定义 --------------------
+
+// 任务请求 (对应 Redis 里的 queue:pending 内容)
+message TaskRequest {
+    string job_id = 1;
+    
+    // 【关键修改】这里改成 bytes！
+    // 避免 string 导致的自动转义 (backslash bug)
+    // 接收端收到后：std::string code(req.code().begin(), req.code().end());
+    bytes code = 2; 
+    
+    Language language = 3;
+    int32 time_limit = 4;      // ms
+    int32 memory_limit = 5;    // KB
+    
+    string cache_key = 6;
+    int64 submit_time = 7; // Unix timestamp (ms) for timeout detection
+    uint32 problem_id = 8;
+}
+
+// 判题结果 (Worker 汇报给 API 的)
+message TaskResult {
+    string job_id = 1;
+    JudgeStatus status = 2;
+    string error_message = 3;  // CE 的报错信息
+    int32 time_used = 4;       // ms
+    int64 memory_used = 5;     // KB
+}
+
+// 空响应 (占位符)
+message TaskResponse {
+    // 可以留空，或者加一个 bool accepted = 1; 表示 Worker 是否忙碌
+}
+
+message Ack {}

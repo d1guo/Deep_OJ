@@ -1,0 +1,39 @@
+# Deep-OJ Worker Configuration
+
+server:
+  port: 50051                  # gRPC 监听端口
+  pool_size: 4                 # 并发判题数 (信号量大小)
+
+path:
+  workspace_root: "/tmp/deep_oj_workspace"
+  compiler_bin: "/usr/bin/g++"
+  
+  # 1. 挂载目录 (文件夹 -> 文件夹)
+  mount_dirs:
+    - "/lib"
+    - "/lib64"
+    - "/usr"
+    - "/bin"
+    - "/etc/alternatives" # 目录
+
+  # 2. [新增] 挂载文件 (文件 -> 文件)
+  mount_files:
+    - "/etc/localtime"    # 让日志时间正确
+    - "/dev/null"         # 标准输入输出重定向需要
+    - "/dev/zero"
+    - "/dev/random"
+    - "/dev/urandom"
+
+compile:
+  # 键名必须和 config.cpp 里写的一模一样！
+  cpu_limit_s: 10
+  real_time_limit_s: 15
+  memory_limit_mb: 1024
+
+runner:
+  pool_size: 4 # 根据物理核数自动调整，通常 = CPU核数
+
+security:
+  # 容器内运行的用户 ID (nobody)
+  run_as_uid: 65534
+  run_as_gid: 65534

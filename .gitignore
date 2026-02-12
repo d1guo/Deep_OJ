@@ -1,0 +1,45 @@
+# 二进制文件
+bin/
+go/bin/
+build/
+*.o
+*.so
+*.a
+security_test_runner
+
+# 临时与工具数据
+ltjl/
+.gemini/
+.agent/
+
+# CMake 相关
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+!/Makefile
+
+# 环境与日志
+.env
+*.log
+api.log
+scheduler.log
+worker.log
+
+# IDE
+.vscode/
+.idea/
+
+# 操作系统
+.DS_Store
+
+# 数据与中间件
+data/
+db/
+dump.rdb
+appendonlydir/
+
+# 临时文件
+tmp/
+coverage.out
+*.html
