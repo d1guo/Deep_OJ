@@ -1,11 +1,13 @@
+#include <sys/wait.h>
+#include <unistd.h>
 #include <iostream>
-#include <vector>
-#include <string>
 #include <fstream>
+#include <vector>
 #include <cstring>
 #include <filesystem>
-#include "../src/worker/sandbox.h"
-#include "../src/worker/sandbox_internal.h" // For GlobalConfig definition
+#include <gtest/gtest.h>
+#include "../src/core/worker/sandbox.h"
+#include "../src/core/worker/sandbox_internal.h" // For GlobalConfig definition
 
 using namespace deep_oj;
 namespace fs = std::filesystem;
@@ -110,23 +112,19 @@ void RunTest(Sandbox& sandbox, const std::string& name, const std::string& sourc
     sandbox.Cleanup("test_" + name);
 }
 
-// Declare extern
-void LoadConfig(const std::string& path);
+namespace deep_oj {
+    void LoadConfig(const std::string& path);
+}
 
 int main() {
     std::cout << "=== Security Integration Test ===" << std::endl;
     
-    // 1. Load defaults from config.yaml
-    // Note: config.yaml is copied to build directory by CMake
-    if (fs::exists("config.yaml")) {
-        LoadConfig("config.yaml");
-    } else if (fs::exists("../config.yaml")) {
-        LoadConfig("../config.yaml");
-    } else {
-        std::cerr << "Warning: config.yaml not found, using manual defaults." << std::endl;
-        strncpy(deep_oj::g_runner_config.compiler_path, "/usr/bin/g++", sizeof(deep_oj::g_runner_config.compiler_path)-1);
-        // Ensure minimal mounts manually if config missing? 
-        // Best rely on LoadConfig.
+    // 1. Load config
+    try {
+        deep_oj::LoadConfig("config.yaml");
+    } catch (...) {
+        std::cerr << "Failed to load config.yaml\n";
+        deep_oj::LoadConfig("../config.yaml"); // Try parent dir
     }
 
     // 2. Override for test

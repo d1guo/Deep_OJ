@@ -32,7 +32,46 @@ Deep-OJ V3.0 是一个面向生产环境的高并发在线评测系统。项目�
 - **结构化日志**: 全链路 Trace ID 追踪。
 - **Protobuf**: 内部服务间采用高效的二进制序列化协议。
 
-## 技术栈概览
+## 系统架构
+
+```mermaid
+graph TD
+    User[用户/客户端] -->|HTTP/REST| API[API Gateway (Go)]
+    API -->|Auth/RateLimit| API
+    API -->|Write Job| Redis[(Redis Queue)]
+    API -->|Meta Data| DB[(PostgreSQL)]
+    
+    subgraph Scheduler Layer
+        Sched[Scheduler (Go)] -->|Watch| Etcd[(Etcd Registry)]
+        Sched -->|BRPopLPush| Redis
+    end
+    
+    subgraph Worker Nodes
+        Worker1[Worker 1 (Go + C++)]
+        Worker2[Worker 2 (Go + C++)]
+    end
+    
+    Sched -->|gRPC/Protobuf| Worker1
+    Sched -->|gRPC/Protobuf| Worker2
+    
+    Worker1 -->|Report| Redis
+    Worker1 -->|Sandbox| Kernel[Linux Kernel]
+    
+    Prometheus[Prometheus] -->|Scrape| API
+    Prometheus -->|Scrape| Sched
+    Prometheus -->|Scrape| Worker1
+```
+
+## API 文档
+
+| 方法 | 路径 | 描述 |
+|------|------|------|
+| POST | `/api/v1/auth/login` | 用户登录 (JWT) |
+| POST | `/api/v1/auth/register` | 用户注册 |
+| POST | `/api/v1/problems` | 上传题目包 (Admin) |
+| POST | `/api/v1/submit` | 提交代码 |
+| GET  | `/api/v1/status/:job_id` | 查询判题状态 |
+| GET  | `/metrics` | Prometheus 监控指标 |
 
 | 组件 | 技术选型 | 作用 |
 |------|----------|------|
@@ -44,45 +83,40 @@ Deep-OJ V3.0 是一个面向生产环境的高并发在线评测系统。项目�
 | **Monitor** | Prometheus | 指标采集 |
 
 ## 快速开始
-
-### 环境依赖
-- Linux (内核 5.x+ 以支持 Cgroups v2)
-- Go 1.21+
-- GCC 11+ / Clang
-- Docker (用于启动基础组件)
-
-### 安装部署
-
-1. **克隆仓库**
-   ```bash
-   git clone https://github.com/d1guo/Deep_OJ.git
-   cd Deep_OJ
-   ```
-
-2. **启动基础设施 (Redis, Postgres, Etcd)**
-   ```bash
-   # 使用 docker-compose 启动依赖服务
-   docker-compose up -d
-   ```
-
-3. **编译并运行**
-   ```bash
-   make run
-   ```
-   *该命令将编译所有微服务组件并启动集成测试。*
-
-## 验证
-项目包含包含完整的端到端集成测试套件：
-```bash
-make test
-```
-预期输出：
-```text
-[测试] A+B Problem 测试通过
-[测试] 系统成功抵御 Fork Bomb 攻击
-[监控] 指标核对完成...
-   scheduler_queue_depth{queue="processing"} 0
-```
+ 
+ ### 环境依赖
+ - Linux (推荐 Ubuntu 22.04+)
+ - Docker & Docker Configure
+ - Make
+ 
+ ### 安装部署
+ 
+ 1. **克隆仓库**
+    ```bash
+    git clone https://github.com/d1guo/Deep_OJ.git
+    cd Deep_OJ
+    ```
+ 
+ 2. **启动服务**
+    ```bash
+    make docker-up
+    ```
+    *首次启动会自动构建镜像，可能需要几分钟。*
+ 
+ 3. **运行测试**
+    ```bash
+    make test
+    # 或者运行压力测试
+    make bench
+    ```
+ 
+ ## 验证
+ 预期集成测试输出：
+ ```text
+ [SUCCESS] Problem uploaded, ID: 1
+ [SUCCESS] Submitted, Job ID: ...
+ [SUCCESS] Test Passed! Result: Accepted
+ ```
 
 ## 许可证
 MIT License

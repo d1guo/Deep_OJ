@@ -1,0 +1,196 @@
+# Deep-OJ Worker Configuration
+
+server:
+  port: 50051                  # gRPC 监听端口
+  pool_size: 4                 # 并发判题数 (信号量大小)
+
+path:
+  workspace_root: "/data/workspace"
+  compiler_bin: "/usr/bin/g++"
+  
+  # 1. 挂载目录 (文件夹 -> 文件夹)
+  mount_dirs:
+    - "/lib"
+    - "/lib64"
+    - "/usr"
+    - "/bin"
+    - "/etc/alternatives" # 目录
+
+  # 2. [新增] 挂载文件 (文件 -> 文件)
+  mount_files:
+    - "/etc/localtime"    # 让日志时间正确
+    - "/dev/null"         # 标准输入输出重定向需要
+    - "/dev/zero"
+    - "/dev/random"
+    - "/dev/urandom"
+
+compile:
+  # 键名必须和 config.cpp 里写的一模一样！
+  cpu_limit_s: 10
+  real_time_limit_s: 15
+  memory_limit_mb: 1024
+  tmpfs_size_mb: 128
+  log_max_size_mb: 16
+  max_errors: 10
+
+runner:
+  pool_size: 4 # 根据物理核数自动调整，通常 = CPU核数
+  max_output_size: 10485760      # bytes
+  output_buffer_size: 2097152    # bytes
+  tmpfs_size_mb: 64
+  cgroup_pids_limit: 20
+
+security:
+  # 容器内运行的用户 ID (nobody)
+  run_as_uid: 65534
+  run_as_gid: 65534
+
+# ===========================
+# Go Services Configuration
+# ===========================
+
+api:
+  port: 8080
+  gin_mode: "release"
+  database_url: "postgres://deep_oj:secret@localhost:5432/deep_oj?sslmode=disable"
+  redis_url: "localhost:6379"
+  minio:
+    endpoint: "localhost:9000"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+    bucket: "deep-oj-problems"
+  auth:
+    jwt_secret: ""            # 必填，留空会导致服务启动失败
+    jwt_expire_hours: 24
+    oauth_state_ttl_sec: 300  # OAuth state cookie TTL
+    admin_users:
+      - "admin"
+    oauth:
+      github:
+        client_id: ""
+        client_secret: ""
+        redirect_url: "http://localhost:8080/api/v1/auth/github/callback"
+  limits:
+    submit_body_max_bytes: 1048576   # 1MB
+    problem_zip_max_bytes: 52428800  # 50MB
+    submit_code_max_bytes: 65536
+    default_time_limit_ms: 1000
+    max_time_limit_ms: 10000
+    default_memory_limit_kb: 65536
+    max_memory_limit_kb: 524288
+    inflight_ttl_sec: 600
+    rate_limit:
+      ip_limit: 60
+      user_limit: 120
+      window_sec: 60
+    problem_defaults:
+      time_limit_ms: 1000
+      memory_limit_mb: 128
+  metrics:
+    service_name: "deep-oj-api"
+    instance_id: ""
+  shutdown_timeout_sec: 5
+
+scheduler:
+  etcd_endpoints:
+    - "localhost:2379"
+  redis_url: "localhost:6379"
+  database_url: "postgres://deep_oj:secret@localhost:5432/deep_oj?sslmode=disable"
+  worker_capacity: 4
+  max_retry: 3
+  retry_ttl_sec: 86400
+  scheduler_id: "scheduler-1"
+  metrics_port: 9091
+  metrics_poll_ms: 1000
+  etcd_dial_timeout_ms: 5000
+  queue:
+    brpop_timeout_sec: 5
+    no_worker_sleep_ms: 1000
+    assignment_ttl_sec: 600
+    payload_ttl_sec: 1800
+    processing_start_ttl_sec: 1800
+    inflight_ttl_sec: 1800
+  ack_listener:
+    pending_count: 20
+    pending_block_ms: 1000
+    new_count: 10
+    new_block_ms: 5000
+  slow_path:
+    tick_sec: 60
+    processing_cutoff_sec: 30
+    pending_stale_sec: 60
+    db_scan_limit: 100
+  watchdog:
+    interval_sec: 5
+  dispatch:
+    conn_timeout_ms: 3000
+    rpc_timeout_ms: 5000
+    max_retries: 3
+    backoff_base_ms: 100
+  grpc_tls:
+    cert: ""
+    key: ""
+    ca: ""
+  metrics:
+    service_name: "deep-oj-scheduler"
+    instance_id: ""
+
+worker:
+  id: ""
+  addr: ""
+  port: 50051
+  etcd_endpoints:
+    - "localhost:2379"
+  etcd_dial_timeout_ms: 5000
+  etcd_lease_ttl_sec: 10
+  redis_url: "localhost:6379"
+  minio:
+    endpoint: "localhost:9000"
+    access_key: "minioadmin"
+    secret_key: "minioadmin"
+    bucket: "deep-oj-problems"
+  workspace: "/data/workspace"
+  judger_bin: "/app/judge_engine"
+  judger_config: "/app/config.yaml"
+  pool_size: 4
+  keep_workdir: false
+  result_ttl_sec: 600
+  checker_timeout_ms: 2000
+  cleanup_timeout_sec: 5
+  result_stream_max_retries: 3
+  result_stream_backoff_ms: 100
+  timeouts:
+    compile_ms: 10000
+    exec_buffer_ms: 500
+    download_ms: 60000
+    unzip_ms: 30000
+  testcase_cache:
+    max: 100
+    ttl_sec: 3600
+  unzip_limits:
+    max_bytes: 268435456    # 256MB
+    max_files: 2000
+    max_file_bytes: 67108864 # 64MB
+  allow_host_checker: false
+  require_cgroups_v2: false
+  grpc_tls:
+    cert: ""
+    key: ""
+    ca: ""
+  metrics:
+    service_name: "deep-oj-worker"
+    instance_id: ""
+  metrics_port: 9092
+
+redis:
+  pool_size: 10
+  min_idle_conns: 3
+  dial_timeout_ms: 5000
+  read_timeout_ms: 3000
+  write_timeout_ms: 3000
+
+postgres:
+  max_conns: 10
+  min_conns: 2
+  max_conn_lifetime_min: 60
+  max_conn_idle_min: 30

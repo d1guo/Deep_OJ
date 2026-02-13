@@ -4,58 +4,129 @@ services:
     image: redis:alpine
     container_name: oj-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     networks:
       - deep-oj-net
 
-  # 2. 工作节点 (苦力) - 优先启动，因为调度器依赖它
+  # 2. 工作节点 (Go Wrapper + C++ Core)
   worker:
     build: .
-    image: deep-oj:v1
+    image: deep-oj:v3
     container_name: oj-worker
-    # 修正路径：加上 build/ 前缀
-    command: ./build/oj_worker
+    command: /app/oj_worker
     privileged: true 
     ports:
       - "50051:50051"
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ./data/workspace:/data/workspace:rw
+    environment:
+      - REDIS_URL=oj-redis:6379
+      - MINIO_ENDPOINT=oj-minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=deep-oj-problems
+      - ETCD_ENDPOINTS=oj-etcd:2379
+      - WORKER_ADDR=oj-worker:50051
+      - JUDGER_BIN=/app/judge_engine
+      - WORKSPACE=/data/workspace
     networks:
       - deep-oj-net
+    depends_on:
+      - redis
+      - minio
 
   # 3. 调度器 (大脑)
   scheduler:
     build: .
-    image: deep-oj:v1
+    image: deep-oj:v3
     container_name: oj-scheduler
-    # 修正路径：加上 build/ 前缀
-    command: ./build/oj_scheduler
+    restart: on-failure
+    user: deep_oj
+    command: /app/oj_scheduler
     ports:
       - "50052:50052"
     environment:
+      - REDIS_URL=oj-redis:6379
       - WORKER_ADDR=oj-worker:50051
+      - ETCD_ENDPOINTS=oj-etcd:2379 # Need Etcd service
+      - PGPASSWORD=secret
+      - DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable
     networks:
       - deep-oj-net
     depends_on:
       - worker
+      - redis
+      - postgres
 
   # 4. API Server (大门)
   api:
     build: .
-    image: deep-oj:v1
+    image: deep-oj:v3
     container_name: oj-api
-    # 修正路径：加上 build/ 前缀，注意文件名是 oj_server
-    command: ./build/oj_server
+    restart: on-failure
+    user: deep_oj
+    command: /app/oj_api
     ports:
       - "18080:18080"
     environment:
-      - REDIS_HOST=oj-redis
+      - PORT=18080
+      - REDIS_URL=oj-redis:6379
       - SCHEDULER_ADDR=oj-scheduler:50052
+      - PGPASSWORD=secret
+      - DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable
+      - MINIO_ENDPOINT=oj-minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=deep-oj-problems
     networks:
       - deep-oj-net
     depends_on:
       - redis
       - scheduler
+      - postgres
+      - minio
+
+  # 5. 关系型数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: oj-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=deep_oj
+      - POSTGRES_PASSWORD=secret
+      - POSTGRES_DB=deep_oj
+    volumes:
+      - ./sql/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    networks:
+      - deep-oj-net
+
+  # 6. 对象存储 (MinIO)
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: oj-minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - deep-oj-net
+
+  # 7. Etcd (Service Discovery)
+  etcd:
+    image: registry.cn-hangzhou.aliyuncs.com/google_containers/etcd:3.5.0-0
+    container_name: oj-etcd
+    command: /usr/local/bin/etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://oj-etcd:2379
+    ports:
+      - "2381:2379"
+    networks:
+      - deep-oj-net
 
 networks:
   deep-oj-net:

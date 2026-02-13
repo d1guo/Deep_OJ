@@ -38,6 +38,9 @@ data/
 db/
 dump.rdb
 appendonlydir/
+debug/
+benchmark/
+TASKS.md
 
 # 临时文件
 tmp/

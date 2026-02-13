@@ -1,38 +1,37 @@
-.PHONY: all build clean test run
+.PHONY: all build clean test run docker-build docker-up docker-down
 
 # 默认目标
-all: build
+all: docker-build
 
-# 编译所有组件
-build: build-go build-cpp
+# Docker 构建
+docker-build:
+	@echo "正在构建 Docker 镜像..."
+	docker-compose build
 
-build-go:
-	@echo "正在编译 Go 服务 (API & Scheduler)..."
-	cd go && go mod tidy
-	cd go && go build -o bin/api cmd/api/main.go
-	cd go && go build -o bin/scheduler cmd/scheduler/main.go
-	@echo "Go 服务编译完成。"
+# Docker 启动
+docker-up:
+	@echo "正在启动服务..."
+	docker-compose up -d
 
-build-cpp:
-	@echo "正在编译 C++ Worker..."
-	mkdir -p build
-	cd build && cmake .. && make -j4
-	@echo "C++ Worker 编译完成。"
+# Docker 停止
+docker-down:
+	@echo "正在停止服务..."
+	docker-compose down
 
-# 运行集成测试 (全链路验证)
-test: build
+# 运行集成测试 (E2E)
+test:
 	@echo "正在运行集成测试..."
-	./scripts/start_integration.sh
+	python3 tests/integration/test_e2e.py
 
-# 启动系统 (标准启动)
-run: build
-	@echo "正在启动 Deep-OJ V3.0..."
-	./scripts/start_integration.sh
+# 启动压力测试 (Benchmark)
+bench:
+	@echo "正在运行压力测试..."
+	go run benchmark/submit_bench.go -c 50 -d 10s
 
-# 清理构建产物
-clean:
+# 清理
+clean: docker-down
 	@echo "正在清理..."
-	rm -rf go/bin
+	rm -rf src/go/bin
 	rm -rf build
 	rm -rf data
 	rm -f *.log
