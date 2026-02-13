@@ -35,31 +35,32 @@ Deep-OJ V3.0 是一个面向生产环境的高并发在线评测系统。项目�
 ## 系统架构
 
 ```mermaid
-graph TD
-    User[用户/客户端] -->|HTTP/REST| API[API Gateway (Go)]
-    API -->|Auth/RateLimit| API
-    API -->|Write Job| Redis[(Redis Queue)]
-    API -->|Meta Data| DB[(PostgreSQL)]
-    
+flowchart TD
+    User["用户/客户端"] -->|"HTTP/REST"| API["API Gateway (Go)"]
+    API -->|"Auth/RateLimit"| Auth["Auth/RateLimit"]
+    Auth --> API
+    API -->|"Write Job"| Redis[("Redis Queue")]
+    API -->|"Meta Data"| DB[("PostgreSQL")]
+
     subgraph Scheduler Layer
-        Sched[Scheduler (Go)] -->|Watch| Etcd[(Etcd Registry)]
-        Sched -->|BRPopLPush| Redis
+        Sched["Scheduler (Go)"] -->|"Watch"| Etcd[("Etcd Registry")]
+        Sched -->|"BRPopLPush"| Redis
     end
-    
+
     subgraph Worker Nodes
-        Worker1[Worker 1 (Go + C++)]
-        Worker2[Worker 2 (Go + C++)]
+        Worker1["Worker 1 (Go + C++)"]
+        Worker2["Worker 2 (Go + C++)"]
     end
-    
-    Sched -->|gRPC/Protobuf| Worker1
-    Sched -->|gRPC/Protobuf| Worker2
-    
-    Worker1 -->|Report| Redis
-    Worker1 -->|Sandbox| Kernel[Linux Kernel]
-    
-    Prometheus[Prometheus] -->|Scrape| API
-    Prometheus -->|Scrape| Sched
-    Prometheus -->|Scrape| Worker1
+
+    Sched -->|"gRPC/Protobuf"| Worker1
+    Sched -->|"gRPC/Protobuf"| Worker2
+
+    Worker1 -->|"Report"| Redis
+    Worker1 -->|"Sandbox"| Kernel["Linux Kernel"]
+
+    Prometheus["Prometheus"] -->|"Scrape"| API
+    Prometheus -->|"Scrape"| Sched
+    Prometheus -->|"Scrape"| Worker1
 ```
 
 ## API 文档
