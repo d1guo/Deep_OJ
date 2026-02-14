@@ -1,34 +1,56 @@
 /**
  * @file main.cpp (judge_engine)
  * @brief C++ 判题核心引擎 (CLI)
- * 
- * 职责:
- * 1. 接收命令行参数 (代码路径, 时间限制, 内存限制)
- * 2. 启动沙箱运行代码
- * 3. 结果以 JSON 格式输出到 stdout
- * 
- * 只有最纯粹的计算逻辑，不包含网络通信。
+ *
+ * 约束:
+ * 1. stdout 只输出单行 JSON (末尾 \n)
+ * 2. debug/log 仅输出到 stderr
  */
-#include <iostream>
-#include <string>
-#include <vector>
-#include <memory>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
-#include <nlohmann/json.hpp>
 #include <getopt.h>
+#include <iostream>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <sstream>
+#include <string>
 #include <unistd.h>
 
 #include "sandbox.h"
 #include "sandbox_internal.h"
 
 namespace deep_oj {
-    void LoadConfig(const std::string& path);
+void LoadConfig(const std::string& path);
 }
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+namespace {
+
+struct ExecutionConfig {
+    std::string source_path;  // compile mode source path
+    std::string code_path;
+    std::string input_path;
+    std::string output_path;
+    std::string error_path;
+    int time_limit = 1000;       // ms
+    int memory_limit = 131072;   // KB
+    std::string work_dir;
+    std::string request_id;      // compile/cleanup id
+    std::string job_id;
+    long long attempt_id = -1;
+    bool compile_only = false;
+    bool cleanup_only = false;
+    bool self_test = false;
+    bool attempt_explicit = false;
+};
+
+struct VerdictAndStatus {
+    std::string verdict;
+    std::string status;
+};
 
 bool ValidateConfig(std::string& err) {
     if (deep_oj::g_runner_config.workspace_root[0] == '\0') {
@@ -50,37 +72,128 @@ bool ValidateConfig(std::string& err) {
     return true;
 }
 
-struct ExecutionConfig {
-    std::string source_path;  // compile mode source path
-    std::string code_path;
-    std::string input_path;   // 可选：如果不传，则由 caller 负责重定向 stdin? 
-                              // 还是由 Sandbox 负责？Current Sandbox Run takes stdin_path.
-    std::string output_path;  // stdout 写入位置
-    std::string error_path;   // stderr 写入位置
-    int time_limit = 1000;    // ms
-    int memory_limit = 131072;   // KB (默认 128MB)
-    std::string work_dir;
-    std::string request_id;   // compile/cleanup id
-    bool compile_only = false;
-    bool cleanup_only = false;
-};
+bool ParseAttemptID(const std::string& raw, long long& attempt_id) {
+    try {
+        attempt_id = std::stoll(raw);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
 
-void print_usage(const char* prog) {
+void FillRunMetaFromEnv(ExecutionConfig& config) {
+    if (config.job_id.empty()) {
+        const char* env_job = std::getenv("JUDGE_JOB_ID");
+        if (env_job != nullptr) {
+            config.job_id = env_job;
+        }
+    }
+    if (!config.attempt_explicit) {
+        const char* env_attempt = std::getenv("JUDGE_ATTEMPT_ID");
+        if (env_attempt != nullptr) {
+            long long parsed = -1;
+            if (ParseAttemptID(env_attempt, parsed)) {
+                config.attempt_id = parsed;
+                config.attempt_explicit = true;
+            }
+        }
+    }
+}
+
+VerdictAndStatus ToVerdictAndStatus(deep_oj::SandboxStatus status) {
+    switch (status) {
+        case deep_oj::SandboxStatus::OK:
+            return {"OK", "Finished"};
+        case deep_oj::SandboxStatus::TIME_LIMIT_EXCEEDED:
+            return {"TLE", "Time Limit Exceeded"};
+        case deep_oj::SandboxStatus::MEMORY_LIMIT_EXCEEDED:
+            return {"MLE", "Memory Limit Exceeded"};
+        case deep_oj::SandboxStatus::OUTPUT_LIMIT_EXCEEDED:
+            return {"OLE", "Output Limit Exceeded"};
+        case deep_oj::SandboxStatus::SYSTEM_ERROR:
+            return {"SE", "System Error"};
+        default:
+            return {"RE", "Runtime Error"};
+    }
+}
+
+json BuildRunJSON(
+    const std::string& job_id,
+    long long attempt_id,
+    const std::string& verdict,
+    int time_ms,
+    long mem_kb,
+    int exit_signal,
+    const std::string& sandbox_error,
+    int exit_code,
+    const std::string& status,
+    const std::string& error_message
+) {
+    json out;
+    out["schema_version"] = 1;
+    out["job_id"] = job_id;
+    out["attempt_id"] = attempt_id;
+    out["verdict"] = verdict;
+    out["time_ms"] = time_ms;
+    out["mem_kb"] = mem_kb;
+    out["exit_signal"] = exit_signal;
+    out["sandbox_error"] = sandbox_error;
+
+    // Backward-compatible fields for existing Go worker parser.
+    out["status"] = status;
+    out["time_used"] = time_ms;
+    out["memory_used"] = mem_kb;
+    out["exit_code"] = exit_code;
+    if (!error_message.empty()) {
+        out["error"] = error_message;
+    }
+    return out;
+}
+
+void EmitJSONLine(const json& out) {
+    std::cout << out.dump() << '\n';
+}
+
+void EmitRunSystemError(
+    const ExecutionConfig& config,
+    const std::string& sandbox_error,
+    const std::string& error_message
+) {
+    EmitJSONLine(BuildRunJSON(
+        config.job_id,
+        config.attempt_id,
+        "SE",
+        0,
+        0,
+        0,
+        sandbox_error,
+        0,
+        "System Error",
+        error_message
+    ));
+}
+
+void PrintUsage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options]\n"
               << "Options:\n"
-              << "  -s <path>    Path to source file (compile mode)\n"
-              << "  -r <id>      Request ID (compile/cleanup)\n"
-              << "  -c <path>    Path to compiled executable (user code)\n"
-              << "  -t <ms>      Time limit (default: 1000)\n"
-              << "  -m <kb>      Memory limit (default: 131072)\n"
-              << "  -i <path>    Input file path (stdin)\n"
-              << "  -o <path>    Output file path (stdout)\n"
-              << "  -e <path>    Error file path (stderr)\n"
-              << "  -w <path>    Working directory (optional)\n"
-              << "  -C <path>    Config file path (required for sandbox settings)\n"
-              << "  --compile    Compile only (requires -s and -r)\n"
-              << "  --cleanup    Cleanup temp dir (requires -r)\n";
+              << "  -s <path>         Path to source file (compile mode)\n"
+              << "  -r <id>           Request ID (compile/cleanup)\n"
+              << "  -c <path>         Path to compiled executable (run mode)\n"
+              << "  -t <ms>           Time limit (default: 1000)\n"
+              << "  -m <kb>           Memory limit (default: 131072)\n"
+              << "  -i <path>         Input file path (stdin)\n"
+              << "  -o <path>         Output file path (stdout)\n"
+              << "  -e <path>         Error file path (stderr)\n"
+              << "  -w <path>         Working directory (optional)\n"
+              << "  -C <path>         Config file path (required except --self_test)\n"
+              << "  --job_id <id>     Job ID passed from worker\n"
+              << "  --attempt_id <n>  Attempt ID passed from worker\n"
+              << "  --compile         Compile only (requires -s and -r)\n"
+              << "  --cleanup         Cleanup temp dir (requires -r)\n"
+              << "  --self_test       Print one-line protocol JSON and exit\n";
 }
+
+}  // namespace
 
 int main(int argc, char** argv) {
     ExecutionConfig config;
@@ -88,42 +201,130 @@ int main(int argc, char** argv) {
     static struct option long_opts[] = {
         {"compile", no_argument, nullptr, 1},
         {"cleanup", no_argument, nullptr, 2},
-        {"help",    no_argument, nullptr, 'h'},
+        {"job_id", required_argument, nullptr, 3},
+        {"attempt_id", required_argument, nullptr, 4},
+        {"self_test", no_argument, nullptr, 5},
+        {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
     while ((opt = getopt_long(argc, argv, "s:r:c:t:m:i:o:e:w:C:h", long_opts, nullptr)) != -1) {
         switch (opt) {
-            case 's': config.source_path = optarg; break;
-            case 'r': config.request_id = optarg; break;
-            case 'c': config.code_path = optarg; break;
-            case 't': config.time_limit = std::stoi(optarg); break;
-            case 'm': config.memory_limit = std::stoi(optarg); break;
-            case 'i': config.input_path = optarg; break;
-            case 'o': config.output_path = optarg; break;
-            case 'e': config.error_path = optarg; break;
-            case 'w': config.work_dir = optarg; break;
-            case 'C': deep_oj::LoadConfig(optarg); break;
-            case 1: config.compile_only = true; break;
-            case 2: config.cleanup_only = true; break;
-            case 'h': print_usage(argv[0]); return 0;
-            default: print_usage(argv[0]); return 1;
+            case 's':
+                config.source_path = optarg;
+                break;
+            case 'r':
+                config.request_id = optarg;
+                break;
+            case 'c':
+                config.code_path = optarg;
+                break;
+            case 't':
+                config.time_limit = std::stoi(optarg);
+                break;
+            case 'm':
+                config.memory_limit = std::stoi(optarg);
+                break;
+            case 'i':
+                config.input_path = optarg;
+                break;
+            case 'o':
+                config.output_path = optarg;
+                break;
+            case 'e':
+                config.error_path = optarg;
+                break;
+            case 'w':
+                config.work_dir = optarg;
+                break;
+            case 'C':
+                deep_oj::LoadConfig(optarg);
+                break;
+            case 1:
+                config.compile_only = true;
+                break;
+            case 2:
+                config.cleanup_only = true;
+                break;
+            case 3:
+                config.job_id = optarg;
+                break;
+            case 4:
+                if (!ParseAttemptID(optarg, config.attempt_id)) {
+                    config.attempt_id = -1;
+                } else {
+                    config.attempt_explicit = true;
+                }
+                break;
+            case 5:
+                config.self_test = true;
+                break;
+            case 'h':
+                PrintUsage(argv[0]);
+                return 0;
+            default:
+                PrintUsage(argv[0]);
+                return 1;
         }
+    }
+
+    FillRunMetaFromEnv(config);
+
+    if (config.self_test) {
+        const bool missing_job_id = config.job_id.empty();
+        const bool missing_attempt_id = !config.attempt_explicit;
+        if (missing_job_id || missing_attempt_id) {
+            if (missing_attempt_id) {
+                config.attempt_id = -1;
+            }
+            const std::string err_code = missing_job_id ? "missing_job_id" : "missing_attempt_id";
+            const std::string err_msg = missing_job_id
+                                            ? "missing required --job_id/JUDGE_JOB_ID"
+                                            : "missing required --attempt_id/JUDGE_ATTEMPT_ID";
+            EmitJSONLine(BuildRunJSON(
+                config.job_id,
+                config.attempt_id,
+                "SE",
+                0,
+                0,
+                0,
+                err_code,
+                0,
+                "System Error",
+                err_msg
+            ));
+            return 0;
+        }
+        EmitJSONLine(BuildRunJSON(
+            config.job_id,
+            config.attempt_id,
+            "OK",
+            1,
+            64,
+            0,
+            "",
+            0,
+            "Finished",
+            ""
+        ));
+        return 0;
     }
 
     std::string cfg_err;
     if (!ValidateConfig(cfg_err)) {
-        json result_json;
-        result_json["schema_version"] = 1;
-        result_json["status"] = "System Error";
-        result_json["error"] = cfg_err;
-        std::cout << result_json.dump() << std::endl;
+        if (!config.code_path.empty() || !config.input_path.empty() || !config.output_path.empty()) {
+            EmitRunSystemError(config, "config_invalid", cfg_err);
+        } else {
+            json result_json;
+            result_json["schema_version"] = 1;
+            result_json["status"] = "System Error";
+            result_json["error"] = cfg_err;
+            EmitJSONLine(result_json);
+        }
         return 1;
     }
 
-    // 1. 初始化沙箱
     deep_oj::Sandbox sandbox(deep_oj::g_runner_config.workspace_root);
 
-    // Cleanup mode
     if (config.cleanup_only) {
         if (config.request_id.empty()) {
             std::cerr << "Error: cleanup requires -r <request_id>\n";
@@ -134,11 +335,10 @@ int main(int argc, char** argv) {
         result_json["schema_version"] = 1;
         result_json["status"] = "Cleaned";
         result_json["request_id"] = config.request_id;
-        std::cout << result_json.dump() << std::endl;
+        EmitJSONLine(result_json);
         return 0;
     }
 
-    // Compile mode
     if (config.compile_only || !config.source_path.empty()) {
         if (config.source_path.empty() || config.request_id.empty()) {
             std::cerr << "Error: compile requires -s <source_path> and -r <request_id>\n";
@@ -161,59 +361,58 @@ int main(int argc, char** argv) {
             result_json["status"] = "Compile Error";
             result_json["error"] = cres.error_message;
         }
-        std::cout << result_json.dump() << std::endl;
+        EmitJSONLine(result_json);
         return cres.success ? 0 : 2;
     }
 
-    // Run mode
     if (config.code_path.empty() || config.input_path.empty() || config.output_path.empty()) {
-        std::cerr << "Error: Missing required arguments.\n";
-        print_usage(argv[0]);
+        EmitRunSystemError(config, "missing_run_args", "run mode requires -c, -i and -o");
+        return 1;
+    }
+
+    if (config.job_id.empty()) {
+        EmitRunSystemError(config, "missing_job_id", "missing required --job_id/JUDGE_JOB_ID");
+        return 1;
+    }
+
+    if (!config.attempt_explicit) {
+        EmitRunSystemError(config, "missing_attempt_id", "missing required --attempt_id/JUDGE_ATTEMPT_ID");
         return 1;
     }
 
     if (config.work_dir.empty()) {
         config.work_dir = fs::path(config.code_path).parent_path().string();
     }
-
     if (config.error_path.empty()) {
         config.error_path = (fs::path(config.work_dir) / "stderr.txt").string();
     }
-    
-    // 2. 运行
+
     deep_oj::RunResult rres = sandbox.Run(
-        config.code_path, 
-        config.input_path, 
-        config.output_path, 
-        config.error_path, 
-        config.time_limit, 
+        config.code_path,
+        config.input_path,
+        config.output_path,
+        config.error_path,
+        config.time_limit,
         config.memory_limit
     );
 
-    // 3. 构建结果 JSON
-    json result_json;
-    result_json["schema_version"] = 1;
-    result_json["time_used"] = rres.time_used;
-    result_json["memory_used"] = rres.memory_used;
-    result_json["exit_code"] = rres.exit_code;
-    
-    // 状态映射
-    std::string status_str;
-    switch (rres.status) {
-        case deep_oj::SandboxStatus::OK: status_str = "Finished"; break; // 注意：Go Wrapper 负责判断 WA/AC
-        case deep_oj::SandboxStatus::TIME_LIMIT_EXCEEDED: status_str = "Time Limit Exceeded"; break;
-        case deep_oj::SandboxStatus::MEMORY_LIMIT_EXCEEDED: status_str = "Memory Limit Exceeded"; break;
-        case deep_oj::SandboxStatus::OUTPUT_LIMIT_EXCEEDED: status_str = "Output Limit Exceeded"; break;
-        default: status_str = "Runtime Error"; break;
-    }
-    result_json["status"] = status_str;
-
-    if (!rres.error_message.empty()) {
-        result_json["error"] = rres.error_message;
+    VerdictAndStatus mapped = ToVerdictAndStatus(rres.status);
+    std::string sandbox_error = rres.sandbox_error;
+    if (mapped.verdict == "SE" && sandbox_error.empty()) {
+        sandbox_error = "system_error";
     }
 
-    // 4. 输出到 stdout
-    std::cout << result_json.dump() << std::endl;
-
+    EmitJSONLine(BuildRunJSON(
+        config.job_id,
+        config.attempt_id,
+        mapped.verdict,
+        rres.time_used,
+        rres.memory_used,
+        rres.exit_signal,
+        sandbox_error,
+        rres.exit_code,
+        mapped.status,
+        rres.error_message
+    ));
     return 0;
 }

@@ -34,6 +34,8 @@ namespace deep_oj
         int time_used = 0;      // ms
         long memory_used = 0;   // KB
         int exit_code = 0;      // 只有 status != SYSTEM_ERROR 时有效
+        int exit_signal = 0;    // 0 means no signal; otherwise POSIX signal number
+        std::string sandbox_error; // short machine-readable sandbox error code
         std::string error_message; // 系统错误详情
     };
 

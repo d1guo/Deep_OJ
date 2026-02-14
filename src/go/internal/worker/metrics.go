@@ -60,6 +60,22 @@ var (
 			Buckets: prometheus.DefBuckets,
 		},
 	)
+
+	judgeProtocolErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "judge_protocol_errors_total",
+			Help: "Total number of judge protocol validation errors",
+		},
+		[]string{"reason"},
+	)
+
+	judgeOutputTruncatedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "judge_output_truncated_total",
+			Help: "Total number of judge output truncations",
+		},
+		[]string{"stream"},
+	)
 )
 
 // InitMetrics registers worker metrics
@@ -69,4 +85,6 @@ func InitMetrics() {
 	reg.MustRegister(workerCompileDuration)
 	reg.MustRegister(workerDownloadDuration)
 	reg.MustRegister(workerUnzipDuration)
+	reg.MustRegister(judgeProtocolErrorsTotal)
+	reg.MustRegister(judgeOutputTruncatedTotal)
 }

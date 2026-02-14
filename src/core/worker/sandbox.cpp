@@ -80,6 +80,36 @@ namespace deep_oj
             return prefix + ": " + std::strerror(errno);
         }
 
+        std::string ExitCodeToSandboxError(int code)
+        {
+            switch (code)
+            {
+                case ERR_OPEN_OUTPUT: return "io_open_output_failed";
+                case ERR_DUP2: return "io_dup2_failed";
+                case ERR_EXEC_FAILED: return "execve_failed";
+                case ERR_CHDIR_FAILED: return "chdir_failed";
+                case ERR_SETGID_FAILED: return "setgid_failed";
+                case ERR_SETUID_FAILED: return "setuid_failed";
+                case ERR_RLIMIT_CPU: return "rlimit_cpu_failed";
+                case ERR_RLIMIT_MEMORY: return "rlimit_memory_failed";
+                case ERR_RLIMIT_STACK: return "rlimit_stack_failed";
+                case ERR_RLIMIT_NPROC: return "rlimit_nproc_failed";
+                case ERR_RLIMIT_FSIZE: return "rlimit_fsize_failed";
+                case ERR_MOUNT_PRIVATE: return "mount_private_failed";
+                case ERR_MOUNT_BIND_SELF: return "mount_bind_self_failed";
+                case ERR_MOUNT_BIND_LIB: return "mount_bind_lib_failed";
+                case ERR_REMOUNT_RO: return "remount_ro_failed";
+                case ERR_PIVOT_ROOT: return "pivot_root_failed";
+                case ERR_CHDIR_NEW_ROOT: return "chdir_new_root_failed";
+                case ERR_UMOUNT_OLD: return "umount_old_root_failed";
+                case ERR_MOUNT_PROC: return "mount_proc_failed";
+                case ERR_MOUNT_TMP: return "mount_tmpfs_failed";
+                case ERR_MKDIR_FAILED: return "mkdir_failed";
+                case ERR_SANDBOX_EXCEPTION: return "sandbox_exception";
+                default: return "sandbox_child_exit_" + std::to_string(code);
+            }
+        }
+
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
         class ProcessGuard
@@ -395,6 +425,7 @@ namespace deep_oj
         int dev_null_fd = open("/dev/null", O_RDWR);
         if (dev_null_fd < 0) {
              result.status = SandboxStatus::SYSTEM_ERROR;
+             result.sandbox_error = "open_dev_null_failed";
              result.error_message = FormatSystemError("open /dev/null");
              return result;
         }
@@ -453,6 +484,8 @@ namespace deep_oj
         if (pid == -1)
         {
             result.status = SandboxStatus::SYSTEM_ERROR; 
+            result.sandbox_error = "clone_failed";
+            result.error_message = FormatSystemError("clone failed");
             std::cerr << "[沙箱] clone 调用失败: " << std::strerror(errno) << std::endl;
             return result;
         }
@@ -501,9 +534,6 @@ namespace deep_oj
             
         int real_time_limit_ms = time_limit_ms + 1000;
 
-        // Flag to mark that parent killed process for MLE
-        bool parent_killed_for_mle = false;
-
         while (true)
         {
             pid_t w = proc.wait_nonblock_rusage(status, &usage);
@@ -512,6 +542,8 @@ namespace deep_oj
             {
                 if (errno == EINTR) continue; 
                 result.status = SandboxStatus::SYSTEM_ERROR;
+                result.sandbox_error = "waitpid_failed";
+                result.error_message = FormatSystemError("wait4 failed");
                 return result;
             }
 
@@ -532,7 +564,7 @@ namespace deep_oj
                 result.time_used = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - start_time).count());
                 result.memory_used = usage.ru_maxrss;
-                parent_killed_for_mle = true;
+                result.exit_signal = SIGKILL;
                 return result;
             }
 
@@ -548,6 +580,7 @@ namespace deep_oj
                 result.status = SandboxStatus::TIME_LIMIT_EXCEEDED;
                 result.time_used = elapsed_ms; 
                 result.memory_used = usage.ru_maxrss; 
+                result.exit_signal = SIGKILL;
                 return result;
             }
 
@@ -601,6 +634,7 @@ namespace deep_oj
 
         if (WIFEXITED(status))
         {
+            result.exit_signal = 0;
             result.exit_code = WEXITSTATUS(status);
             if (result.exit_code == 0)
             {
@@ -609,6 +643,7 @@ namespace deep_oj
             else if (result.exit_code >= 120) 
             {
                 result.status = SandboxStatus::SYSTEM_ERROR; 
+                result.sandbox_error = ExitCodeToSandboxError(result.exit_code);
                 result.error_message = "沙箱恐慌 (退出码 " + std::to_string(result.exit_code) + "): " + GetExitCodeDescription(result.exit_code);
             }
             else
@@ -619,6 +654,7 @@ namespace deep_oj
         else if (WIFSIGNALED(status))
         {
             int signal = WTERMSIG(status);
+            result.exit_signal = signal;
             
             if (signal == SIGXCPU)
             {
@@ -663,6 +699,8 @@ namespace deep_oj
         else
         {
             result.status = SandboxStatus::SYSTEM_ERROR; 
+            result.sandbox_error = "wait_status_unknown";
+            result.error_message = "unknown wait status";
         }
     
         return result;

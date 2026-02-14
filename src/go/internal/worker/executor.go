@@ -5,15 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
 // Result from C++ core (stdout)
 type JudgeResult struct {
 	SchemaVersion int    `json:"schema_version,omitempty"`
+	JobId         string `json:"job_id,omitempty"`
+	AttemptId     int64  `json:"attempt_id,omitempty"`
+	Verdict       string `json:"verdict,omitempty"`
+	TimeMs        int    `json:"time_ms,omitempty"`
+	MemKb         int64  `json:"mem_kb,omitempty"`
+	ExitSignal    int    `json:"exit_signal,omitempty"`
+	SandboxError  string `json:"sandbox_error,omitempty"`
 	TimeUsed      int    `json:"time_used"`
 	MemoryUsed    int    `json:"memory_used"`
 	ExitCode      int    `json:"exit_code"`
@@ -32,12 +43,49 @@ type Executor struct {
 	binPath string
 }
 
+const (
+	defaultStdoutLimitBytes int64 = 256 * 1024
+	defaultStderrLimitBytes int64 = 1024 * 1024
+	envStdoutLimitBytes           = "JUDGE_STDOUT_LIMIT_BYTES"
+	envStderrLimitBytes           = "JUDGE_STDERR_LIMIT_BYTES"
+
+	reasonEmptyStdout       = "empty_stdout"
+	reasonMultilineStdout   = "multiline_stdout"
+	reasonInvalidJSON       = "invalid_json"
+	reasonMissingField      = "missing_field"
+	reasonJobIDMismatch     = "job_id_mismatch"
+	reasonAttemptIDMismatch = "attempt_id_mismatch"
+)
+
+type protocolError struct {
+	reason            string
+	expectedJobID     string
+	expectedAttemptID int64
+	actualJobID       string
+	actualAttemptID   int64
+	field             string
+}
+
+type drainResult struct {
+	data      []byte
+	truncated bool
+	n         int64
+	err       error
+}
+
+func (e *protocolError) Error() string {
+	if e.field != "" {
+		return fmt.Sprintf("judge protocol error: %s (field=%s)", e.reason, e.field)
+	}
+	return fmt.Sprintf("judge protocol error: %s", e.reason)
+}
+
 func NewExecutor(binPath string) *Executor {
 	return &Executor{binPath: binPath}
 }
 
-func (e *Executor) Execute(ctx context.Context, cfg *Config, codePath, inputPath, outputPath string, timeLimit, memLimit int) (*JudgeResult, error) {
-	// Command: judge_engine -c <code> -i <input> -o <output> -t <time> -m <mem> -C <config>
+func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attemptID int64, codePath, inputPath, outputPath string, timeLimit, memLimit int) (*JudgeResult, error) {
+	// Command: judge_engine -c <code> -i <input> -o <output> -t <time> -m <mem> -C <config> --job_id <id> --attempt_id <n>
 
 	configPath := cfg.ConfigPath
 	if configPath == "" {
@@ -56,29 +104,51 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, codePath, inputPath
 		"-C", configPath,
 		"-w", filepath.Dir(inputPath), // Use case dir as work dir? Or temp?
 		// Sandbox handles work dir creation if passed, or defaults.
+		"--job_id", jobID,
+		"--attempt_id", fmt.Sprintf("%d", attemptID),
 	}
 
 	cmd := exec.Command(e.binPath, args...)
-	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// Capture stdout for JSON result
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	stdoutLimit := getDrainLimit(envStdoutLimitBytes, defaultStdoutLimitBytes)
+	stderrLimit := getDrainLimit(envStderrLimitBytes, defaultStderrLimitBytes)
 
-	if err := runWithContext(ctx, cmd); err != nil {
-		out := stdout.Bytes()
-		if len(out) == 0 {
-			return nil, fmt.Errorf("execution failed: %w", err)
+	stdoutRes, stderrRes, waitErr, startErr := runWithDrain(ctx, cmd, stdoutLimit, stderrLimit)
+	if startErr != nil {
+		return nil, fmt.Errorf("execution failed: %w", startErr)
+	}
+
+	if stdoutRes.truncated || stderrRes.truncated {
+		slog.Warn(
+			"Judge output truncated",
+			"job_id", jobID,
+			"attempt_id", attemptID,
+			"truncated_stdout", stdoutRes.truncated,
+			"truncated_stderr", stderrRes.truncated,
+			"stdout_len", stdoutRes.n,
+			"stderr_len", stderrRes.n,
+		)
+		if stdoutRes.truncated {
+			judgeOutputTruncatedTotal.WithLabelValues("stdout").Inc()
+		}
+		if stderrRes.truncated {
+			judgeOutputTruncatedTotal.WithLabelValues("stderr").Inc()
 		}
 	}
 
-	var res JudgeResult
-	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
-		return nil, fmt.Errorf("failed to parse result json: %w | output: %s", err, stdout.String())
+	res, perr := parseAndValidateJudgeOutput(string(stdoutRes.data), jobID, attemptID)
+	if perr != nil {
+		judgeProtocolErrorsTotal.WithLabelValues(perr.reason).Inc()
+		return nil, perr
 	}
 
-	return &res, nil
+	if waitErr != nil {
+		// Preserve previous behavior: prefer structured JSON output over process exit code.
+		_ = waitErr
+	}
+
+	return res, nil
 }
 
 func (e *Executor) Compile(ctx context.Context, cfg *Config, requestID, sourcePath string) (*CompileResult, error) {
@@ -140,6 +210,40 @@ func runWithContext(ctx context.Context, cmd *exec.Cmd) error {
 		return err
 	}
 
+	return waitWithContext(ctx, cmd)
+}
+
+func runWithDrain(ctx context.Context, cmd *exec.Cmd, stdoutLimit, stderrLimit int64) (drainResult, drainResult, error, error) {
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return drainResult{}, drainResult{}, nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return drainResult{}, drainResult{}, nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return drainResult{}, drainResult{}, nil, err
+	}
+
+	stdoutCh := make(chan drainResult, 1)
+	stderrCh := make(chan drainResult, 1)
+
+	go func() {
+		stdoutCh <- DrainWithLimit(stdoutPipe, stdoutLimit)
+	}()
+	go func() {
+		stderrCh <- DrainWithLimit(stderrPipe, stderrLimit)
+	}()
+
+	waitErr := waitWithContext(ctx, cmd)
+	stdoutRes := <-stdoutCh
+	stderrRes := <-stderrCh
+	return stdoutRes, stderrRes, waitErr, nil
+}
+
+func waitWithContext(ctx context.Context, cmd *exec.Cmd) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -158,4 +262,203 @@ func runWithContext(ctx context.Context, cmd *exec.Cmd) error {
 		}
 		return fmt.Errorf("command timed out: %w", err)
 	}
+}
+
+func DrainWithLimit(r io.Reader, limit int64) drainResult {
+	if limit < 0 {
+		limit = 0
+	}
+	var buf bytes.Buffer
+	if limit > 0 {
+		buf.Grow(int(minInt64(limit, 64*1024)))
+	}
+	tmp := make([]byte, 32*1024)
+	var total int64
+	truncated := false
+	for {
+		n, err := r.Read(tmp)
+		if n > 0 {
+			total += int64(n)
+			if int64(buf.Len()) < limit {
+				remain := limit - int64(buf.Len())
+				if int64(n) <= remain {
+					_, _ = buf.Write(tmp[:n])
+				} else {
+					_, _ = buf.Write(tmp[:remain])
+					truncated = true
+				}
+			} else {
+				truncated = true
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return drainResult{
+				data:      buf.Bytes(),
+				truncated: truncated,
+				n:         total,
+				err:       err,
+			}
+		}
+	}
+}
+
+func getDrainLimit(env string, def int64) int64 {
+	if value := strings.TrimSpace(os.Getenv(env)); value != "" {
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return def
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func parseAndValidateJudgeOutput(raw string, expectedJobID string, expectedAttemptID int64) (*JudgeResult, *protocolError) {
+	trimmed := strings.TrimRight(raw, "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return nil, &protocolError{
+			reason:            reasonEmptyStdout,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+		}
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) != 1 {
+		return nil, &protocolError{
+			reason:            reasonMultilineStdout,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+		}
+	}
+	line := strings.TrimSpace(lines[0])
+	if line == "" {
+		return nil, &protocolError{
+			reason:            reasonEmptyStdout,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+		}
+	}
+
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(line), &rawMap); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+		}
+	}
+
+	required := []string{"job_id", "attempt_id", "verdict", "time_ms", "mem_kb", "exit_signal", "sandbox_error"}
+	for _, key := range required {
+		rawVal, ok := rawMap[key]
+		if !ok || len(rawVal) == 0 || string(rawVal) == "null" {
+			return nil, &protocolError{
+				reason:            reasonMissingField,
+				expectedJobID:     expectedJobID,
+				expectedAttemptID: expectedAttemptID,
+				field:             key,
+			}
+		}
+	}
+
+	var actualJobID string
+	if err := json.Unmarshal(rawMap["job_id"], &actualJobID); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "job_id",
+		}
+	}
+	var actualAttemptID int64
+	if err := json.Unmarshal(rawMap["attempt_id"], &actualAttemptID); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "attempt_id",
+		}
+	}
+	var verdict string
+	if err := json.Unmarshal(rawMap["verdict"], &verdict); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "verdict",
+		}
+	}
+	var timeMs int
+	if err := json.Unmarshal(rawMap["time_ms"], &timeMs); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "time_ms",
+		}
+	}
+	var memKb int64
+	if err := json.Unmarshal(rawMap["mem_kb"], &memKb); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "mem_kb",
+		}
+	}
+	var exitSignal int
+	if err := json.Unmarshal(rawMap["exit_signal"], &exitSignal); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "exit_signal",
+		}
+	}
+	var sandboxError string
+	if err := json.Unmarshal(rawMap["sandbox_error"], &sandboxError); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			field:             "sandbox_error",
+		}
+	}
+
+	if actualJobID != expectedJobID {
+		return nil, &protocolError{
+			reason:            reasonJobIDMismatch,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			actualJobID:       actualJobID,
+			actualAttemptID:   actualAttemptID,
+		}
+	}
+	if actualAttemptID != expectedAttemptID {
+		return nil, &protocolError{
+			reason:            reasonAttemptIDMismatch,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+			actualJobID:       actualJobID,
+			actualAttemptID:   actualAttemptID,
+		}
+	}
+
+	var res JudgeResult
+	if err := json.Unmarshal([]byte(line), &res); err != nil {
+		return nil, &protocolError{
+			reason:            reasonInvalidJSON,
+			expectedJobID:     expectedJobID,
+			expectedAttemptID: expectedAttemptID,
+		}
+	}
+	return &res, nil
 }

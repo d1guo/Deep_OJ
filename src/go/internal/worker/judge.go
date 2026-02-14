@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -68,6 +69,8 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		return &pb.TaskResponse{Message: "Invalid job_id"}, nil
 	}
 	jobID := req.JobId
+	// TODO(C3/C?): wire real attempt_id once scheduler/DB attempt fencing is in place.
+	attemptID := int64(0)
 
 	// 1. Prepare Workspace
 	workDir, err := s.tcMgr.Prepare(ctx, fmt.Sprint(req.ProblemId))
@@ -150,10 +153,21 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 
 		caseTimeout := time.Duration(int(req.TimeLimit)+s.config.ExecTimeoutBufferMs) * time.Millisecond
 		caseCtx, cancelCase := context.WithTimeout(ctx, caseTimeout)
-		res, err := s.executor.Execute(caseCtx, s.config, exePath, inPath, userOut, int(req.TimeLimit), int(req.MemoryLimit))
+		res, err := s.executor.Execute(caseCtx, s.config, jobID, attemptID, exePath, inPath, userOut, int(req.TimeLimit), int(req.MemoryLimit))
 		cancelCase()
 		if err != nil {
 			taskStatus = "system_error"
+			var perr *protocolError
+			if errors.As(err, &perr) {
+				logger.Error(
+					"Judge protocol reject",
+					"reason", perr.reason,
+					"expected_job_id", perr.expectedJobID,
+					"expected_attempt_id", perr.expectedAttemptID,
+					"actual_job_id", perr.actualJobID,
+					"actual_attempt_id", perr.actualAttemptID,
+				)
+			}
 			if rerr := s.reportError(ctx, jobID, req.TraceId, "System Error", err.Error()); rerr != nil {
 				return &pb.TaskResponse{Message: "Report failed"}, rerr
 			}
