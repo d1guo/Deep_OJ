@@ -20,7 +20,6 @@ import (
 	pb "github.com/d1guo/deep_oj/pkg/proto"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"google.golang.org/protobuf/proto"
 )
 
 // Handler 处理 API 请求
@@ -313,24 +312,20 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		TraceId:     traceID,
 	}
 
-	taskData, err := proto.Marshal(task)
+	taskData, err := json.Marshal(task)
 	if err != nil {
-		logger.Error("Proto 序列化错误", "error", err)
+		logger.Error("任务 JSON 序列化错误", "error", err)
 		_ = h.redis.Del(ctx, inflightKey)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "序列化错误", "code": "INTERNAL_ERROR"})
 		return
 	}
-	if err := h.redis.LPush(ctx, common.QueuePending, string(taskData)); err != nil {
-		logger.Error("Redis 推送错误", "error", err)
-		_ = h.redis.Del(ctx, inflightKey)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "队列错误",
-			"code":  "QUEUE_ERROR",
-		})
+
+	streamEntryID, ok := enqueueJobToStreamOrReply5xx(c, h.redis, logger, jobID, traceID, inflightKey, taskData)
+	if !ok {
 		return
 	}
 
-	logger.Info("任务提交成功")
+	logger.Info("任务提交成功", "stream_entry_id", streamEntryID)
 
 	// metrics
 	SubmissionTotal.WithLabelValues(fmt.Sprintf("%d", req.Language), "submitted").Inc()

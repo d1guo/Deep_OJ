@@ -146,6 +146,15 @@ worker:
   etcd_dial_timeout_ms: 5000
   etcd_lease_ttl_sec: 10
   redis_url: "localhost:6379"
+  database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
+  stream:
+    stream_key: "deepoj:jobs"
+    group: "deepoj:workers"
+    consumer: ""
+    read_count: 16
+    block_ms: 2000
+    lease_sec: 60
+    heartbeat_sec: 10
   minio:
     endpoint: "http://localhost:9000"
     access_key: "change_me"

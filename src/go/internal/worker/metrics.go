@@ -108,6 +108,52 @@ var (
 		},
 		[]string{"stream"},
 	)
+
+	workerStreamConsumeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_stream_consume_total",
+			Help: "Total number of worker stream consume attempts",
+		},
+		[]string{"status", "reason"},
+	)
+
+	workerStreamConsumeLatencyMs = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "worker_stream_consume_latency_ms",
+			Help:    "Latency of processing one stream message in milliseconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000},
+		},
+	)
+
+	workerStreamInflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "worker_stream_inflight",
+			Help: "Current number of in-flight stream messages processed by worker",
+		},
+	)
+
+	workerClaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_claim_total",
+			Help: "Total number of DB claim attempts for stream messages",
+		},
+		[]string{"status", "reason"},
+	)
+
+	workerLeaseHeartbeatTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_lease_heartbeat_total",
+			Help: "Total number of lease heartbeat outcomes",
+		},
+		[]string{"status", "reason"},
+	)
+
+	workerStaleAttemptTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "worker_stale_attempt_total",
+			Help: "Total number of stale attempt fenced write-back rejections",
+		},
+	)
 )
 
 // InitMetrics registers worker metrics
@@ -123,4 +169,10 @@ func InitMetrics() {
 	reg.MustRegister(judgeVerdictTotal)
 	reg.MustRegister(judgeProtocolErrorsTotal)
 	reg.MustRegister(judgeOutputTruncatedTotal)
+	reg.MustRegister(workerStreamConsumeTotal)
+	reg.MustRegister(workerStreamConsumeLatencyMs)
+	reg.MustRegister(workerStreamInflight)
+	reg.MustRegister(workerClaimTotal)
+	reg.MustRegister(workerLeaseHeartbeatTotal)
+	reg.MustRegister(workerStaleAttemptTotal)
 }

@@ -52,8 +52,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	}
 
 	jobID := req.JobId
-	// TODO(C3/C?): wire real attempt_id once scheduler/DB attempt fencing is in place.
-	attemptID := int64(0)
+	attemptID := attemptIDFromContext(ctx)
 	traceID := strings.TrimSpace(req.TraceId)
 	if traceID == "" {
 		traceID = uuid.NewString()
@@ -81,7 +80,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	// 1. Prepare Workspace
 	workDir, err := s.tcMgr.Prepare(ctx, fmt.Sprint(req.ProblemId))
 	if err != nil {
-		if rerr := s.reportError(ctx, jobID, traceID, "System Error", fmt.Sprintf("Prepare testcases failed: %v", err)); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, attemptID, traceID, "System Error", fmt.Sprintf("Prepare testcases failed: %v", err)); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Failed"}, nil
@@ -100,7 +99,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 
 	codePath := filepath.Join(jobDir, "main.cpp")
 	if err := SaveFile(codePath, req.Code); err != nil {
-		if rerr := s.reportError(ctx, jobID, traceID, "System Error", fmt.Sprintf("Save code failed: %v", err)); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, attemptID, traceID, "System Error", fmt.Sprintf("Save code failed: %v", err)); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Failed"}, nil
@@ -118,7 +117,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	if err != nil {
 		taskStatus = "compile_error"
 		logger.Warn("Compile failed", "error", err)
-		if rerr := s.reportError(ctx, jobID, traceID, "Compile Error", err.Error()); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, attemptID, traceID, "Compile Error", err.Error()); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Compile Error"}, nil
@@ -129,7 +128,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		if msg == "" {
 			msg = "compile failed"
 		}
-		if rerr := s.reportError(ctx, jobID, traceID, "Compile Error", msg); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, attemptID, traceID, "Compile Error", msg); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Compile Error"}, nil
@@ -174,7 +173,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 					"actual_attempt_id", perr.actualAttemptID,
 				)
 			}
-			if rerr := s.reportError(ctx, jobID, traceID, "System Error", err.Error()); rerr != nil {
+			if rerr := s.reportError(ctx, jobID, attemptID, traceID, "System Error", err.Error()); rerr != nil {
 				return &pb.TaskResponse{Message: "Report failed"}, rerr
 			}
 			return &pb.TaskResponse{Message: "System Error"}, nil
@@ -210,6 +209,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	// 4. Report Success
 	result := map[string]interface{}{
 		"job_id":      jobID,
+		"attempt_id":  attemptID,
 		"status":      finalStatus,
 		"time_used":   maxTime,
 		"memory_used": maxMem,
@@ -239,9 +239,10 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	return &pb.TaskResponse{Message: "OK"}, nil
 }
 
-func (s *JudgeService) reportError(ctx context.Context, jobID, traceID, status, msg string) error {
+func (s *JudgeService) reportError(ctx context.Context, jobID string, attemptID int64, traceID, status, msg string) error {
 	result := map[string]interface{}{
 		"job_id":        jobID,
+		"attempt_id":    attemptID,
 		"status":        status,
 		"error_message": msg,
 		"trace_id":      traceID,

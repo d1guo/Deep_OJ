@@ -136,6 +136,64 @@ sequenceDiagram
 | 回收 reclaim | Reclaimer（Worker 或 Scheduler） | `XAUTOCLAIM/XCLAIM` | 按 INV-4 分流：业务失败 ACK；系统失败退避 |
 | DLQ 入队 | Scheduler/Reclaimer（控制面） | 超过重试上限 | TODO（D1/C6）：统一离线 replayer 与审计字段 |
 
+## C1 Streams 入队（API）
+
+API 在创建 Job 后将任务写入 Redis Streams（默认 `deepoj:jobs`，可通过 `JOB_STREAM_KEY`/`JOB_STREAM_MAXLEN` 配置）。Streams **仅用于驱动执行**，不改变“DB 为唯一状态机”的不变量（INV-1/INV-5 等保持不变）。
+
+C1 写入顺序与失败语义（为 C2 做基线收敛）：
+
+- 先写 payload：`SET task:payload:<job_id> <payload-json>`，TTL 默认 24h（`JOB_PAYLOAD_TTL_SEC`）。
+- payload 内容为 `schema_version=1` 的 envelope（字段：`schema_version`、`task_data_b64`、`encoding=base64`、`content_type=application/json`）。
+- 再 `XADD` 到 stream，字段至少包含：`job_id`、`enqueue_ts`（ms）、`payload_ref`、`priority`。
+- 若 payload 写入失败：直接返回 5xx，不执行 `XADD`。
+- 若 `XADD` 失败：best-effort `DEL payload_ref`，返回 5xx，并记录结构化日志（`job_id`/`trace_id`/`reason`）。
+
+### 配置读取语义（收敛）
+
+- 服务运行时统一通过 `LoadConfig()/ReadFromEnv` 语义从环境变量读取配置。
+- `cmd/*/main.go` 中读取 `config.yaml` 仅用于“缺省值回填”（`SetEnvIfEmpty*`），不改变“运行参数以环境变量为准”的规则。
+
+## C2 Worker Streams Consumer Group（XREADGROUP + INV-2）
+
+Worker 以 consumer group 方式消费 `deepoj:jobs`（默认）：
+
+- stream key：`JOB_STREAM_KEY`（默认 `deepoj:jobs`）
+- group：`JOB_STREAM_GROUP`（默认 `deepoj:workers`）
+- consumer：优先 `JOB_STREAM_CONSUMER`，否则复用 `WORKER_ID`；两者都未设置时回退 `hostname-pid`
+- 启动时执行：`XGROUP CREATE <stream> <group> $ MKSTREAM`（`BUSYGROUP` 忽略）
+- 读取新消息：`XREADGROUP GROUP <group> <consumer> COUNT N BLOCK 2000 STREAMS <stream> >`
+
+INV-2 精确定义与执行分流（代码：`src/go/internal/worker/stream_consumer.go`）：
+
+1. 字段缺失（`job_id/enqueue_ts/payload_ref/priority`）=> reason=`missing_field`，`XACK`（poison message 不阻塞）。
+2. payload 缺失或解析失败 => reason=`payload_missing_or_invalid`，`XACK`。
+3. DB claim/CAS 拒绝（非 pending）=> reason=`db_claim_reject`，`XACK`。
+4. DB 错误（连接/超时等）=> reason=`db_error`，**不 XACK**（消息留在 PEL，C4 再引入 reclaim）。
+5. DB CAS 成功后才允许 `XACK`；`XACK` 失败记录 reason=`xack_error`（重试一次，无限重试禁止）。
+
+说明：
+
+- DB 仍是唯一状态机；Streams 仅驱动执行。
+- `XACK` 表示“该条 stream 消息被消费确认”，不代表 job 已 FINISHED。
+- 即使发生 `XACK` 失败，也不会导致重复执行覆盖：后续重复消费会再次经过 DB claim/fencing（attempt_id + `WHERE job_id AND attempt_id AND status='running'`）门禁，旧 attempt 的写回会被拒绝。
+
+## C3 Attempt Fencing + Lease（INV-3）
+
+Worker 在消费 `deepoj:jobs` 时执行以下闭环（代码：`src/go/internal/worker/stream_consumer.go`）：
+
+1. `claim -> DB CAS(RUNNING)`：`attempt_id = attempt_id + 1`，写入 `lease_owner` / `lease_until`，返回新的 `attempt_id` fencing token。
+2. heartbeat：按 `JOB_HEARTBEAT_SEC` 刷新租约（`JOB_LEASE_SEC`）。
+3. judge 执行：携带 claim 返回的 `attempt_id` 调用 judge（B2 协议校验继续生效）。
+4. fenced 写回：`UPDATE ... WHERE job_id=? AND attempt_id=? AND status='running'`，0 行即 `stale_attempt`。
+5. 仅 fenced 写回成功后 `XACK` 当前 stream entry（INV-2）。
+
+分流规则：
+
+- `db_claim_reject`：业务重复/已被抢占，`XACK`。
+- `db_error`：DB 故障，不 `XACK`（留在 PEL，C4 reclaim）。
+- `lease_lost` 或 `db_error_heartbeat`：停止本地执行，不写回、不 `XACK`。
+- poison（`missing_field` / `payload_missing_or_invalid`）：先标记 DB `System Error + error_code`，再 `XACK`。
+
 ## Judge JSON 协议 v1
 
 用于 Worker 与 C++ Judge 之间的运行结果交换（stdout 单行 JSON）。
@@ -160,8 +218,7 @@ sequenceDiagram
 
 注意：
 
-- 当前 Worker 暂无真实 `attempt_id` 概念，先固定传 `attempt_id=0`。  
-  TODO：在 C3/C 系列引入 attempt fencing 后接入真实 `attempt_id`。
+- C3 起，Worker 会使用 DB claim 返回的真实 `attempt_id` 透传给 judge。
 - Worker 在 `src/go/internal/worker/executor.go` 的 `parseAndValidateJudgeOutput` 做协议校验；失败时返回 error、记录日志并递增 `judge_protocol_errors_total{reason=...}`，结果不写入后续流程。
 - Worker 执行 judge 时并发 drain stdout/stderr，并按上限截断但继续 drain：`JUDGE_STDOUT_LIMIT_BYTES`（默认 256KB）、`JUDGE_STDERR_LIMIT_BYTES`（默认 1MB）。
 
@@ -181,6 +238,9 @@ sequenceDiagram
 - `judge_verdict_total{verdict}`
 - `judge_protocol_errors_total{reason}`
 - `judge_output_truncated_total{stream}`
+- `worker_claim_total{status,reason}`
+- `worker_lease_heartbeat_total{status,reason}`
+- `worker_stale_attempt_total`
 
 约束：
 

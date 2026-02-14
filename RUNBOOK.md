@@ -65,6 +65,11 @@ export JUDGE_BIN=/home/diguo/Deep_OJ/build/judge_engine
 cd /home/diguo/Deep_OJ/src/go && go test ./internal/worker -run TestJudgeSelfTest -v
 ```
 
+配置读取语义：
+
+- 进程运行参数以环境变量为准。
+- `cmd/api` 与 `cmd/worker` 会读取 `config.yaml` 并仅在“环境变量未设置”时应用缺省值。
+
 ## 2. 服务清单与端口
 
 | 组件 | 容器名 | 容器内端口 | 宿主机端口 | 健康检查方式 |
@@ -194,6 +199,34 @@ done
 | MinIO 拉取失败（Worker 下载 testcase 失败） | MinIO 不可达、凭证错误、对象缺失 | `docker compose logs --tail=300 worker | rg -i "minio|download|Prepare testcases failed"`; `docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -fsS http://oj-minio:9000/minio/health/live` | 校验 `MINIO_*` 环境变量、确认对象存在、恢复 MinIO 后重试任务 |
 | API `/metrics` 返回 403/401 | 未配置 `METRICS_TOKEN` 时非 loopback 访问；或 token 错误 | `curl -i http://127.0.0.1:18080/metrics`; `docker compose logs --tail=100 api | rg -i "forbidden|unauthorized"` | 本机 loopback 抓取，或设置 `METRICS_TOKEN` 并带 `Authorization: Bearer <token>` |
 
+## 4.1 Redis Streams 验证（C1）
+
+```bash
+STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XRANGE "$STREAM_KEY" - + COUNT 5
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KEY"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" - + 10
+```
+
+一键校验脚本（提交一次 job 并检查 `job_id/enqueue_ts/payload_ref/priority` 与 payload schema）：
+
+```bash
+PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
+  bash scripts/verify_c1_stream_enqueue.sh
+```
+
+粗算 backlog/lag（运维口径）：
+
+- `XLEN <stream>`：流总长度（近似“待处理积压规模”上界）。
+- `XINFO GROUPS <stream>`：
+- 关注 `pending`（PEL 未确认消息数）与 `lag`（组相对尾部落后量，Redis 新版本可用）。
+- `XPENDING <stream> <group>`：查看 PEL 概况（总 pending/最小和最大消息 ID/每个 consumer 的 pending 分布）。
+- `XPENDING <stream> <group> - + 10`：查看具体卡住消息和所属 consumer（定位单个卡住任务）。
+- 当前仅消费 `>` 新消息，尚未引入自动 reclaim；PEL reclaim 会在 C4 引入。
+- consumer 名称优先 `JOB_STREAM_CONSUMER`，否则复用 `WORKER_ID`，再回退 `hostname-pid`。重启后产生新 consumer 属预期，旧 consumer 的 PEL 在 C4 处理。
+
 ## 5. 可观测性
 
 ### 5.1 指标入口
@@ -215,6 +248,8 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 - Scheduler：`scheduler_queue_depth`、`scheduler_active_workers`、`submission_result_total`、`job_latency_seconds`
 - Worker：`worker_task_total`、`worker_task_duration_seconds`、`worker_compile_duration_seconds`、`worker_download_duration_seconds`、`worker_unzip_duration_seconds`
 - Worker（Judge 执行链路）：`judge_exec_duration_seconds{result}`、`judge_exec_inflight`、`judge_exec_total{result}`、`judge_verdict_total{verdict}`、`judge_protocol_errors_total{reason}`、`judge_output_truncated_total{stream}`
+- Worker（Streams 消费链路）：`worker_stream_consume_total{status,reason}`、`worker_stream_consume_latency_ms`、`worker_stream_inflight`
+- Worker（C3 claim/lease/fencing）：`worker_claim_total{status,reason}`、`worker_lease_heartbeat_total{status,reason}`、`worker_stale_attempt_total`
 
 约束：
 
@@ -226,7 +261,10 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 建议日志字段：
 
 - `job_id`
-- `attempt_id`（当前主链路待引入，先保留字段规范）
+- `attempt_id`
+- `stream_entry_id`
+- `group`
+- `consumer`
 - `trace_id`
 - `request_id`（API 入口）
 

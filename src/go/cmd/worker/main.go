@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,10 +12,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/d1guo/deep_oj/internal/appconfig"
+	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/internal/worker"
 	"github.com/d1guo/deep_oj/pkg/observability"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
@@ -91,6 +94,7 @@ func main() {
 		slog.Info("Loaded config", "path", cfgPath)
 	}
 	if cfgFile != nil {
+		// Apply config file values as in-process defaults. Runtime reads from env via LoadConfig().
 		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfgFile.Redis.PoolSize)
 		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfgFile.Redis.MinIdleConns)
 		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfgFile.Redis.DialTimeoutMs)
@@ -114,6 +118,7 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("WORKER_PORT", wcfg.Port)
 		appconfig.SetEnvIfEmptySlice("ETCD_ENDPOINTS", wcfg.EtcdEndpoints)
 		appconfig.SetEnvIfEmpty("REDIS_URL", wcfg.RedisURL)
+		appconfig.SetEnvIfEmpty("DATABASE_URL", wcfg.DatabaseURL)
 		appconfig.SetEnvIfEmpty("MINIO_ENDPOINT", wcfg.MinIO.Endpoint)
 		appconfig.SetEnvIfEmpty("MINIO_ACCESS_KEY", wcfg.MinIO.AccessKey)
 		appconfig.SetEnvIfEmpty("MINIO_SECRET_KEY", wcfg.MinIO.SecretKey)
@@ -147,6 +152,13 @@ func main() {
 		appconfig.SetEnvIfEmpty("SERVICE_NAME", wcfg.Metrics.ServiceName)
 		appconfig.SetEnvIfEmpty("INSTANCE_ID", wcfg.Metrics.InstanceID)
 		appconfig.SetEnvIfEmptyInt("WORKER_METRICS_PORT", wcfg.MetricsPort)
+		appconfig.SetEnvIfEmpty("JOB_STREAM_KEY", wcfg.Stream.StreamKey)
+		appconfig.SetEnvIfEmpty("JOB_STREAM_GROUP", wcfg.Stream.Group)
+		appconfig.SetEnvIfEmpty("JOB_STREAM_CONSUMER", wcfg.Stream.Consumer)
+		appconfig.SetEnvIfEmptyInt("JOB_STREAM_READ_COUNT", wcfg.Stream.ReadCount)
+		appconfig.SetEnvIfEmptyInt("JOB_STREAM_BLOCK_MS", wcfg.Stream.BlockMs)
+		appconfig.SetEnvIfEmptyInt("JOB_LEASE_SEC", wcfg.Stream.LeaseSec)
+		appconfig.SetEnvIfEmptyInt("JOB_HEARTBEAT_SEC", wcfg.Stream.HeartbeatSec)
 	}
 
 	// 1. Config
@@ -182,6 +194,19 @@ func main() {
 	}
 	slog.Info("Connected to Redis")
 
+	if strings.TrimSpace(cfg.DatabaseURL) == "" {
+		slog.Error("DATABASE_URL must be set for stream consumer")
+		os.Exit(1)
+	}
+	slog.Info("Connecting to PostgreSQL for stream consumer")
+	db, err := repository.NewPostgresDB(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("Failed to connect to PostgreSQL", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	slog.Info("Connected to PostgreSQL")
+
 	// 3. gRPC Server
 	lis, err := net.Listen("tcp", cfg.WorkerAddr)
 	if err != nil {
@@ -211,6 +236,18 @@ func main() {
 	grpcServer := grpc.NewServer(serverOpts...)
 	svc := worker.NewJudgeService(cfg, exec, tcMgr, rdb)
 	pb.RegisterJudgeServiceServer(grpcServer, svc)
+
+	streamConsumer := worker.NewStreamConsumer(cfg, rdb, db, svc)
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	defer cancelStream()
+	var streamWG sync.WaitGroup
+	streamWG.Add(1)
+	go func() {
+		defer streamWG.Done()
+		if err := streamConsumer.Run(streamCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("Worker stream consumer exited with error", "error", err)
+		}
+	}()
 
 	// 4. Etcd Registration
 	dialMs := getEnvInt("ETCD_DIAL_TIMEOUT_MS", 5000)
@@ -255,6 +292,8 @@ func main() {
 
 	slog.Info("Shutting down...")
 	cancelReg()
+	cancelStream()
+	streamWG.Wait()
 	grpcServer.GracefulStop()
 	_, _ = cli.Delete(context.Background(), key)
 	slog.Info("Worker exited")

@@ -31,12 +31,17 @@ services:
     environment:
       - REDIS_URL=oj-redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
+      - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
       - MINIO_ENDPOINT=http://oj-minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-deepoj_minio_user}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
       - MINIO_BUCKET=deep-oj-problems
       - ETCD_ENDPOINTS=oj-etcd:2379
       - WORKER_ADDR=oj-worker:50051
+      - JOB_STREAM_KEY=deepoj:jobs
+      - JOB_STREAM_GROUP=deepoj:workers
+      - JOB_LEASE_SEC=60
+      - JOB_HEARTBEAT_SEC=10
       - JUDGER_BIN=/app/judge_engine
       - WORKSPACE=/data/workspace
       - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}

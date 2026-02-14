@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -11,17 +12,25 @@ import (
 )
 
 type Config struct {
-	WorkerID      string
-	WorkerAddr    string // gRPC listen addr
-	EtcdEndpoints []string
-	RedisURL      string
-	MinIOEndpoint string
-	MinIOAccess   string
-	MinIOSecret   string
-	MinIOBucket   string
-	Workspace     string // For judge_engine
-	JudgerBin     string // Path to judge_engine binary
-	ConfigPath    string // Path to config.yaml for C++ core
+	WorkerID           string
+	WorkerAddr         string // gRPC listen addr
+	EtcdEndpoints      []string
+	RedisURL           string
+	DatabaseURL        string
+	MinIOEndpoint      string
+	MinIOAccess        string
+	MinIOSecret        string
+	MinIOBucket        string
+	Workspace          string // For judge_engine
+	JudgerBin          string // Path to judge_engine binary
+	ConfigPath         string // Path to config.yaml for C++ core
+	JobStreamKey       string
+	JobStreamGroup     string
+	JobStreamConsumer  string
+	JobStreamReadCount int
+	JobStreamBlockMs   int
+	JobLeaseSec        int
+	JobHeartbeatSec    int
 
 	CompileTimeoutMs    int
 	ExecTimeoutBufferMs int
@@ -98,18 +107,39 @@ func LoadConfig() *Config {
 		host, _ := os.Hostname()
 		workerID = host + "-" + uuid.New().String()
 	}
+	streamConsumer := strings.TrimSpace(getEnv("JOB_STREAM_CONSUMER", ""))
+	if streamConsumer == "" {
+		workerIDEnv := strings.TrimSpace(getEnv("WORKER_ID", ""))
+		if workerIDEnv != "" {
+			streamConsumer = workerIDEnv
+		} else {
+			host, _ := os.Hostname()
+			if host == "" {
+				host = "worker"
+			}
+			streamConsumer = fmt.Sprintf("%s-%d", host, os.Getpid())
+		}
+	}
 
 	cfg := &Config{
-		WorkerID:      workerID,
-		WorkerAddr:    workerAddr, // Derived from port
-		RedisURL:      getEnv("REDIS_URL", "localhost:6379"),
-		MinIOEndpoint: getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinIOAccess:   getEnv("MINIO_ACCESS_KEY", "minioadmin"),
-		MinIOSecret:   getEnv("MINIO_SECRET_KEY", "minioadmin"),
-		MinIOBucket:   getEnv("MINIO_BUCKET", "deep-oj-problems"),
-		Workspace:     workspace,
-		JudgerBin:     getEnv("JUDGER_BIN", "/app/judge_engine"),
-		ConfigPath:    getEnv("JUDGER_CONFIG", configPath),
+		WorkerID:           workerID,
+		WorkerAddr:         workerAddr, // Derived from port
+		RedisURL:           getEnv("REDIS_URL", "localhost:6379"),
+		DatabaseURL:        getEnv("DATABASE_URL", ""),
+		MinIOEndpoint:      getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinIOAccess:        getEnv("MINIO_ACCESS_KEY", "minioadmin"),
+		MinIOSecret:        getEnv("MINIO_SECRET_KEY", "minioadmin"),
+		MinIOBucket:        getEnv("MINIO_BUCKET", "deep-oj-problems"),
+		Workspace:          workspace,
+		JudgerBin:          getEnv("JUDGER_BIN", "/app/judge_engine"),
+		ConfigPath:         getEnv("JUDGER_CONFIG", configPath),
+		JobStreamKey:       getEnv("JOB_STREAM_KEY", "deepoj:jobs"),
+		JobStreamGroup:     getEnv("JOB_STREAM_GROUP", "deepoj:workers"),
+		JobStreamConsumer:  streamConsumer,
+		JobStreamReadCount: getEnvInt("JOB_STREAM_READ_COUNT", 16),
+		JobStreamBlockMs:   getEnvInt("JOB_STREAM_BLOCK_MS", 2000),
+		JobLeaseSec:        getEnvInt("JOB_LEASE_SEC", 60),
+		JobHeartbeatSec:    getEnvInt("JOB_HEARTBEAT_SEC", 10),
 
 		CompileTimeoutMs:    getEnvInt("COMPILE_TIMEOUT_MS", 10000),
 		ExecTimeoutBufferMs: getEnvInt("EXEC_TIMEOUT_BUFFER_MS", 500),

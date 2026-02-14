@@ -48,6 +48,24 @@ var (
 		},
 		[]string{"language", "status"},
 	)
+
+	// APIStreamEnqueueTotal 记录 Streams 入队结果
+	apiStreamEnqueueTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "api_stream_enqueue_total",
+			Help: "Total number of API stream enqueue attempts",
+		},
+		[]string{"status"},
+	)
+
+	// APIStreamEnqueueLatencyMs 记录 Streams 入队耗时（毫秒）
+	apiStreamEnqueueLatencyMs = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "api_stream_enqueue_latency_ms",
+			Help:    "Latency of API stream enqueue in milliseconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000},
+		},
+	)
 )
 
 func init() {
@@ -57,4 +75,6 @@ func init() {
 	reg.MustRegister(RequestDuration)
 	reg.MustRegister(RequestTotal)
 	reg.MustRegister(SubmissionTotal)
+	reg.MustRegister(apiStreamEnqueueTotal)
+	reg.MustRegister(apiStreamEnqueueLatencyMs)
 }

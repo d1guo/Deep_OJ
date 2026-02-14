@@ -6,19 +6,24 @@ import (
 
 // Submission 提交记录
 type Submission struct {
-	ID          int64     `json:"id" db:"id"`
-	JobID       string    `json:"job_id" db:"job_id"`
-	ProblemID   int       `json:"problem_id,omitempty" db:"problem_id"`
-	UserID      int64     `json:"user_id,omitempty" db:"user_id"`
-	Code        string    `json:"code" db:"code"`
-	Language    int       `json:"language" db:"language"`
-	TimeLimit   int       `json:"time_limit" db:"time_limit"`
-	MemoryLimit int       `json:"memory_limit" db:"memory_limit"`
-	Status      string    `json:"status" db:"status"`
-	State       string    `json:"state" db:"state"`
-	Result      any       `json:"result,omitempty" db:"result"` // JSONB
-	CreatedAt   time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+	ID           int64     `json:"id" db:"id"`
+	JobID        string    `json:"job_id" db:"job_id"`
+	ProblemID    int       `json:"problem_id,omitempty" db:"problem_id"`
+	UserID       int64     `json:"user_id,omitempty" db:"user_id"`
+	Code         string    `json:"code" db:"code"`
+	Language     int       `json:"language" db:"language"`
+	TimeLimit    int       `json:"time_limit" db:"time_limit"`
+	MemoryLimit  int       `json:"memory_limit" db:"memory_limit"`
+	AttemptID    int64     `json:"attempt_id" db:"attempt_id"`
+	LeaseOwner   string    `json:"lease_owner,omitempty" db:"lease_owner"`
+	LeaseUntil   time.Time `json:"lease_until,omitempty" db:"lease_until"`
+	Status       string    `json:"status" db:"status"`
+	State        string    `json:"state" db:"state"`
+	ErrorCode    string    `json:"error_code,omitempty" db:"error_code"`
+	ErrorMessage string    `json:"error_message,omitempty" db:"error_message"`
+	Result       any       `json:"result,omitempty" db:"result"` // JSONB
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // JudgeResult 判题结果 (存储在 Result 字段中)

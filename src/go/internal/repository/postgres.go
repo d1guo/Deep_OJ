@@ -130,6 +130,115 @@ func (db *PostgresDB) UpdateSubmissionState(ctx context.Context, jobID string, s
 	return err
 }
 
+// TryMarkSubmissionProcessing updates submission state with CAS semantics.
+// Returns true only when exactly one pending row is advanced.
+func (db *PostgresDB) TryMarkSubmissionProcessing(ctx context.Context, jobID string) (bool, error) {
+	query := `
+		UPDATE submissions
+		SET status = 'running', state = 'processing', updated_at = NOW()
+		WHERE job_id = $1 AND state = 'pending'
+	`
+	cmd, err := db.pool.Exec(ctx, query, jobID)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() == 1, nil
+}
+
+// ClaimSubmissionForRun atomically claims a pending job and returns a new attempt_id fencing token.
+func (db *PostgresDB) ClaimSubmissionForRun(ctx context.Context, jobID, leaseOwner string, leaseSec int) (int64, bool, error) {
+	if leaseSec <= 0 {
+		leaseSec = 60
+	}
+	query := `
+		UPDATE submissions
+		SET attempt_id = attempt_id + 1,
+		    status = 'running',
+		    state = 'processing',
+		    lease_owner = $2,
+		    lease_until = NOW() + make_interval(secs => $3),
+		    error_code = NULL,
+		    error_message = NULL,
+		    updated_at = NOW()
+		WHERE job_id = $1 AND state = 'pending'
+		RETURNING attempt_id
+	`
+	var attemptID int64
+	err := db.pool.QueryRow(ctx, query, jobID, leaseOwner, leaseSec).Scan(&attemptID)
+	if err == pgx.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return attemptID, true, nil
+}
+
+// RefreshSubmissionLease refreshes lease_until only for the matching running attempt.
+func (db *PostgresDB) RefreshSubmissionLease(ctx context.Context, jobID string, attemptID int64, leaseOwner string, leaseSec int) (bool, error) {
+	if leaseSec <= 0 {
+		leaseSec = 60
+	}
+	query := `
+		UPDATE submissions
+		SET lease_until = NOW() + make_interval(secs => $4),
+		    updated_at = NOW()
+		WHERE job_id = $1
+		  AND attempt_id = $2
+		  AND lease_owner = $3
+		  AND status = 'running'
+		  AND state = 'processing'
+	`
+	cmd, err := db.pool.Exec(ctx, query, jobID, attemptID, leaseOwner, leaseSec)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() == 1, nil
+}
+
+// FinalizeSubmissionWithFence writes final result only for the exact running attempt.
+func (db *PostgresDB) FinalizeSubmissionWithFence(ctx context.Context, jobID string, attemptID int64, status string, result any) (bool, error) {
+	query := `
+		UPDATE submissions
+		SET status = $3,
+		    state = 'done',
+		    result = $4,
+		    lease_owner = NULL,
+		    lease_until = NULL,
+		    updated_at = NOW()
+		WHERE job_id = $1
+		  AND attempt_id = $2
+		  AND status = 'running'
+		  AND state = 'processing'
+	`
+	cmd, err := db.pool.Exec(ctx, query, jobID, attemptID, status, result)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() == 1, nil
+}
+
+// MarkSubmissionPoison marks a submission failed for unrecoverable protocol/payload errors.
+func (db *PostgresDB) MarkSubmissionPoison(ctx context.Context, jobID, errorCode, errorMessage string) (bool, error) {
+	query := `
+		UPDATE submissions
+		SET status = 'System Error',
+		    state = 'done',
+		    error_code = $2,
+		    error_message = $3,
+		    lease_owner = NULL,
+		    lease_until = NULL,
+		    updated_at = NOW()
+		WHERE job_id = $1
+		  AND state != 'done'
+	`
+	cmd, err := db.pool.Exec(ctx, query, jobID, errorCode, errorMessage)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() == 1, nil
+}
+
 // GetPendingSubmissions 获取超时的 Pending 任务 (用于 Slow Path 恢复)
 func (db *PostgresDB) GetPendingSubmissions(ctx context.Context, before time.Time, limit int) ([]*model.Submission, error) {
 	query := `

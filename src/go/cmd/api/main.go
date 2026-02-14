@@ -88,6 +88,7 @@ func main() {
 		slog.Info("Loaded config", "path", cfgPath)
 	}
 	if cfg != nil {
+		// Apply config file values as in-process defaults. Runtime reads from env.
 		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfg.Redis.PoolSize)
 		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfg.Redis.MinIdleConns)
 		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfg.Redis.DialTimeoutMs)
@@ -139,6 +140,10 @@ func main() {
 
 		appconfig.SetEnvIfEmpty("SERVICE_NAME", cfg.API.Metrics.ServiceName)
 		appconfig.SetEnvIfEmpty("INSTANCE_ID", cfg.API.Metrics.InstanceID)
+
+		appconfig.SetEnvIfEmpty("JOB_STREAM_KEY", cfg.API.Stream.StreamKey)
+		appconfig.SetEnvIfEmptyInt64("JOB_STREAM_MAXLEN", cfg.API.Stream.StreamMaxLen)
+		appconfig.SetEnvIfEmptyInt("JOB_PAYLOAD_TTL_SEC", cfg.API.Stream.JobPayloadTTLSec)
 	}
 
 	// =========================================================================
