@@ -102,8 +102,17 @@ func (db *PostgresDB) GetOrCreateByGitHubID(ctx context.Context, githubID, usern
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			if pgErr.ConstraintName == "users_github_id_key" {
-				// 极端并发情况: 刚刚查还没有，现在有了 -> 递归重试查一次
-				return db.GetOrCreateByGitHubID(ctx, githubID, username, email, avatarURL)
+				// 极端并发情况: 刚刚查还没有，现在有了 -> 直接回查
+				errFind := db.pool.QueryRow(ctx, queryFind, githubID).Scan(
+					&u.ID, &u.Username, &u.PasswordHash, &u.Email, &u.GitHubID, &u.AvatarURL, &u.CreatedAt,
+				)
+				if errFind == nil {
+					return &u, nil
+				}
+				if !errors.Is(errFind, pgx.ErrNoRows) {
+					return nil, errFind
+				}
+				continue
 			}
 			// Username 冲突 -> 生成后续
 			suffix, _ := generateRandomHex(2) // 4 chars

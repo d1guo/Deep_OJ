@@ -6,6 +6,7 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -18,14 +19,30 @@ import (
 
 // CORSMiddleware 跨域资源共享中间件
 func CORSMiddleware() gin.HandlerFunc {
+	allowedOrigins := loadAllowedOrigins()
 	return func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		allowOrigin := ""
+		if origin != "" {
+			if _, ok := allowedOrigins[origin]; ok {
+				allowOrigin = origin
+			}
+		}
+
+		if allowOrigin != "" {
+			c.Header("Access-Control-Allow-Origin", allowOrigin)
+			c.Header("Vary", "Origin")
+		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization, X-Request-ID")
 		c.Header("Access-Control-Max-Age", "86400") // 预检结果缓存 24 小时
 
 		// 处理预检请求
 		if c.Request.Method == "OPTIONS" {
+			if origin != "" && allowOrigin == "" {
+				c.AbortWithStatus(http.StatusForbidden)
+				return
+			}
 			c.AbortWithStatus(204)
 			return
 		}
@@ -52,6 +69,16 @@ func RequestIDMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// GetRequestID returns normalized request_id populated by middleware.
+func GetRequestID(c *gin.Context) string {
+	if ridAny, ok := c.Get("request_id"); ok {
+		if rid, ok := ridAny.(string); ok && rid != "" {
+			return rid
+		}
+	}
+	return c.GetHeader("X-Request-ID")
 }
 
 // AuthMiddleware 验证 JWT
@@ -81,7 +108,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		})
 
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: " + err.Error(), "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token", "code": "UNAUTHORIZED"})
 			c.Abort()
 			return
 		}
@@ -103,7 +130,6 @@ func AuthMiddleware() gin.HandlerFunc {
 
 // AdminMiddleware enforces admin-only access based on username claim.
 func AdminMiddleware() gin.HandlerFunc {
-	admins := loadAdminUsers()
 	return func(c *gin.Context) {
 		usernameAny, ok := c.Get("username")
 		if !ok {
@@ -112,7 +138,7 @@ func AdminMiddleware() gin.HandlerFunc {
 			return
 		}
 		username, _ := usernameAny.(string)
-		if _, ok := admins[username]; !ok {
+		if !IsAdminUsername(username) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "无权限", "code": "FORBIDDEN"})
 			c.Abort()
 			return
@@ -121,11 +147,20 @@ func AdminMiddleware() gin.HandlerFunc {
 	}
 }
 
+func IsAdminUsername(username string) bool {
+	if username == "" {
+		return false
+	}
+	admins := loadAdminUsers()
+	_, ok := admins[username]
+	return ok
+}
+
 func loadAdminUsers() map[string]struct{} {
 	admins := make(map[string]struct{})
-	raw := os.Getenv("ADMIN_USERS")
+	raw := strings.TrimSpace(os.Getenv("ADMIN_USERS"))
 	if raw == "" {
-		raw = "admin"
+		return admins
 	}
 	for _, v := range strings.Split(raw, ",") {
 		u := strings.TrimSpace(v)
@@ -134,10 +169,56 @@ func loadAdminUsers() map[string]struct{} {
 		}
 		admins[u] = struct{}{}
 	}
-	if len(admins) == 0 {
-		admins["admin"] = struct{}{}
-	}
 	return admins
+}
+
+// MetricsAccessMiddleware protects /metrics from anonymous remote access.
+func MetricsAccessMiddleware() gin.HandlerFunc {
+	token := strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
+	return func(c *gin.Context) {
+		if token != "" {
+			if extractBearerToken(c.GetHeader("Authorization")) != token {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "UNAUTHORIZED"})
+				c.Abort()
+				return
+			}
+			c.Next()
+			return
+		}
+
+		// Safe default: if no token is configured, only allow local scrape.
+		if !isLoopbackClientIP(c.ClientIP()) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden", "code": "FORBIDDEN"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+func loadAllowedOrigins() map[string]struct{} {
+	allowed := make(map[string]struct{})
+	for _, origin := range strings.Split(os.Getenv("CORS_ALLOWED_ORIGINS"), ",") {
+		origin = strings.TrimSpace(origin)
+		if origin == "" {
+			continue
+		}
+		allowed[origin] = struct{}{}
+	}
+	return allowed
+}
+
+func extractBearerToken(header string) string {
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return ""
+	}
+	return parts[1]
+}
+
+func isLoopbackClientIP(clientIP string) bool {
+	ip := net.ParseIP(clientIP)
+	return ip != nil && ip.IsLoopback()
 }
 
 // =========================================================================

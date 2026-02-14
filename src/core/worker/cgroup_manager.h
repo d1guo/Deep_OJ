@@ -98,6 +98,20 @@ public:
      * @return true 如果设置成功
      */
     bool SetPidsLimit(int max_pids);
+
+    /**
+     * @brief 设置 CPU 配额
+     * @param max_cores 可用核数上限 (例如 1.0 表示最多 1 核)
+     */
+    bool SetCPULimit(double max_cores);
+
+    /**
+     * @brief 设置 IO 吞吐限制 (io.max)
+     * @param read_bps 读限速 (bytes/s), <=0 表示不限制
+     * @param write_bps 写限速 (bytes/s), <=0 表示不限制
+     * @param target_path 用于定位块设备主次设备号的路径
+     */
+    bool SetIOLimit(long long read_bps, long long write_bps, const std::string& target_path);
     
     /**
      * @brief 将进程添加到 cgroup

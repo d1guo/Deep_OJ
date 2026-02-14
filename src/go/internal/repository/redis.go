@@ -2,7 +2,10 @@ package repository
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -29,20 +32,36 @@ func NewRedisClient(addr string) *RedisClient {
 	readTimeout := time.Duration(getEnvInt("REDIS_READ_TIMEOUT_MS", int(defaultReadTimeout/time.Millisecond))) * time.Millisecond
 	writeTimeout := time.Duration(getEnvInt("REDIS_WRITE_TIMEOUT_MS", int(defaultWriteTimeout/time.Millisecond))) * time.Millisecond
 
-	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     "", // 无密码
-		DB:           0,  // 默认 DB
-		PoolSize:     poolSize,
-		MinIdleConns: minIdle,
-		DialTimeout:  dialTimeout,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-	})
+	opts := &redis.Options{
+		Addr: addr,
+		DB:   0, // 默认 DB
+	}
+	if strings.HasPrefix(addr, "redis://") || strings.HasPrefix(addr, "rediss://") {
+		if parsed, err := redis.ParseURL(addr); err == nil {
+			opts = parsed
+		}
+	}
+
+	if opts.Password == "" {
+		opts.Password = os.Getenv("REDIS_PASSWORD")
+	}
+	if opts.TLSConfig == nil {
+		if strings.HasPrefix(addr, "rediss://") || getEnvBool("REDIS_TLS", false) {
+			opts.TLSConfig = &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			}
+		}
+	}
+	opts.PoolSize = poolSize
+	opts.MinIdleConns = minIdle
+	opts.DialTimeout = dialTimeout
+	opts.ReadTimeout = readTimeout
+	opts.WriteTimeout = writeTimeout
+
+	client := redis.NewClient(opts)
 
 	return &RedisClient{client: client}
 }
-
 
 // Ping 测试连接
 func (r *RedisClient) Ping(ctx context.Context) error {

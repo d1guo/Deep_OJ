@@ -70,4 +70,33 @@ namespace deep_oj {
         }
         seccomp_release(ctx);
     }
+
+    void LoadCompileSeccompRules() {
+        scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_ALLOW);
+        if (!ctx) _exit(ERR_SANDBOX_EXCEPTION);
+
+        // 编译阶段采用“默认允许 + 高危系统调用拒绝”策略，
+        // 兼顾编译工具链可用性和基础安全收敛。
+        #define DENY_SYSCALL(name) \
+            if (seccomp_rule_add(ctx, SCMP_ACT_KILL, SCMP_SYS(name), 0) != 0) { \
+                seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION); \
+            }
+
+        DENY_SYSCALL(ptrace);
+        DENY_SYSCALL(mount);
+        DENY_SYSCALL(umount2);
+        DENY_SYSCALL(reboot);
+        DENY_SYSCALL(swapon);
+        DENY_SYSCALL(swapoff);
+        DENY_SYSCALL(kexec_load);
+        DENY_SYSCALL(init_module);
+        DENY_SYSCALL(finit_module);
+        DENY_SYSCALL(delete_module);
+
+        if (seccomp_load(ctx) != 0) {
+            seccomp_release(ctx);
+            _exit(ERR_SANDBOX_EXCEPTION);
+        }
+        seccomp_release(ctx);
+    }
 }

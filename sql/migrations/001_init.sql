@@ -5,8 +5,8 @@
 CREATE TABLE IF NOT EXISTS submissions (
     id BIGSERIAL PRIMARY KEY,
     job_id VARCHAR(64) UNIQUE NOT NULL,
-    problem_id INTEGER DEFAULT 0,
-    user_id INTEGER DEFAULT 0,
+    problem_id INTEGER,
+    user_id BIGINT,
     code TEXT NOT NULL,
     language INTEGER NOT NULL,
     time_limit INTEGER NOT NULL DEFAULT 1000,

@@ -37,11 +37,14 @@
 #include <sstream>
 #include <filesystem>
 #include <csignal>
+#include <cmath>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/vfs.h>
+#include <sys/sysmacros.h>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 // Cgroups v2 文件系统魔数
 #ifndef CGROUP2_SUPER_MAGIC
@@ -138,11 +141,21 @@ bool CgroupManager::EnsureParentReady() {
     std::string subtree_control = parent_path.string() + "/cgroup.subtree_control";
     
     // 3. 在父目录启用控制器
-    // 这使得我们的子目录可以使用 memory 和 pids 控制器
-    // [Rootless Mode Fix]: 如果我们是普通用户 (通过 setup_cgroups.sh 授权)，
-    // 我们可能没有权限写入 /sys/fs/cgroup/cgroup.subtree_control。
-    // 但只要运维脚本已经开启了它们，这里失败是可以接受的。
-    if (!WriteToFile(subtree_control, "+memory +pids")) {
+    // 尽量启用 memory/pids/cpu/io，若父目录已由运维提前开启则允许失败降级。
+    auto buildControllerEnableList = [](const std::string& raw) {
+        std::vector<std::string> wanted = {"memory", "pids", "cpu", "io"};
+        std::string out;
+        for (const auto& controller : wanted) {
+            if (raw.find(controller) == std::string::npos) continue;
+            if (!out.empty()) out += " ";
+            out += "+" + controller;
+        }
+        return out;
+    };
+
+    std::string parentControllers = ReadFromFile(parent_path.string() + "/cgroup.controllers");
+    std::string enableParent = buildControllerEnableList(parentControllers);
+    if (!enableParent.empty() && !WriteToFile(subtree_control, enableParent)) {
          std::cerr << "[CgroupManager] Warning: Failed to enable controllers in " << subtree_control 
                    << " (Assuming admin already enabled them)" << std::endl;
     }
@@ -150,7 +163,9 @@ bool CgroupManager::EnsureParentReady() {
     // 4. 在我们的根目录也启用控制器 (为了让 job 子目录能用)
     // 这是必须成功的，因为 setup_cgroups.sh 应该把 deep_oj 目录的所有权给了我们
     std::string our_subtree_control = cgroup_root_ + "/cgroup.subtree_control";
-    if (!WriteToFile(our_subtree_control, "+memory +pids")) {
+    std::string ourControllers = ReadFromFile(cgroup_root_ + "/cgroup.controllers");
+    std::string enableOur = buildControllerEnableList(ourControllers);
+    if (enableOur.empty() || !WriteToFile(our_subtree_control, enableOur)) {
         std::cerr << "[CgroupManager] Error: Failed to enable controllers in " << our_subtree_control 
                   << ". Please check ownership or delegation." << std::endl;
         return false;
@@ -225,6 +240,61 @@ bool CgroupManager::SetPidsLimit(int max_pids) {
     }
     
     std::cerr << "[CgroupManager] Set pids limit: " << max_pids << std::endl;
+    return true;
+}
+
+bool CgroupManager::SetCPULimit(double max_cores) {
+    if (!created_) {
+        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        return false;
+    }
+    if (max_cores <= 0) {
+        std::cerr << "[CgroupManager] Invalid cpu core limit: " << max_cores << std::endl;
+        return false;
+    }
+
+    const long long period_us = 100000; // 100ms
+    long long quota_us = static_cast<long long>(std::llround(max_cores * period_us));
+    if (quota_us < 1000) quota_us = 1000;
+    std::ostringstream value;
+    value << quota_us << " " << period_us;
+
+    if (!WriteToFile(cgroup_path_ + "/cpu.max", value.str())) {
+        std::cerr << "[CgroupManager] Failed to set cpu.max" << std::endl;
+        return false;
+    }
+
+    std::cerr << "[CgroupManager] Set cpu.max quota=" << quota_us << " period=" << period_us << std::endl;
+    return true;
+}
+
+bool CgroupManager::SetIOLimit(long long read_bps, long long write_bps, const std::string& target_path) {
+    if (!created_) {
+        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        return false;
+    }
+    if (read_bps <= 0 && write_bps <= 0) {
+        return true;
+    }
+
+    struct stat st {};
+    if (stat(target_path.c_str(), &st) != 0) {
+        std::cerr << "[CgroupManager] Failed to stat target path for io.max: " << target_path << std::endl;
+        return false;
+    }
+    unsigned int maj = major(st.st_dev);
+    unsigned int min = minor(st.st_dev);
+
+    std::ostringstream value;
+    value << maj << ":" << min;
+    if (read_bps > 0) value << " rbps=" << read_bps;
+    if (write_bps > 0) value << " wbps=" << write_bps;
+
+    if (!WriteToFile(cgroup_path_ + "/io.max", value.str())) {
+        std::cerr << "[CgroupManager] Failed to set io.max" << std::endl;
+        return false;
+    }
+    std::cerr << "[CgroupManager] Set io.max for " << maj << ":" << min << std::endl;
     return true;
 }
 

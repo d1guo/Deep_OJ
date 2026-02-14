@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,18 @@ const defaultMaxProblemZipBytes int64 = 50 << 20 // 50MB
 // HandleCreateProblem 创建题目 (上传 Zip)
 // POST /api/v1/problems
 func (h *Handler) HandleCreateProblem(c *gin.Context) {
+	maxBytes := getEnvInt64("PROBLEM_ZIP_MAX_BYTES", defaultMaxProblemZipBytes)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes+1)
+	if err := c.Request.ParseMultipartForm(maxBytes); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "请求体过大", "code": "BODY_TOO_LARGE"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "表单解析失败"})
+		return
+	}
+
 	// 1. 解析表单
 	title := c.PostForm("title")
 	timeLimit, _ := strconv.Atoi(c.PostForm("time_limit"))     // ms
@@ -55,7 +68,6 @@ func (h *Handler) HandleCreateProblem(c *gin.Context) {
 	}
 
 	// 3. 计算 SHA-256 & 验证 Zip 内容 (stream -> temp file)
-	maxBytes := getEnvInt64("PROBLEM_ZIP_MAX_BYTES", defaultMaxProblemZipBytes)
 	tmpFile, err := os.CreateTemp("", "problem-*.zip")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "临时文件创建失败"})
@@ -120,8 +132,10 @@ func (h *Handler) HandleCreateProblem(c *gin.Context) {
 	// 6. 更新 DB 路径
 	if err := h.db.UpdateTestcasePath(c.Request.Context(), id, objectName); err != nil {
 		slog.Error("UpdateProblemPath error", "error", err)
-		// 这是一个严重错误：文件上传了但 DB 没更新。
-		// 应该记录日志告警。由于前面已经上传成功，暂不回滚文件。
+		_ = h.minio.RemoveFile(c.Request.Context(), objectName)
+		_ = h.db.DeleteProblem(c.Request.Context(), id)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database update error"})
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{

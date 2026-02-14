@@ -38,7 +38,7 @@ func NewHandler(db *repository.PostgresDB, redis *repository.RedisClient, minio 
 // SubmitRequest 提交请求结构
 type SubmitRequest struct {
 	Code        string `json:"code" binding:"required"`
-	Language    int    `json:"language" binding:"required"` // 1=C++, 2=C, 3=Python...
+	Language    int    `json:"language" binding:"required"` // 当前仅支持 1=C++
 	TimeLimit   int    `json:"time_limit"`                  // ms
 	MemoryLimit int    `json:"memory_limit"`                // KB
 	ProblemID   int    `json:"problem_id"`                  // 题目 ID (可选)
@@ -103,7 +103,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// [New] Structured Logging (Start)
-	reqID := c.GetHeader("X-Request-ID")
+	reqID := GetRequestID(c)
 	logger := slog.With("request_id", reqID, "trace_id", reqID, "ip", c.ClientIP(), "path", path)
 
 	logger.Info("HandleSubmit 开始处理")
@@ -150,8 +150,8 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("代码过长 (最大 %d 字节)", maxCodeBytes), "code": "INVALID_PARAM"})
 		return
 	}
-	if req.Language < 1 || req.Language > 4 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的语言", "code": "INVALID_PARAM"})
+	if req.Language != int(pb.Language_CPP) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "当前仅支持 C++ (language=1)", "code": "INVALID_PARAM"})
 		return
 	}
 
@@ -211,7 +211,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 				State:       "pending",
 			}
 			if uid, exists := c.Get("user_id"); exists {
-				submission.UserID = int(uid.(int64))
+				submission.UserID = uid.(int64)
 			}
 			if err := h.db.CreateSubmission(ctx, submission); err != nil {
 				logger.Error("数据库创建失败(缓存命中)", "error", err)
@@ -239,10 +239,6 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 			return
 		}
 
-		// Metrics
-		RequestTotal.WithLabelValues(method, path, "200").Inc()
-		RequestDuration.WithLabelValues(method, path, "200").Observe(time.Since(start).Seconds())
-		return
 	}
 
 	// =========================================================================
@@ -282,7 +278,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 
 	// [New] 获取当前登录用户 ID
 	if uid, exists := c.Get("user_id"); exists {
-		submission.UserID = int(uid.(int64))
+		submission.UserID = uid.(int64)
 		logger = logger.With("user_id", submission.UserID)
 	}
 
@@ -377,9 +373,9 @@ func (h *Handler) HandleStatus(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录", "code": "UNAUTHORIZED"})
 		return
 	}
-	userID := int(userIDAny.(int64))
+	userID := userIDAny.(int64)
 	username, _ := usernameAny.(string)
-	if username != "admin" && submission.UserID != userID {
+	if !IsAdminUsername(username) && submission.UserID != userID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权限", "code": "FORBIDDEN"})
 		return
 	}

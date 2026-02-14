@@ -36,6 +36,9 @@ namespace deep_oj {
         deep_oj::g_runner_config.compile_log_max_bytes = 16 * 1024 * 1024;
         deep_oj::g_runner_config.compile_max_errors = 10;
         deep_oj::g_runner_config.cgroup_pids_limit = 20;
+        deep_oj::g_runner_config.cgroup_cpu_max_cores = 1.0;
+        deep_oj::g_runner_config.cgroup_io_read_bps = 100LL * 1024LL * 1024LL;  // 100MB/s
+        deep_oj::g_runner_config.cgroup_io_write_bps = 100LL * 1024LL * 1024LL; // 100MB/s
 
         // Runner 配置 (核心判题线程池)
         if (config["runner"]) {
@@ -52,6 +55,15 @@ namespace deep_oj {
             }
             if (runner["cgroup_pids_limit"]) {
                 deep_oj::g_runner_config.cgroup_pids_limit = runner["cgroup_pids_limit"].as<int>();
+            }
+            if (runner["cgroup_cpu_max_cores"]) {
+                deep_oj::g_runner_config.cgroup_cpu_max_cores = runner["cgroup_cpu_max_cores"].as<double>();
+            }
+            if (runner["cgroup_io_read_bps"]) {
+                deep_oj::g_runner_config.cgroup_io_read_bps = runner["cgroup_io_read_bps"].as<long long>();
+            }
+            if (runner["cgroup_io_write_bps"]) {
+                deep_oj::g_runner_config.cgroup_io_write_bps = runner["cgroup_io_write_bps"].as<long long>();
             }
 
         } else {

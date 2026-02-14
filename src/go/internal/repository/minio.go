@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -16,10 +18,21 @@ type MinIOClient struct {
 }
 
 func NewMinIOClient(endpoint, accessKey, secretKey, bucketName string) (*MinIOClient, error) {
+	secure := getEnvBool("MINIO_SECURE", true)
+	host := endpoint
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("minio endpoint parse: %w", err)
+		}
+		host = parsed.Host
+		secure = parsed.Scheme == "https"
+	}
+
 	// Initialize minio client object.
-	minioClient, err := minio.New(endpoint, &minio.Options{
+	minioClient, err := minio.New(host, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
-		Secure: false, // Dev mode (no SSL)
+		Secure: secure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("minio connection: %w", err)

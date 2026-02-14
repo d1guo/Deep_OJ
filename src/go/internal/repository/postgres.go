@@ -49,7 +49,6 @@ func NewPostgresDB(ctx context.Context, connString string) (*PostgresDB, error) 
 	return &PostgresDB{pool: pool}, nil
 }
 
-
 // Close 关闭连接池
 func (db *PostgresDB) Close() {
 	db.pool.Close()
@@ -57,13 +56,22 @@ func (db *PostgresDB) Close() {
 
 // CreateSubmission 创建提交记录
 func (db *PostgresDB) CreateSubmission(ctx context.Context, s *model.Submission) error {
+	var problemID interface{}
+	if s.ProblemID > 0 {
+		problemID = s.ProblemID
+	}
+	var userID interface{}
+	if s.UserID > 0 {
+		userID = s.UserID
+	}
+
 	query := `
 		INSERT INTO submissions (job_id, problem_id, user_id, code, language, time_limit, memory_limit, status, state)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, created_at, updated_at
 	`
 	return db.pool.QueryRow(ctx, query,
-		s.JobID, s.ProblemID, s.UserID, s.Code, s.Language,
+		s.JobID, problemID, userID, s.Code, s.Language,
 		s.TimeLimit, s.MemoryLimit, s.Status, s.State,
 	).Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt)
 }
@@ -71,7 +79,7 @@ func (db *PostgresDB) CreateSubmission(ctx context.Context, s *model.Submission)
 // GetSubmission 根据 Job ID 获取提交
 func (db *PostgresDB) GetSubmission(ctx context.Context, jobID string) (*model.Submission, error) {
 	query := `
-		SELECT id, job_id, problem_id, user_id, code, language, 
+		SELECT id, job_id, COALESCE(problem_id, 0), COALESCE(user_id, 0), code, language,
 		       time_limit, memory_limit, status, state, result, created_at, updated_at
 		FROM submissions
 		WHERE job_id = $1
@@ -125,7 +133,7 @@ func (db *PostgresDB) UpdateSubmissionState(ctx context.Context, jobID string, s
 // GetPendingSubmissions 获取超时的 Pending 任务 (用于 Slow Path 恢复)
 func (db *PostgresDB) GetPendingSubmissions(ctx context.Context, before time.Time, limit int) ([]*model.Submission, error) {
 	query := `
-		SELECT id, job_id, problem_id, user_id, code, language, 
+		SELECT id, job_id, COALESCE(problem_id, 0), COALESCE(user_id, 0), code, language,
 		       time_limit, memory_limit, status, state, created_at, updated_at
 		FROM submissions
 		WHERE state = 'pending' AND created_at < $1

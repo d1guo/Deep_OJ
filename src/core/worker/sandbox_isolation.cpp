@@ -387,6 +387,7 @@ namespace deep_oj {
         if (setgid(g_runner_config.run_gid) != 0) _exit(ERR_SETGID_FAILED);
         if (setuid(g_runner_config.run_uid) != 0) _exit(ERR_SETUID_FAILED);
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(ERR_SANDBOX_EXCEPTION);
+        LoadCompileSeccompRules();
 
         // 8. 准备 g++ 执行路径及参数，确保使用配置中的 compiler_path
         const char* src_filename = strrchr(config->source_path, '/');

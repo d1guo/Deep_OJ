@@ -9,7 +9,7 @@ type Submission struct {
 	ID          int64     `json:"id" db:"id"`
 	JobID       string    `json:"job_id" db:"job_id"`
 	ProblemID   int       `json:"problem_id,omitempty" db:"problem_id"`
-	UserID      int       `json:"user_id,omitempty" db:"user_id"`
+	UserID      int64     `json:"user_id,omitempty" db:"user_id"`
 	Code        string    `json:"code" db:"code"`
 	Language    int       `json:"language" db:"language"`
 	TimeLimit   int       `json:"time_limit" db:"time_limit"`

@@ -44,8 +44,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/api"
+	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -58,6 +58,24 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func configureTrustedProxies(r *gin.Engine) error {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if raw == "" {
+		// Safe default: trust no proxy headers, ClientIP uses RemoteAddr.
+		return r.SetTrustedProxies(nil)
+	}
+	parts := strings.Split(raw, ",")
+	proxies := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		proxies = append(proxies, p)
+	}
+	return r.SetTrustedProxies(proxies)
 }
 
 func main() {
@@ -128,7 +146,8 @@ func main() {
 	// =========================================================================
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://deep_oj:secret@localhost:5432/deep_oj?sslmode=disable"
+		slog.Error("DATABASE_URL must be set")
+		os.Exit(1)
 	}
 
 	redisURL := os.Getenv("REDIS_URL")
@@ -177,11 +196,13 @@ func main() {
 	}
 	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
 	if minioAccessKey == "" {
-		minioAccessKey = "minioadmin"
+		slog.Error("MINIO_ACCESS_KEY must be set")
+		os.Exit(1)
 	}
 	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
 	if minioSecretKey == "" {
-		minioSecretKey = "minioadmin"
+		slog.Error("MINIO_SECRET_KEY must be set")
+		os.Exit(1)
 	}
 	minioBucket := os.Getenv("MINIO_BUCKET")
 	if minioBucket == "" {
@@ -206,6 +227,10 @@ func main() {
 	}
 
 	r := gin.Default()
+	if err := configureTrustedProxies(r); err != nil {
+		slog.Error("Failed to configure trusted proxies", "error", err)
+		os.Exit(1)
+	}
 
 	// 中间件
 	r.Use(api.CORSMiddleware())
@@ -213,7 +238,7 @@ func main() {
 	r.Use(api.MetricsMiddleware()) // [Task 3.3] Metrics
 
 	// Metrics endpoint
-	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+	r.GET("/metrics", api.MetricsAccessMiddleware(), gin.WrapH(promhttp.Handler()))
 
 	// API 路由
 	v1 := r.Group("/api/v1")
@@ -254,8 +279,12 @@ func main() {
 	// 5. 优雅关闭 (Graceful Shutdown)
 	// =========================================================================
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: r,
+		Addr:              ":" + port,
+		Handler:           r,
+		ReadHeaderTimeout: time.Duration(getEnvInt("API_READ_HEADER_TIMEOUT_SEC", 5)) * time.Second,
+		ReadTimeout:       time.Duration(getEnvInt("API_READ_TIMEOUT_SEC", 15)) * time.Second,
+		WriteTimeout:      time.Duration(getEnvInt("API_WRITE_TIMEOUT_SEC", 30)) * time.Second,
+		IdleTimeout:       time.Duration(getEnvInt("API_IDLE_TIMEOUT_SEC", 60)) * time.Second,
 	}
 
 	// 启动服务器 (在 Goroutine 中)

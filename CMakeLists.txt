@@ -11,6 +11,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src/core/worker)
 
 find_package(Threads REQUIRED)
 add_compile_options(-pthread)
+include(CTest)
 
 # 2. Dependencies
 find_package(PkgConfig REQUIRED)
@@ -68,9 +69,15 @@ add_executable(judge_engine src/core/worker/main.cpp)
 target_link_libraries(judge_engine deep_oj_core)
 
 # --- C. Security Test Runner ---
-find_package(GTest REQUIRED)
-add_executable(security_test_runner tests/security_integration_test.cpp)
-target_link_libraries(security_test_runner deep_oj_core GTest::GTest GTest::Main)
+if(BUILD_TESTING)
+    find_package(GTest QUIET)
+    if(GTest_FOUND)
+        add_executable(security_test_runner tests/security_integration_test.cpp)
+        target_link_libraries(security_test_runner deep_oj_core GTest::GTest GTest::Main)
+    else()
+        message(WARNING "GTest not found, skip building security_test_runner")
+    endif()
+endif()
 
 # Copy Config
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/config.yaml")

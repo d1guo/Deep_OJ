@@ -3,8 +3,9 @@ services:
   redis:
     image: redis:alpine
     container_name: oj-redis
-    ports:
-      - "6380:6379"
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-deepoj_redis_change_me}"]
+    expose:
+      - "6379"
     networks:
       - deep-oj-net
 
@@ -14,22 +15,32 @@ services:
     image: deep-oj:v3
     container_name: oj-worker
     command: /app/oj_worker
-    privileged: true 
-    ports:
-      - "50051:50051"
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "50051"
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./data/workspace:/data/workspace:rw
     environment:
       - REDIS_URL=oj-redis:6379
-      - MINIO_ENDPOINT=oj-minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
+      - MINIO_ENDPOINT=http://oj-minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-deepoj_minio_user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
       - MINIO_BUCKET=deep-oj-problems
       - ETCD_ENDPOINTS=oj-etcd:2379
       - WORKER_ADDR=oj-worker:50051
       - JUDGER_BIN=/app/judge_engine
       - WORKSPACE=/data/workspace
+      - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}
+      - ALLOW_INSECURE_WORKER_GRPC=true
     networks:
       - deep-oj-net
     depends_on:
@@ -48,10 +59,13 @@ services:
       - "50052:50052"
     environment:
       - REDIS_URL=oj-redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
       - WORKER_ADDR=oj-worker:50051
       - ETCD_ENDPOINTS=oj-etcd:2379 # Need Etcd service
-      - PGPASSWORD=secret
-      - DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable
+      - PGPASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
+      - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
+      - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}
+      - ALLOW_INSECURE_WORKER_GRPC=true
     networks:
       - deep-oj-net
     depends_on:
@@ -72,13 +86,15 @@ services:
     environment:
       - PORT=18080
       - REDIS_URL=oj-redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
       - SCHEDULER_ADDR=oj-scheduler:50052
-      - PGPASSWORD=secret
-      - DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable
-      - MINIO_ENDPOINT=oj-minio:9000
-      - MINIO_ACCESS_KEY=minioadmin
-      - MINIO_SECRET_KEY=minioadmin
+      - PGPASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
+      - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
+      - MINIO_ENDPOINT=http://oj-minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-deepoj_minio_user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
       - MINIO_BUCKET=deep-oj-problems
+      - METRICS_TOKEN=${METRICS_TOKEN:-}
     networks:
       - deep-oj-net
     depends_on:
@@ -94,12 +110,12 @@ services:
     restart: always
     environment:
       - POSTGRES_USER=deep_oj
-      - POSTGRES_PASSWORD=secret
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
       - POSTGRES_DB=deep_oj
     volumes:
       - ./sql/migrations:/docker-entrypoint-initdb.d
-    ports:
-      - "5433:5432"
+    expose:
+      - "5432"
     networks:
       - deep-oj-net
 
@@ -110,11 +126,11 @@ services:
     restart: always
     command: server /data --console-address ":9001"
     environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-deepoj_minio_user}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
+    expose:
+      - "9000"
+      - "9001"
     networks:
       - deep-oj-net
 
@@ -123,8 +139,8 @@ services:
     image: registry.cn-hangzhou.aliyuncs.com/google_containers/etcd:3.5.0-0
     container_name: oj-etcd
     command: /usr/local/bin/etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://oj-etcd:2379
-    ports:
-      - "2381:2379"
+    expose:
+      - "2379"
     networks:
       - deep-oj-net
 

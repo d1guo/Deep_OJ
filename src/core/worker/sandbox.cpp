@@ -475,6 +475,15 @@ namespace deep_oj
                     cgroup->SetPidsLimit(pids_limit);
                     // memory.max: KB -> Bytes, 禁用 Swap
                     cgroup->SetMemoryLimit(static_cast<uint64_t>(memory_limit_kb) * 1024ULL, true);
+                    // cpu.max: 默认限制到 1 核
+                    double cpu_max_cores = g_runner_config.cgroup_cpu_max_cores > 0 ? g_runner_config.cgroup_cpu_max_cores : 1.0;
+                    cgroup->SetCPULimit(cpu_max_cores);
+                    // io.max: 按配置限速，失败仅告警不影响任务执行
+                    cgroup->SetIOLimit(
+                        g_runner_config.cgroup_io_read_bps,
+                        g_runner_config.cgroup_io_write_bps,
+                        g_runner_config.workspace_root
+                    );
                     // 将子进程加入 cgroup
                     cgroup->AddProcess(pid);
                     cgroup_enabled = true;

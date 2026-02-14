@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ type JudgeService struct {
 	redis    *redis.Client // Added Redis client
 	sem      chan struct{}
 }
+
+var safeJobIDRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func NewJudgeService(cfg *Config, exec *Executor, tcMgr *TestCaseManager, rdb *redis.Client) *JudgeService {
 	return &JudgeService{
@@ -59,11 +62,17 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		workerTaskTotal.WithLabelValues(taskStatus).Inc()
 		workerTaskDuration.Observe(time.Since(taskStart).Seconds())
 	}()
+	if !isSafeJobID(req.JobId) {
+		taskStatus = "invalid_request"
+		logger.Warn("Reject unsafe job_id", "job_id", req.JobId)
+		return &pb.TaskResponse{Message: "Invalid job_id"}, nil
+	}
+	jobID := req.JobId
 
 	// 1. Prepare Workspace
 	workDir, err := s.tcMgr.Prepare(ctx, fmt.Sprint(req.ProblemId))
 	if err != nil {
-		if rerr := s.reportError(ctx, req.JobId, req.TraceId, "System Error", fmt.Sprintf("Prepare testcases failed: %v", err)); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, req.TraceId, "System Error", fmt.Sprintf("Prepare testcases failed: %v", err)); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Failed"}, nil
@@ -71,7 +80,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	logger.Info("Testcases ready", "work_dir", workDir)
 
 	// 2. Compile
-	jobDir := filepath.Join(s.config.Workspace, "code", req.JobId)
+	jobDir := filepath.Join(s.config.Workspace, "code", jobID)
 	if !s.config.KeepWorkdir {
 		defer func() {
 			if err := os.RemoveAll(jobDir); err != nil {
@@ -82,7 +91,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 
 	codePath := filepath.Join(jobDir, "main.cpp")
 	if err := SaveFile(codePath, req.Code); err != nil {
-		if rerr := s.reportError(ctx, req.JobId, req.TraceId, "System Error", fmt.Sprintf("Save code failed: %v", err)); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, req.TraceId, "System Error", fmt.Sprintf("Save code failed: %v", err)); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Failed"}, nil
@@ -95,12 +104,12 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	defer cancelCompile()
 
 	compileStart := time.Now()
-	cres, err := s.executor.Compile(compileCtx, s.config, req.JobId, codePath)
+	cres, err := s.executor.Compile(compileCtx, s.config, jobID, codePath)
 	workerCompileDuration.Observe(time.Since(compileStart).Seconds())
 	if err != nil {
 		taskStatus = "compile_error"
 		logger.Warn("Compile failed", "error", err)
-		if rerr := s.reportError(ctx, req.JobId, req.TraceId, "Compile Error", err.Error()); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, req.TraceId, "Compile Error", err.Error()); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Compile Error"}, nil
@@ -111,7 +120,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		if msg == "" {
 			msg = "compile failed"
 		}
-		if rerr := s.reportError(ctx, req.JobId, req.TraceId, "Compile Error", msg); rerr != nil {
+		if rerr := s.reportError(ctx, jobID, req.TraceId, "Compile Error", msg); rerr != nil {
 			return &pb.TaskResponse{Message: "Report failed"}, rerr
 		}
 		return &pb.TaskResponse{Message: "Compile Error"}, nil
@@ -125,10 +134,9 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	var maxTime = 0
 	var maxMem = 0
 	checkerPath := filepath.Join(workDir, "checker")
-	hasChecker := isExecutable(checkerPath)
-	if hasChecker && !s.config.AllowHostChecker {
-		logger.Warn("Host checker disabled, fallback to diff")
-		hasChecker = false
+	hasChecker := false
+	if isExecutable(checkerPath) {
+		logger.Warn("Custom checker detected but host execution is disabled; fallback to diff")
 	}
 
 	for _, inPath := range inFiles {
@@ -146,7 +154,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		cancelCase()
 		if err != nil {
 			taskStatus = "system_error"
-			if rerr := s.reportError(ctx, req.JobId, req.TraceId, "System Error", err.Error()); rerr != nil {
+			if rerr := s.reportError(ctx, jobID, req.TraceId, "System Error", err.Error()); rerr != nil {
 				return &pb.TaskResponse{Message: "Report failed"}, rerr
 			}
 			return &pb.TaskResponse{Message: "System Error"}, nil
@@ -181,7 +189,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 
 	// 4. Report Success
 	result := map[string]interface{}{
-		"job_id":      req.JobId,
+		"job_id":      jobID,
 		"status":      finalStatus,
 		"time_used":   maxTime,
 		"memory_used": maxMem,
@@ -190,7 +198,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 		"cache_key":   req.CacheKey,
 	}
 
-	if err := s.reportResult(ctx, req.JobId, result); err != nil {
+	if err := s.reportResult(ctx, jobID, result); err != nil {
 		return &pb.TaskResponse{Message: "Report failed"}, err
 	}
 	taskStatus = normalizeStatus(finalStatus)
@@ -203,7 +211,7 @@ func (s *JudgeService) ExecuteTask(ctx context.Context, req *pb.TaskRequest) (*p
 	cleanupTimeout := time.Duration(cleanupSec) * time.Second
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancelCleanup()
-	if err := s.executor.Cleanup(cleanupCtx, s.config, req.JobId); err != nil {
+	if err := s.executor.Cleanup(cleanupCtx, s.config, jobID); err != nil {
 		logger.Warn("Cleanup failed", "error", err)
 	}
 
@@ -436,4 +444,8 @@ func normalizeStatus(status string) string {
 	default:
 		return "system_error"
 	}
+}
+
+func isSafeJobID(jobID string) bool {
+	return safeJobIDRegex.MatchString(jobID)
 }

@@ -85,6 +85,9 @@ namespace deep_oj {
 
         // cgroup 限制
         int cgroup_pids_limit;
+        double cgroup_cpu_max_cores;
+        long long cgroup_io_read_bps;
+        long long cgroup_io_write_bps;
     };
     extern GlobalConfig g_runner_config;
 

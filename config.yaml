@@ -39,6 +39,9 @@ runner:
   output_buffer_size: 2097152    # bytes
   tmpfs_size_mb: 64
   cgroup_pids_limit: 20
+  cgroup_cpu_max_cores: 1.0
+  cgroup_io_read_bps: 104857600
+  cgroup_io_write_bps: 104857600
 
 security:
   # 容器内运行的用户 ID (nobody)
@@ -52,19 +55,18 @@ security:
 api:
   port: 8080
   gin_mode: "release"
-  database_url: "postgres://deep_oj:secret@localhost:5432/deep_oj?sslmode=disable"
+  database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
   redis_url: "localhost:6379"
   minio:
-    endpoint: "localhost:9000"
-    access_key: "minioadmin"
-    secret_key: "minioadmin"
+    endpoint: "http://localhost:9000"
+    access_key: "change_me"
+    secret_key: "change_me"
     bucket: "deep-oj-problems"
   auth:
     jwt_secret: ""            # 必填，留空会导致服务启动失败
     jwt_expire_hours: 24
     oauth_state_ttl_sec: 300  # OAuth state cookie TTL
-    admin_users:
-      - "admin"
+    admin_users: []
     oauth:
       github:
         client_id: ""
@@ -95,7 +97,7 @@ scheduler:
   etcd_endpoints:
     - "localhost:2379"
   redis_url: "localhost:6379"
-  database_url: "postgres://deep_oj:secret@localhost:5432/deep_oj?sslmode=disable"
+  database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
   worker_capacity: 4
   max_retry: 3
   retry_ttl_sec: 86400
@@ -145,9 +147,9 @@ worker:
   etcd_lease_ttl_sec: 10
   redis_url: "localhost:6379"
   minio:
-    endpoint: "localhost:9000"
-    access_key: "minioadmin"
-    secret_key: "minioadmin"
+    endpoint: "http://localhost:9000"
+    access_key: "change_me"
+    secret_key: "change_me"
     bucket: "deep-oj-problems"
   workspace: "/data/workspace"
   judger_bin: "/app/judge_engine"

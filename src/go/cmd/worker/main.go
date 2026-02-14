@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,7 +21,10 @@ import (
 	"github.com/go-redis/redis/v8"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func getEnvInt(key string, fallback int) int {
@@ -30,6 +34,51 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func workerAuthUnaryInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		md, ok := metadata.FromIncomingContext(ctx)
+		if !ok {
+			return nil, status.Error(codes.Unauthenticated, "missing metadata")
+		}
+		values := md.Get("x-worker-auth-token")
+		if len(values) == 0 || strings.TrimSpace(values[0]) != expectedToken {
+			return nil, status.Error(codes.Unauthenticated, "invalid worker auth token")
+		}
+		return handler(ctx, req)
+	}
+}
+
+func buildRedisOptions(addr string) *redis.Options {
+	opts := &redis.Options{Addr: addr}
+	if strings.HasPrefix(addr, "redis://") || strings.HasPrefix(addr, "rediss://") {
+		if parsed, err := redis.ParseURL(addr); err == nil {
+			opts = parsed
+		}
+	}
+	if opts.Password == "" {
+		opts.Password = os.Getenv("REDIS_PASSWORD")
+	}
+	if opts.TLSConfig == nil && (strings.HasPrefix(addr, "rediss://") || getEnvBool("REDIS_TLS", false)) {
+		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	return opts
 }
 
 func main() {
@@ -104,7 +153,7 @@ func main() {
 	cfg := worker.LoadConfig()
 	slog.Info("Worker starting", "id", cfg.WorkerID, "addr", cfg.WorkerAddr, "bin", cfg.JudgerBin)
 
-	if os.Getenv("REQUIRE_CGROUPS_V2") == "1" {
+	if getEnvBool("REQUIRE_CGROUPS_V2", false) {
 		if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
 			slog.Error("Cgroups v2 not available, aborting (REQUIRE_CGROUPS_V2=1)", "error", err)
 			os.Exit(1)
@@ -126,9 +175,7 @@ func main() {
 	}
 
 	slog.Info("Connecting to Redis", "addr", cfg.RedisURL)
-	rdb := redis.NewClient(&redis.Options{
-		Addr: cfg.RedisURL,
-	})
+	rdb := redis.NewClient(buildRedisOptions(cfg.RedisURL))
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		slog.Error("Failed to connect to Redis", "error", err)
 		os.Exit(1)
@@ -142,15 +189,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	var grpcServer *grpc.Server
+	serverOpts := make([]grpc.ServerOption, 0, 4)
+	serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(getEnvInt("WORKER_GRPC_MAX_RECV_BYTES", 1<<20)))
+	serverOpts = append(serverOpts, grpc.MaxSendMsgSize(getEnvInt("WORKER_GRPC_MAX_SEND_BYTES", 1<<20)))
+
+	workerAuthToken := strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN"))
+	if workerAuthToken == "" && !getEnvBool("ALLOW_INSECURE_WORKER_GRPC", false) {
+		slog.Error("WORKER_AUTH_TOKEN must be set unless ALLOW_INSECURE_WORKER_GRPC=true")
+		os.Exit(1)
+	}
+	if workerAuthToken != "" {
+		serverOpts = append(serverOpts, grpc.UnaryInterceptor(workerAuthUnaryInterceptor(workerAuthToken)))
+	}
+
 	if opt, err := loadServerTLS(); err != nil {
 		slog.Error("Failed to load TLS", "error", err)
 		os.Exit(1)
 	} else if opt != nil {
-		grpcServer = grpc.NewServer(opt)
-	} else {
-		grpcServer = grpc.NewServer()
+		serverOpts = append(serverOpts, opt)
 	}
+	grpcServer := grpc.NewServer(serverOpts...)
 	svc := worker.NewJudgeService(cfg, exec, tcMgr, rdb)
 	pb.RegisterJudgeServiceServer(grpcServer, svc)
 
@@ -166,37 +224,20 @@ func main() {
 	}
 	defer cli.Close()
 
-	// Register with lease
 	leaseTTL := int64(getEnvInt("ETCD_LEASE_TTL_SEC", 10))
-	lease, err := cli.Grant(context.Background(), leaseTTL)
-	if err != nil {
-		slog.Error("Etcd grant failed", "error", err)
-		os.Exit(1)
-	}
-
 	key := fmt.Sprintf("/deep-oj/workers/%s", cfg.WorkerID)
 	val := cfg.WorkerAddr
 
-	_, err = cli.Put(context.Background(), key, val, clientv3.WithLease(lease.ID))
+	regCtx, cancelReg := context.WithCancel(context.Background())
+	defer cancelReg()
+	leaseID, keepAliveCh, err := registerWorkerWithLease(regCtx, cli, key, val, leaseTTL)
 	if err != nil {
-		slog.Error("Etcd put failed", "error", err)
+		slog.Error("Initial worker register failed", "error", err)
 		os.Exit(1)
 	}
+	go maintainWorkerRegistration(regCtx, cli, key, val, leaseTTL, leaseID, keepAliveCh)
 
-	// KeepAlive
-	ch, err := cli.KeepAlive(context.Background(), lease.ID)
-	if err != nil {
-		slog.Error("KeepAlive failed", "error", err)
-		os.Exit(1)
-	}
-	go func() {
-		for range ch {
-			// consume keepalive response
-		}
-		slog.Warn("Etcd keepalive channel closed")
-	}()
-
-	slog.Info("Worker registered", "key", key)
+	slog.Info("Worker registered", "key", key, "lease_id", leaseID)
 
 	// 5. Start
 	go func() {
@@ -213,8 +254,9 @@ func main() {
 	<-quit
 
 	slog.Info("Shutting down...")
+	cancelReg()
 	grpcServer.GracefulStop()
-	cli.Revoke(context.Background(), lease.ID)
+	_, _ = cli.Delete(context.Background(), key)
 	slog.Info("Worker exited")
 }
 
@@ -243,4 +285,65 @@ func loadServerTLS() (grpc.ServerOption, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 	return grpc.Creds(credentials.NewTLS(tlsConfig)), nil
+}
+
+func registerWorkerWithLease(
+	ctx context.Context,
+	cli *clientv3.Client,
+	key, val string,
+	leaseTTL int64,
+) (clientv3.LeaseID, <-chan *clientv3.LeaseKeepAliveResponse, error) {
+	lease, err := cli.Grant(ctx, leaseTTL)
+	if err != nil {
+		return 0, nil, err
+	}
+	if _, err := cli.Put(ctx, key, val, clientv3.WithLease(lease.ID)); err != nil {
+		return 0, nil, err
+	}
+	ch, err := cli.KeepAlive(ctx, lease.ID)
+	if err != nil {
+		return 0, nil, err
+	}
+	return lease.ID, ch, nil
+}
+
+func maintainWorkerRegistration(
+	ctx context.Context,
+	cli *clientv3.Client,
+	key, val string,
+	leaseTTL int64,
+	leaseID clientv3.LeaseID,
+	ch <-chan *clientv3.LeaseKeepAliveResponse,
+) {
+	currentLeaseID := leaseID
+	currentCh := ch
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-currentCh:
+			if ok {
+				continue
+			}
+			slog.Warn("Etcd keepalive channel closed, attempting to re-register", "lease_id", currentLeaseID)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				newLeaseID, newCh, err := registerWorkerWithLease(ctx, cli, key, val, leaseTTL)
+				if err != nil {
+					slog.Error("Worker re-register failed", "error", err)
+					time.Sleep(time.Second)
+					continue
+				}
+				currentLeaseID = newLeaseID
+				currentCh = newCh
+				slog.Info("Worker re-registered to etcd", "lease_id", currentLeaseID)
+				break
+			}
+		}
+	}
 }

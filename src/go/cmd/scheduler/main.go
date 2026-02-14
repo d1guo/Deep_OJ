@@ -243,11 +243,13 @@ func main() {
 		}
 
 		// 解析任务 (Protobuf)
-		task := &pb.TaskRequest{}
-		if err := proto.Unmarshal([]byte(result), task); err != nil {
-			slog.Warn("⚠️ Failed to parse task", "error", err)
-			continue
-		}
+			task := &pb.TaskRequest{}
+			if err := proto.Unmarshal([]byte(result), task); err != nil {
+				slog.Warn("⚠️ Failed to parse task", "error", err)
+				_ = redisClient.LRem(ctx, common.QueueProcessing, 1, result)
+				_ = redisClient.LPush(ctx, common.QueueDead, result)
+				continue
+			}
 
 		jobID := task.JobId
 		slog.Info("📦 Received task", "job_id", jobID)

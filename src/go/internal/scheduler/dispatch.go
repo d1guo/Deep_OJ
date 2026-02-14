@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/d1guo/deep_oj/internal/repository"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -29,6 +31,11 @@ func DispatchTask(ctx context.Context, workerAddr string, taskData []byte, redis
 
 	logger := slog.With("job_id", task.JobId, "worker", workerAddr, "trace_id", task.TraceId)
 	logger.InfoContext(ctx, "Dispatching task")
+	workerAuthToken := strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN"))
+	allowInsecure := getEnvBool("ALLOW_INSECURE_WORKER_GRPC", true)
+	if workerAuthToken == "" {
+		return fmt.Errorf("WORKER_AUTH_TOKEN is required for scheduler->worker dispatch (%w)", common.ErrNonRetryable)
+	}
 
 	// 2. 建立 gRPC 连接 (带超时)
 	connTimeoutMs := getEnvInt("DISPATCH_CONN_TIMEOUT_MS", 3000)
@@ -40,6 +47,9 @@ func DispatchTask(ctx context.Context, workerAddr string, taskData []byte, redis
 		return fmt.Errorf("load tls creds: %w (%w)", err, common.ErrRetryable)
 	}
 	if creds == nil {
+		if !allowInsecure {
+			return fmt.Errorf("TLS credentials missing and insecure mode disabled (%w)", common.ErrNonRetryable)
+		}
 		creds = insecure.NewCredentials()
 	}
 	conn, err := grpc.DialContext(connCtx, workerAddr,
@@ -66,6 +76,9 @@ func DispatchTask(ctx context.Context, workerAddr string, taskData []byte, redis
 		// RPC 超时
 		rpcTimeoutMs := getEnvInt("DISPATCH_RPC_TIMEOUT_MS", 5000)
 		rpcCtx, cancelRPC := context.WithTimeout(ctx, time.Duration(rpcTimeoutMs)*time.Millisecond) // 发送请求不需要很久，执行是异步的
+		if workerAuthToken != "" {
+			rpcCtx = metadata.AppendToOutgoingContext(rpcCtx, "x-worker-auth-token", workerAuthToken)
+		}
 
 		_, err := client.ExecuteTask(rpcCtx, req)
 		cancelRPC()

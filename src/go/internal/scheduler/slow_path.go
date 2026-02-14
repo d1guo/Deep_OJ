@@ -2,10 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/d1guo/deep_oj/internal/model"
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
@@ -62,7 +65,7 @@ func checkLostTasks(ctx context.Context, redis *repository.RedisClient, db *repo
 
 		slog.Info("SlowPath: Recovering task", "job_id", sub.JobID)
 
-		cacheKey := common.CacheKeyPrefix + "recovered" // 简化，实际应重新生成或存储
+		cacheKey := buildRecoveredCacheKey(sub)
 
 		task := &pb.TaskRequest{
 			JobId:       sub.JobID,
@@ -85,6 +88,11 @@ func checkLostTasks(ctx context.Context, redis *repository.RedisClient, db *repo
 			slog.Info("SlowPath: Successfully requeued task", "job_id", sub.JobID)
 		}
 	}
+}
+
+func buildRecoveredCacheKey(sub *model.Submission) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d|%d|%d", sub.Code, sub.Language, sub.TimeLimit, sub.MemoryLimit, sub.ProblemID)))
+	return common.CacheKeyPrefix + hex.EncodeToString(sum[:])
 }
 
 func checkTimeoutTasks(ctx context.Context, redis *repository.RedisClient, db *repository.PostgresDB) {

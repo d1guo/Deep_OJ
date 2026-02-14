@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +63,11 @@ func getOAuthStateTTL() time.Duration {
 
 // Register 处理用户注册
 func (h *Handler) Register(c *gin.Context) {
+	if !h.checkRateLimit(c, c.ClientIP(), 0) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁", "code": "RATE_LIMITED"})
+		return
+	}
+
 	var req model.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
@@ -105,6 +111,11 @@ func (h *Handler) Register(c *gin.Context) {
 
 // Login 处理用户登录
 func (h *Handler) Login(c *gin.Context) {
+	if !h.checkRateLimit(c, c.ClientIP(), 0) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁", "code": "RATE_LIMITED"})
+		return
+	}
+
 	var req model.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
@@ -221,7 +232,7 @@ func (h *Handler) HandleGitHubLogin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "OAuth 初始化失败"})
 		return
 	}
-	secure := c.Request.TLS != nil
+	secure := isRequestSecure(c)
 	c.SetSameSite(http.SameSiteLaxMode)
 	stateTTL := getOAuthStateTTL()
 	c.SetCookie(oauthStateCookieName, state, int(stateTTL.Seconds()), "/", "", secure, true)
@@ -244,7 +255,7 @@ func (h *Handler) HandleGitHubCallback(c *gin.Context) {
 	}
 
 	cookieState, err := c.Cookie(oauthStateCookieName)
-	secure := c.Request.TLS != nil
+	secure := isRequestSecure(c)
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(oauthStateCookieName, "", -1, "/", "", secure, true)
 	if err != nil || cookieState == "" || cookieState != state {
@@ -307,4 +318,19 @@ func (h *Handler) HandleGitHubCallback(c *gin.Context) {
 		Username: user.Username,
 		UserID:   user.ID,
 	})
+}
+
+func isRequestSecure(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	proto := strings.TrimSpace(strings.ToLower(c.GetHeader("X-Forwarded-Proto")))
+	if strings.Contains(proto, ",") {
+		proto = strings.TrimSpace(strings.SplitN(proto, ",", 2)[0])
+	}
+	if proto == "https" {
+		return true
+	}
+	ssl := strings.TrimSpace(strings.ToLower(c.GetHeader("X-Forwarded-Ssl")))
+	return ssl == "on"
 }
