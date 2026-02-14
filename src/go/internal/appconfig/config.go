@@ -190,13 +190,16 @@ type WorkerConfig struct {
 }
 
 type WorkerStreamConfig struct {
-	StreamKey    string `yaml:"stream_key"`
-	Group        string `yaml:"group"`
-	Consumer     string `yaml:"consumer"`
-	ReadCount    int    `yaml:"read_count"`
-	BlockMs      int    `yaml:"block_ms"`
-	LeaseSec     int    `yaml:"lease_sec"`
-	HeartbeatSec int    `yaml:"heartbeat_sec"`
+	StreamKey          string `yaml:"stream_key"`
+	Group              string `yaml:"group"`
+	Consumer           string `yaml:"consumer"`
+	ReadCount          int    `yaml:"read_count"`
+	BlockMs            int    `yaml:"block_ms"`
+	LeaseSec           int    `yaml:"lease_sec"`
+	HeartbeatSec       int    `yaml:"heartbeat_sec"`
+	ReclaimIntervalSec int    `yaml:"reclaim_interval_sec"`
+	ReclaimCount       int    `yaml:"reclaim_count"`
+	ReclaimGraceSec    int    `yaml:"reclaim_grace_sec"`
 }
 
 type WorkerTimeouts struct {

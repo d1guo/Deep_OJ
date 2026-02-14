@@ -173,3 +173,63 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "
 - `docker-compose.yml`
 - `DESIGN.md`
 - `RUNBOOK.md`
+
+## C4（已完成，含 C3 高风险洞顺手修复）
+
+- 日期：2026-02-14
+- 目标：引入 PEL reclaim（`XAUTOCLAIM`）并落地 INV-4 分流；同时修复 attempt mismatch 提前 return 导致 PEL/DB 卡住的问题
+- 基线 commit hash：`c1ea148`
+
+### 完成项
+
+- Worker 新增 reclaim loop（`src/go/internal/worker/stream_consumer.go`）：
+  - 周期配置：`JOB_RECLAIM_INTERVAL_SEC`（默认 5s）
+  - 批量配置：`JOB_RECLAIM_COUNT`（默认 16）
+  - idle 阈值：`JOB_LEASE_SEC + JOB_RECLAIM_GRACE_SEC`（默认 75s）
+  - 执行 `XAUTOCLAIM` 回收 PEL pending entry
+- DB 新增 reclaim CAS（`src/go/internal/repository/postgres.go`）：
+  - `ReclaimSubmissionForRun(job_id, lease_owner, lease_sec)`
+  - 仅当 `status='running' AND state='processing' AND lease_until < NOW()` 时 reclaim 成功，并 `attempt_id = attempt_id + 1`
+  - 返回稳定决策枚举：`claimed / done_or_stale / lease_still_valid / not_found`
+- INV-4 分流落地：
+  - `claimed`：执行 judge，fenced finalize 成功后 `XACK`
+  - `done_or_stale` / `not_found`：业务性失败，直接 `XACK`
+  - `lease_still_valid`：不执行、不 `XACK`（保留给原 consumer）
+  - `db_error`：不 `XACK`（留在 PEL 下次重试）
+- C3 高风险洞修复：
+  - 执行结束发现 `finalResult.attempt_id` 与本次 claim attempt 不一致时，不再提前 `return`
+  - 强制覆盖为本次 claim/reclaim attempt，再走 fenced finalize
+  - fenced 0 行按 `stale_attempt` 处理并 `XACK`，避免 PEL 卡死
+- C4 可观测性：
+  - 指标：`worker_reclaim_total{status,reason}`、`worker_reclaim_latency_ms`、`worker_reclaim_inflight`
+  - 日志字段统一：`trace_id/job_id/attempt_id/stream_entry_id/group/consumer/reason`
+
+### 验收命令
+
+```bash
+cd /home/diguo/Deep_OJ/src/go
+go test ./internal/worker -run 'Test.*Reclaim|Test.*AutoClaim|TestStreamConsumer' -v
+
+STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+GROUP="${JOB_STREAM_GROUP:-deepoj:workers}"
+CONSUMER="${JOB_STREAM_CONSUMER:-debug-consumer}"
+
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "$GROUP"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "$GROUP" - + 10
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY" "$GROUP" "$CONSUMER" 75000 0-0 COUNT 10
+```
+
+### 涉及文件
+
+- `src/go/internal/worker/stream_consumer.go`
+- `src/go/internal/worker/stream_consumer_test.go`
+- `src/go/internal/repository/postgres.go`
+- `src/go/internal/worker/config.go`
+- `src/go/internal/worker/metrics.go`
+- `src/go/internal/appconfig/config.go`
+- `src/go/cmd/worker/main.go`
+- `config.yaml`
+- `docker-compose.yml`
+- `DESIGN.md`
+- `RUNBOOK.md`

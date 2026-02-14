@@ -155,6 +155,9 @@ worker:
     block_ms: 2000
     lease_sec: 60
     heartbeat_sec: 10
+    reclaim_interval_sec: 5
+    reclaim_count: 16
+    reclaim_grace_sec: 15
   minio:
     endpoint: "http://localhost:9000"
     access_key: "change_me"

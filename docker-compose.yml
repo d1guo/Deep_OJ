@@ -42,6 +42,9 @@ services:
       - JOB_STREAM_GROUP=deepoj:workers
       - JOB_LEASE_SEC=60
       - JOB_HEARTBEAT_SEC=10
+      - JOB_RECLAIM_INTERVAL_SEC=5
+      - JOB_RECLAIM_COUNT=16
+      - JOB_RECLAIM_GRACE_SEC=15
       - JUDGER_BIN=/app/judge_engine
       - WORKSPACE=/data/workspace
       - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}

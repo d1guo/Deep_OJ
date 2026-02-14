@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/d1guo/deep_oj/internal/model"
@@ -14,7 +15,39 @@ const (
 	defaultMinConns        = 2
 	defaultMaxConnLifetime = time.Hour
 	defaultMaxConnIdleTime = 30 * time.Minute
+
+	FinalizeReasonOK                     = "ok"
+	FinalizeReasonStaleAttempt           = "stale_attempt"
+	FinalizeReasonAlreadyFinished        = "already_finished"
+	FinalizeReasonNotInExpectedState     = "not_in_expected_state"
+	FinalizeReasonLeaseLostOwnerMismatch = "lease_lost_or_owner_mismatch"
+	FinalizeReasonDBError                = "db_error"
 )
+
+var terminalStatuses = map[string]struct{}{
+	"finished":              {},
+	"accepted":              {},
+	"wrong answer":          {},
+	"compile error":         {},
+	"system error":          {},
+	"time limit":            {},
+	"time limit exceeded":   {},
+	"memory limit":          {},
+	"memory limit exceeded": {},
+	"output limit":          {},
+	"output limit exceeded": {},
+	"runtime error":         {},
+}
+
+type FinalizeFenceResult struct {
+	Applied      bool
+	Reason       string
+	DBAttemptID  int64
+	DBStatus     string
+	DBState      string
+	DBLeaseOwner string
+	DBLeaseUntil *time.Time
+}
 
 // PostgresDB 封装 pgx 连接池
 type PostgresDB struct {
@@ -197,7 +230,17 @@ func (db *PostgresDB) RefreshSubmissionLease(ctx context.Context, jobID string, 
 }
 
 // FinalizeSubmissionWithFence writes final result only for the exact running attempt.
-func (db *PostgresDB) FinalizeSubmissionWithFence(ctx context.Context, jobID string, attemptID int64, status string, result any) (bool, error) {
+// It first executes a fenced UPDATE. If rows_affected == 0, it queries current row state
+// and classifies a stable low-cardinality reject reason.
+func (db *PostgresDB) FinalizeSubmissionWithFence(
+	ctx context.Context,
+	jobID string,
+	attemptID int64,
+	leaseOwner string,
+	status string,
+	result any,
+) (FinalizeFenceResult, error) {
+	finalizeResult := FinalizeFenceResult{Applied: false, Reason: FinalizeReasonOK}
 	query := `
 		UPDATE submissions
 		SET status = $3,
@@ -208,14 +251,99 @@ func (db *PostgresDB) FinalizeSubmissionWithFence(ctx context.Context, jobID str
 		    updated_at = NOW()
 		WHERE job_id = $1
 		  AND attempt_id = $2
+		  AND lease_owner = $5
+		  AND lease_until IS NOT NULL
+		  AND lease_until > NOW()
 		  AND status = 'running'
 		  AND state = 'processing'
 	`
-	cmd, err := db.pool.Exec(ctx, query, jobID, attemptID, status, result)
+	cmd, err := db.pool.Exec(ctx, query, jobID, attemptID, status, result, leaseOwner)
 	if err != nil {
-		return false, err
+		finalizeResult.Reason = FinalizeReasonDBError
+		return finalizeResult, err
 	}
-	return cmd.RowsAffected() == 1, nil
+	if cmd.RowsAffected() == 1 {
+		finalizeResult.Applied = true
+		return finalizeResult, nil
+	}
+
+	rejectResult, rejectErr := db.getFinalizeFenceRejectReason(ctx, jobID, attemptID, leaseOwner)
+	if rejectErr != nil {
+		return FinalizeFenceResult{Applied: false, Reason: FinalizeReasonDBError}, rejectErr
+	}
+	return rejectResult, nil
+}
+
+func (db *PostgresDB) getFinalizeFenceRejectReason(
+	ctx context.Context,
+	jobID string,
+	attemptID int64,
+	leaseOwner string,
+) (FinalizeFenceResult, error) {
+	reject := FinalizeFenceResult{Applied: false, Reason: FinalizeReasonNotInExpectedState}
+
+	query := `
+		SELECT attempt_id, status, state, lease_owner, lease_until
+		FROM submissions
+		WHERE job_id = $1
+	`
+	var dbAttemptID int64
+	var dbStatus string
+	var dbState string
+	var dbLeaseOwner *string
+	var dbLeaseUntil *time.Time
+	err := db.pool.QueryRow(ctx, query, jobID).Scan(
+		&dbAttemptID,
+		&dbStatus,
+		&dbState,
+		&dbLeaseOwner,
+		&dbLeaseUntil,
+	)
+	if err == pgx.ErrNoRows {
+		return reject, nil
+	}
+	if err != nil {
+		return FinalizeFenceResult{Applied: false, Reason: FinalizeReasonDBError}, err
+	}
+
+	reject.DBAttemptID = dbAttemptID
+	reject.DBStatus = dbStatus
+	reject.DBState = dbState
+	if dbLeaseOwner != nil {
+		reject.DBLeaseOwner = *dbLeaseOwner
+	}
+	reject.DBLeaseUntil = dbLeaseUntil
+
+	statusLower := strings.ToLower(strings.TrimSpace(dbStatus))
+	stateLower := strings.ToLower(strings.TrimSpace(dbState))
+
+	if dbAttemptID > attemptID {
+		reject.Reason = FinalizeReasonStaleAttempt
+		return reject, nil
+	}
+	if stateLower == "done" || isTerminalStatus(statusLower) {
+		reject.Reason = FinalizeReasonAlreadyFinished
+		return reject, nil
+	}
+	if statusLower != "running" || stateLower != "processing" {
+		reject.Reason = FinalizeReasonNotInExpectedState
+		return reject, nil
+	}
+
+	leaseOwnerMismatch := strings.TrimSpace(leaseOwner) != "" && strings.TrimSpace(reject.DBLeaseOwner) != strings.TrimSpace(leaseOwner)
+	leaseExpiredOrMissing := dbLeaseUntil == nil || !dbLeaseUntil.After(time.Now())
+	if leaseOwnerMismatch || leaseExpiredOrMissing {
+		reject.Reason = FinalizeReasonLeaseLostOwnerMismatch
+		return reject, nil
+	}
+
+	reject.Reason = FinalizeReasonNotInExpectedState
+	return reject, nil
+}
+
+func isTerminalStatus(statusLower string) bool {
+	_, ok := terminalStatuses[statusLower]
+	return ok
 }
 
 // MarkSubmissionPoison marks a submission failed for unrecoverable protocol/payload errors.
@@ -237,6 +365,66 @@ func (db *PostgresDB) MarkSubmissionPoison(ctx context.Context, jobID, errorCode
 		return false, err
 	}
 	return cmd.RowsAffected() == 1, nil
+}
+
+// ReclaimSubmissionForRun tries to reclaim an expired running lease and bump attempt_id.
+// decision values:
+// - claimed: reclaim CAS succeeded, attempt_id returned.
+// - done_or_stale: business-terminal or stale row; caller should ack entry.
+// - lease_still_valid: lease not expired yet; caller should keep entry pending.
+// - not_found: submission row missing; caller should ack entry.
+func (db *PostgresDB) ReclaimSubmissionForRun(ctx context.Context, jobID, leaseOwner string, leaseSec int) (int64, string, error) {
+	if leaseSec <= 0 {
+		leaseSec = 60
+	}
+	updateQuery := `
+		UPDATE submissions
+		SET attempt_id = attempt_id + 1,
+		    lease_owner = $2,
+		    lease_until = NOW() + make_interval(secs => $3),
+		    updated_at = NOW()
+		WHERE job_id = $1
+		  AND status = 'running'
+		  AND state = 'processing'
+		  AND lease_until IS NOT NULL
+		  AND lease_until < NOW()
+		RETURNING attempt_id
+	`
+	var attemptID int64
+	err := db.pool.QueryRow(ctx, updateQuery, jobID, leaseOwner, leaseSec).Scan(&attemptID)
+	if err == nil {
+		return attemptID, "claimed", nil
+	}
+	if err != pgx.ErrNoRows {
+		return 0, "", err
+	}
+
+	inspectQuery := `
+		SELECT status, state, lease_until
+		FROM submissions
+		WHERE job_id = $1
+	`
+	var status, state string
+	var leaseUntil *time.Time
+	err = db.pool.QueryRow(ctx, inspectQuery, jobID).Scan(&status, &state, &leaseUntil)
+	if err == pgx.ErrNoRows {
+		return 0, "not_found", nil
+	}
+	if err != nil {
+		return 0, "", err
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "done" || status == "finished" {
+		return 0, "done_or_stale", nil
+	}
+	if status == "running" && state == "processing" {
+		if leaseUntil != nil && leaseUntil.After(time.Now()) {
+			return 0, "lease_still_valid", nil
+		}
+		return 0, "done_or_stale", nil
+	}
+	return 0, "done_or_stale", nil
 }
 
 // GetPendingSubmissions 获取超时的 Pending 任务 (用于 Slow Path 恢复)

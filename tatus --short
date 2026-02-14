@@ -1,0 +1,13 @@
+ DESIGN.md                                      |  83 [32m++++++[m[31m-[m
+ PROGRESS.md                                    |  60 [32m+++++[m
+ RUNBOOK.md                                     |  10 [32m+[m[31m-[m
+ config.yaml                                    |   3 [32m+[m
+ docker-compose.yml                             |   3 [32m+[m
+ src/go/cmd/worker/main.go                      |   3 [32m+[m
+ src/go/internal/appconfig/config.go            |  17 [32m+[m[31m-[m
+ src/go/internal/repository/postgres.go         | 196 [32m++++++++++++++[m[31m-[m
+ src/go/internal/worker/config.go               |  80 [32m++++[m[31m---[m
+ src/go/internal/worker/metrics.go              |  61 [32m+++++[m
+ src/go/internal/worker/stream_consumer.go      | 437 [32m+++++++++++++++++++++++++++++++[m[31m---[m
+ src/go/internal/worker/stream_consumer_test.go | 629 [32m+++++++++++++++++++++++++++++++++++++++++++[m[31m------[m
+ 12 files changed, 1425 insertions(+), 157 deletions(-)

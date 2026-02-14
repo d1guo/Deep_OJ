@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
 	"github.com/go-redis/redis/v8"
@@ -42,6 +44,14 @@ const (
 	streamReasonStaleAttempt       = "stale_attempt"
 	streamReasonAttemptMismatch    = "attempt_mismatch"
 	streamReasonPayloadDecodeError = "payload_decode_error"
+	streamReasonLeaseStillValid    = "lease_still_valid"
+	streamReasonNotFound           = "not_found"
+	streamReasonXAutoClaimError    = "xautoclaim_error"
+	streamReasonReclaimClaimed     = "reclaim_claimed"
+	streamReasonDoneOrStale        = "done_or_stale"
+	streamReasonAlreadyFinished    = "already_finished"
+	streamReasonNotExpectedState   = "not_in_expected_state"
+	streamReasonLeaseOwnerMismatch = "lease_lost_or_owner_mismatch"
 
 	streamEnvelopeSchemaVersionV1    = 1
 	streamEnvelopeEncodingBase64     = "base64"
@@ -50,6 +60,19 @@ const (
 	streamEnvelopeContentTypeProtoV2 = "application/protobuf"
 
 	maxHeartbeatErrorRetries = 3
+
+	reclaimStatusOK     = "ok"
+	reclaimStatusReject = "reject"
+	reclaimStatusError  = "error"
+
+	reclaimDecisionClaimed         = "claimed"
+	reclaimDecisionDoneOrStale     = "done_or_stale"
+	reclaimDecisionLeaseStillValid = "lease_still_valid"
+	reclaimDecisionNotFound        = "not_found"
+
+	finalizeStatusOK       = "ok"
+	finalizeStatusRejected = "rejected"
+	finalizeStatusError    = "error"
 )
 
 type streamEnvelopeV1 struct {
@@ -72,14 +95,16 @@ type heartbeatResult struct {
 type streamRedisClient interface {
 	EnsureGroup(ctx context.Context, stream, group string) error
 	ReadNew(ctx context.Context, stream, group, consumer string, count int64, block time.Duration) ([]redis.XStream, error)
+	AutoClaim(ctx context.Context, stream, group, consumer string, minIdle time.Duration, start string, count int64) ([]redis.XMessage, string, error)
 	Ack(ctx context.Context, stream, group string, ids ...string) (int64, error)
 	Get(ctx context.Context, key string) (string, error)
 }
 
 type streamDB interface {
 	ClaimSubmissionForRun(ctx context.Context, jobID, leaseOwner string, leaseSec int) (int64, bool, error)
+	ReclaimSubmissionForRun(ctx context.Context, jobID, leaseOwner string, leaseSec int) (int64, string, error)
 	RefreshSubmissionLease(ctx context.Context, jobID string, attemptID int64, leaseOwner string, leaseSec int) (bool, error)
-	FinalizeSubmissionWithFence(ctx context.Context, jobID string, attemptID int64, status string, result any) (bool, error)
+	FinalizeSubmissionWithFence(ctx context.Context, jobID string, attemptID int64, leaseOwner string, status string, result any) (repository.FinalizeFenceResult, error)
 	MarkSubmissionPoison(ctx context.Context, jobID, errorCode, errorMessage string) (bool, error)
 }
 
@@ -116,6 +141,17 @@ func (c *redisStreamClient) ReadNew(ctx context.Context, stream, group, consumer
 	}).Result()
 }
 
+func (c *redisStreamClient) AutoClaim(ctx context.Context, stream, group, consumer string, minIdle time.Duration, start string, count int64) ([]redis.XMessage, string, error) {
+	return c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   stream,
+		Group:    group,
+		Consumer: consumer,
+		MinIdle:  minIdle,
+		Start:    start,
+		Count:    count,
+	}).Result()
+}
+
 func (c *redisStreamClient) Ack(ctx context.Context, stream, group string, ids ...string) (int64, error) {
 	return c.client.XAck(ctx, stream, group, ids...).Result()
 }
@@ -125,20 +161,23 @@ func (c *redisStreamClient) Get(ctx context.Context, key string) (string, error)
 }
 
 type StreamConsumer struct {
-	config *Config
-	redis  streamRedisClient
-	db     streamDB
-	runner streamJudgeRunner
-	logger *slog.Logger
+	config             *Config
+	redis              streamRedisClient
+	db                 streamDB
+	runner             streamJudgeRunner
+	logger             *slog.Logger
+	reclaimCursorMu    sync.Mutex
+	reclaimNextStartID string
 }
 
 func NewStreamConsumer(cfg *Config, redisClient *redis.Client, db streamDB, runner streamJudgeRunner) *StreamConsumer {
 	return &StreamConsumer{
-		config: cfg,
-		redis:  newRedisStreamClient(redisClient),
-		db:     db,
-		runner: runner,
-		logger: slog.With("component", "worker_stream_consumer"),
+		config:             cfg,
+		redis:              newRedisStreamClient(redisClient),
+		db:                 db,
+		runner:             runner,
+		logger:             slog.With("component", "worker_stream_consumer"),
+		reclaimNextStartID: "0-0",
 	}
 }
 
@@ -147,11 +186,12 @@ func newStreamConsumerForTest(cfg *Config, redisClient streamRedisClient, db str
 		logger = slog.Default()
 	}
 	return &StreamConsumer{
-		config: cfg,
-		redis:  redisClient,
-		db:     db,
-		runner: runner,
-		logger: logger,
+		config:             cfg,
+		redis:              redisClient,
+		db:                 db,
+		runner:             runner,
+		logger:             logger,
+		reclaimNextStartID: "0-0",
 	}
 }
 
@@ -196,6 +236,7 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 		blockMs = 2000
 	}
 	block := time.Duration(blockMs) * time.Millisecond
+	go c.runReclaimLoop(ctx)
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -230,6 +271,114 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *StreamConsumer) runReclaimLoop(ctx context.Context) {
+	intervalSec := c.config.JobReclaimIntervalSec
+	if intervalSec <= 0 {
+		intervalSec = 5
+	}
+	ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.reclaimOnce(ctx)
+		}
+	}
+}
+
+func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
+	start := time.Now()
+	workerReclaimInflight.Inc()
+	defer func() {
+		workerReclaimInflight.Dec()
+		workerReclaimLatencyMs.Observe(float64(time.Since(start).Milliseconds()))
+	}()
+
+	count := int64(c.config.JobReclaimCount)
+	if count <= 0 {
+		count = 16
+	}
+	leaseSec := c.config.JobLeaseSec
+	if leaseSec <= 0 {
+		leaseSec = 60
+	}
+	graceSec := c.config.JobReclaimGraceSec
+	if graceSec < 0 {
+		graceSec = 0
+	}
+	minIdle := time.Duration(leaseSec+graceSec) * time.Second
+	startID := c.getReclaimNextStartID()
+	if strings.TrimSpace(startID) == "" {
+		startID = "0-0"
+	}
+	for {
+		msgs, nextID, err := c.redis.AutoClaim(
+			ctx,
+			c.config.JobStreamKey,
+			c.config.JobStreamGroup,
+			c.config.JobStreamConsumer,
+			minIdle,
+			startID,
+			count,
+		)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
+			if errors.Is(err, redis.Nil) {
+				return
+			}
+			workerReclaimTotal.WithLabelValues(reclaimStatusError, streamReasonXAutoClaimError).Inc()
+			c.logger.Error(
+				"XAUTOCLAIM failed",
+				"trace_id", uuid.NewString(),
+				"job_id", "",
+				"attempt_id", int64(0),
+				"stream_entry_id", "",
+				"group", c.config.JobStreamGroup,
+				"consumer", c.config.JobStreamConsumer,
+				"reason", streamReasonXAutoClaimError,
+				"error", err,
+			)
+			return
+		}
+		if len(msgs) == 0 {
+			if nextID != "" {
+				c.setReclaimNextStartID(nextID)
+			}
+			return
+		}
+		for _, msg := range msgs {
+			c.handleReclaimedMessage(ctx, msg)
+		}
+		if nextID != "" {
+			c.setReclaimNextStartID(nextID)
+		}
+		if nextID == "" || nextID == "0-0" || nextID == startID {
+			return
+		}
+		startID = nextID
+		if int64(len(msgs)) < count {
+			return
+		}
+	}
+}
+
+func (c *StreamConsumer) getReclaimNextStartID() string {
+	c.reclaimCursorMu.Lock()
+	defer c.reclaimCursorMu.Unlock()
+	return c.reclaimNextStartID
+}
+
+func (c *StreamConsumer) setReclaimNextStartID(next string) {
+	c.reclaimCursorMu.Lock()
+	c.reclaimNextStartID = next
+	c.reclaimCursorMu.Unlock()
 }
 
 func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) streamProcessResult {
@@ -380,6 +529,190 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 	workerClaimTotal.WithLabelValues(streamClaimStatusOK, streamReasonOK).Inc()
 	logger = c.newMessageLogger(traceID, jobID, attemptID, msg.ID)
 	logger.Info("DB claim success", "reason", streamReasonOK)
+	return c.runClaimedExecution(ctx, msg, taskReq, jobID, traceID, attemptID, logger)
+}
+
+func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.XMessage) streamProcessResult {
+	status := reclaimStatusOK
+	reason := streamReasonOK
+	defer func() {
+		workerReclaimTotal.WithLabelValues(status, reason).Inc()
+	}()
+
+	jobID, missingJobID := requiredStreamField(msg.Values, "job_id")
+	_, missingEnqueueTS := requiredStreamField(msg.Values, "enqueue_ts")
+	payloadRef, missingPayloadRef := requiredStreamField(msg.Values, "payload_ref")
+	_, missingPriority := requiredStreamField(msg.Values, "priority")
+
+	missing := make([]string, 0, 4)
+	if missingJobID {
+		missing = append(missing, "job_id")
+	}
+	if missingEnqueueTS {
+		missing = append(missing, "enqueue_ts")
+	}
+	if missingPayloadRef {
+		missing = append(missing, "payload_ref")
+	}
+	if missingPriority {
+		missing = append(missing, "priority")
+	}
+
+	traceID := uuid.NewString()
+	logger := c.newMessageLogger(traceID, jobID, 0, msg.ID)
+	if len(missing) > 0 {
+		status = reclaimStatusReject
+		reason = streamReasonMissingField
+		if err := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "missing stream fields: "+strings.Join(missing, ",")); err != nil {
+			status = reclaimStatusError
+			reason = streamReasonDBError
+			logger.Error("Failed to persist poison state for reclaimed message", "reason", reason, "error", err)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		if err := c.xackWithRetry(ctx, msg.ID); err != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for reclaimed message", "reason", reason, "error", err)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonMissingField}
+	}
+
+	payloadRaw, err := c.redis.Get(ctx, payloadRef)
+	if err != nil || strings.TrimSpace(payloadRaw) == "" {
+		status = reclaimStatusReject
+		reason = streamReasonPayloadInvalid
+		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload missing: "+payloadRef); perr != nil {
+			status = reclaimStatusError
+			reason = streamReasonDBError
+			logger.Error("Failed to persist poison state for reclaimed message", "reason", reason, "error", perr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		if ackErr := c.xackWithRetry(ctx, msg.ID); ackErr != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for reclaimed message", "reason", reason, "error", ackErr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonPayloadInvalid}
+	}
+
+	taskReq, derr := decodeStreamTaskPayload(payloadRaw)
+	if derr != nil {
+		status = reclaimStatusReject
+		reason = streamReasonPayloadInvalid
+		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, streamReasonPayloadDecodeError, derr.Error()); perr != nil {
+			status = reclaimStatusError
+			reason = streamReasonDBError
+			logger.Error("Failed to persist poison state for reclaimed message", "reason", reason, "error", perr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		if ackErr := c.xackWithRetry(ctx, msg.ID); ackErr != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for reclaimed message", "reason", reason, "error", ackErr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonPayloadInvalid}
+	}
+
+	if strings.TrimSpace(taskReq.GetJobId()) == "" {
+		taskReq.JobId = jobID
+	}
+	if taskReq.GetJobId() != jobID {
+		status = reclaimStatusReject
+		reason = streamReasonPayloadInvalid
+		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload job_id mismatch"); perr != nil {
+			status = reclaimStatusError
+			reason = streamReasonDBError
+			logger.Error("Failed to persist poison state for reclaimed message", "reason", reason, "error", perr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		if ackErr := c.xackWithRetry(ctx, msg.ID); ackErr != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for reclaimed message", "reason", reason, "error", ackErr)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonPayloadInvalid}
+	}
+
+	if strings.TrimSpace(taskReq.TraceId) != "" {
+		traceID = strings.TrimSpace(taskReq.TraceId)
+	} else {
+		taskReq.TraceId = traceID
+	}
+	logger = c.newMessageLogger(traceID, jobID, 0, msg.ID)
+
+	attemptID, decision, rerr := c.db.ReclaimSubmissionForRun(ctx, jobID, c.config.JobStreamConsumer, c.config.JobLeaseSec)
+	if rerr != nil {
+		status = reclaimStatusError
+		reason = streamReasonDBError
+		logger.Error("DB reclaim failed", "reason", reason, "error", rerr)
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonDBError}
+	}
+
+	switch decision {
+	case reclaimDecisionClaimed:
+		status = reclaimStatusOK
+		reason = streamReasonReclaimClaimed
+		logger = c.newMessageLogger(traceID, jobID, attemptID, msg.ID)
+		logger.Info("DB reclaim success", "reason", streamReasonReclaimClaimed)
+		res := c.runClaimedExecution(ctx, msg, taskReq, jobID, traceID, attemptID, logger)
+		if res.reason != streamReasonOK {
+			status = reclaimStatusError
+			reason = res.reason
+		} else {
+			status = reclaimStatusOK
+			reason = streamReasonOK
+		}
+		return res
+	case reclaimDecisionLeaseStillValid:
+		status = reclaimStatusReject
+		reason = streamReasonLeaseStillValid
+		logger.Warn("Reclaim skipped: lease still valid", "reason", reason)
+		return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+	case reclaimDecisionDoneOrStale:
+		status = reclaimStatusReject
+		reason = streamReasonDoneOrStale
+		if err := c.xackWithRetry(ctx, msg.ID); err != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for done/stale reclaimed entry", "reason", reason, "error", err)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		logger.Info("Reclaimed entry dropped as done/stale and ACKed", "reason", streamReasonDoneOrStale)
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonDoneOrStale}
+	case reclaimDecisionNotFound:
+		status = reclaimStatusReject
+		reason = streamReasonNotFound
+		if err := c.xackWithRetry(ctx, msg.ID); err != nil {
+			status = reclaimStatusError
+			reason = streamReasonXAckError
+			logger.Error("XACK failed for not_found reclaimed entry", "reason", reason, "error", err)
+			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
+		}
+		logger.Info("Reclaimed entry dropped as not_found and ACKed", "reason", streamReasonNotFound)
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonNotFound}
+	default:
+		status = reclaimStatusError
+		reason = streamReasonDBError
+		logger.Error("Unknown DB reclaim decision", "reason", decision)
+		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonDBError}
+	}
+}
+
+func (c *StreamConsumer) runClaimedExecution(
+	ctx context.Context,
+	msg redis.XMessage,
+	taskReq *pb.TaskRequest,
+	jobID string,
+	traceID string,
+	attemptID int64,
+	logger *slog.Logger,
+) streamProcessResult {
+	status := streamConsumeStatusOK
+	reason := streamReasonOK
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	hbCh := make(chan heartbeatResult, 1)
@@ -401,36 +734,60 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 
 	finalStatus, finalResult := c.resolveFinalResult(ctx, taskReq, jobID, attemptID, traceID, resp, execErr)
 	if mappedAttempt, ok := parseInt64FromAny(finalResult["attempt_id"]); ok && mappedAttempt != attemptID {
-		status = streamConsumeStatusError
-		reason = streamReasonAttemptMismatch
-		logger.Error(
-			"Result attempt mismatch after execution",
-			"reason", reason,
+		logger.Warn(
+			"Result attempt mismatch after execution, force overwrite to claimed attempt",
+			"reason", streamReasonAttemptMismatch,
 			"expected_attempt_id", attemptID,
 			"actual_attempt_id", mappedAttempt,
 		)
-		return streamProcessResult{status: status, reason: reason}
 	}
+	finalResult["attempt_id"] = attemptID
 
-	ok, ferr := c.db.FinalizeSubmissionWithFence(ctx, jobID, attemptID, finalStatus, finalResult)
+	finalizeStart := time.Now()
+	finalizeResult, ferr := c.db.FinalizeSubmissionWithFence(ctx, jobID, attemptID, c.config.JobStreamConsumer, finalStatus, finalResult)
+	workerFinalizeLatencyMs.Observe(float64(time.Since(finalizeStart).Milliseconds()))
 	if ferr != nil {
+		workerFinalizeTotal.WithLabelValues(finalizeStatusError).Inc()
+		workerFinalizeErrorsTotal.Inc()
 		status = streamConsumeStatusError
 		reason = streamReasonDBError
 		logger.Error("Fenced final write failed", "reason", reason, "error", ferr)
 		return streamProcessResult{status: status, reason: reason}
 	}
-	if !ok {
-		workerStaleAttemptTotal.Inc()
+
+	if !finalizeResult.Applied {
+		workerFinalizeTotal.WithLabelValues(finalizeStatusRejected).Inc()
+		workerFinalizeRejectedTotal.WithLabelValues(finalizeResult.Reason).Inc()
 		status = streamConsumeStatusError
-		reason = streamReasonStaleAttempt
+		reason = mapFinalizeRejectReason(finalizeResult.Reason)
+		if reason == streamReasonStaleAttempt {
+			workerStaleAttemptTotal.Inc()
+		}
+
+		logger.Warn(
+			"Fenced final write rejected",
+			"reason", reason,
+			"db_attempt_id", finalizeResult.DBAttemptID,
+			"db_status", finalizeResult.DBStatus,
+			"db_state", finalizeResult.DBState,
+			"db_lease_owner", finalizeResult.DBLeaseOwner,
+			"db_lease_until", finalizeResult.DBLeaseUntil,
+		)
+
+		if !isBusinessFinalizeRejectReason(reason) {
+			workerFinalizeTotal.WithLabelValues(finalizeStatusError).Inc()
+			workerFinalizeErrorsTotal.Inc()
+			return streamProcessResult{status: status, reason: streamReasonDBError}
+		}
+
 		if ackErr := c.xackWithRetry(ctx, msg.ID); ackErr != nil {
 			reason = streamReasonXAckError
-			logger.Error("XACK failed", "reason", reason, "error", ackErr)
+			logger.Error("XACK failed after fenced reject", "reason", reason, "error", ackErr)
 			return streamProcessResult{status: status, reason: reason}
 		}
-		logger.Warn("Fenced final write rejected as stale", "reason", streamReasonStaleAttempt)
 		return streamProcessResult{status: status, reason: reason}
 	}
+	workerFinalizeTotal.WithLabelValues(finalizeStatusOK).Inc()
 
 	if err := c.xackWithRetry(ctx, msg.ID); err != nil {
 		status = streamConsumeStatusError
@@ -441,6 +798,30 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 
 	logger.Info("Stream message processed", "reason", streamReasonOK, "status", finalStatus)
 	return streamProcessResult{status: streamConsumeStatusOK, reason: streamReasonOK}
+}
+
+func mapFinalizeRejectReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case repository.FinalizeReasonStaleAttempt:
+		return streamReasonStaleAttempt
+	case repository.FinalizeReasonAlreadyFinished:
+		return streamReasonAlreadyFinished
+	case repository.FinalizeReasonNotInExpectedState:
+		return streamReasonNotExpectedState
+	case repository.FinalizeReasonLeaseLostOwnerMismatch:
+		return streamReasonLeaseOwnerMismatch
+	default:
+		return streamReasonDBError
+	}
+}
+
+func isBusinessFinalizeRejectReason(reason string) bool {
+	switch reason {
+	case streamReasonStaleAttempt, streamReasonAlreadyFinished, streamReasonNotExpectedState, streamReasonLeaseOwnerMismatch:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *StreamConsumer) runLeaseHeartbeat(

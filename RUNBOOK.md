@@ -199,7 +199,7 @@ done
 | MinIO 拉取失败（Worker 下载 testcase 失败） | MinIO 不可达、凭证错误、对象缺失 | `docker compose logs --tail=300 worker | rg -i "minio|download|Prepare testcases failed"`; `docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -fsS http://oj-minio:9000/minio/health/live` | 校验 `MINIO_*` 环境变量、确认对象存在、恢复 MinIO 后重试任务 |
 | API `/metrics` 返回 403/401 | 未配置 `METRICS_TOKEN` 时非 loopback 访问；或 token 错误 | `curl -i http://127.0.0.1:18080/metrics`; `docker compose logs --tail=100 api | rg -i "forbidden|unauthorized"` | 本机 loopback 抓取，或设置 `METRICS_TOKEN` 并带 `Authorization: Bearer <token>` |
 
-## 4.1 Redis Streams 验证（C1）
+## 4.1 Redis Streams 验证（C1/C4）
 
 ```bash
 STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
@@ -208,6 +208,9 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KE
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" - + 10
+# 谨慎使用：会把超时 pending entry 转移到当前 consumer（用于 C4 reclaim 排障）
+MIN_IDLE_MS=$(( (${JOB_LEASE_SEC:-60} + ${JOB_RECLAIM_GRACE_SEC:-15}) * 1000 ))
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" "${JOB_STREAM_CONSUMER:-debug-consumer}" "$MIN_IDLE_MS" 0-0 COUNT 10
 ```
 
 一键校验脚本（提交一次 job 并检查 `job_id/enqueue_ts/payload_ref/priority` 与 payload schema）：
@@ -224,7 +227,9 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - 关注 `pending`（PEL 未确认消息数）与 `lag`（组相对尾部落后量，Redis 新版本可用）。
 - `XPENDING <stream> <group>`：查看 PEL 概况（总 pending/最小和最大消息 ID/每个 consumer 的 pending 分布）。
 - `XPENDING <stream> <group> - + 10`：查看具体卡住消息和所属 consumer（定位单个卡住任务）。
-- 当前仅消费 `>` 新消息，尚未引入自动 reclaim；PEL reclaim 会在 C4 引入。
+- `XAUTOCLAIM <stream> <group> <consumer> <min-idle-ms> 0-0 COUNT N`：手动观察 reclaim 候选 entry（注意该命令会变更 entry 所属 consumer）。
+- Worker 已启用 C4 reclaim loop：周期执行 `XAUTOCLAIM`，并使用 `next_start_id` 游标跨轮推进；仅在 DB reclaim CAS 成功后才执行并最终 `XACK`。
+- `min-idle-ms` 建议不低于 `(lease_sec + reclaim_grace_sec) * 1000`，避免误抢占仍在心跳窗口内的任务。
 - consumer 名称优先 `JOB_STREAM_CONSUMER`，否则复用 `WORKER_ID`，再回退 `hostname-pid`。重启后产生新 consumer 属预期，旧 consumer 的 PEL 在 C4 处理。
 
 ## 5. 可观测性
@@ -250,6 +255,7 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 - Worker（Judge 执行链路）：`judge_exec_duration_seconds{result}`、`judge_exec_inflight`、`judge_exec_total{result}`、`judge_verdict_total{verdict}`、`judge_protocol_errors_total{reason}`、`judge_output_truncated_total{stream}`
 - Worker（Streams 消费链路）：`worker_stream_consume_total{status,reason}`、`worker_stream_consume_latency_ms`、`worker_stream_inflight`
 - Worker（C3 claim/lease/fencing）：`worker_claim_total{status,reason}`、`worker_lease_heartbeat_total{status,reason}`、`worker_stale_attempt_total`
+- Worker（C4 reclaim）：`worker_reclaim_total{status,reason}`、`worker_reclaim_latency_ms`、`worker_reclaim_inflight`
 
 约束：
 

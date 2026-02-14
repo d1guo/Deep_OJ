@@ -25,7 +25,7 @@ Deep-OJ 的核心目标是构建一个可恢复、可观测、结果不乱序的
 2. `INV-2` ACK 顺序：必须 DB 落盘成功后再 `XACK`。  
 3. `INV-3` claim 门禁：`claim -> DB CAS(RUNNING)` 成功才允许执行。  
 4. `INV-4` CAS 失败分流：业务性失败立即 `XACK`；系统性失败不 `XACK` 并退避重试。  
-5. `INV-5` FINISHED fencing SQL 固化：`UPDATE ... WHERE job_id=? AND attempt_id=? AND status IN ('RUNNING')`；0 行更新仅记录 reason。  
+5. `INV-5` FINISHED fencing SQL 固化：`UPDATE ... WHERE job_id=? AND attempt_id=? AND lease_owner=? AND lease_until>NOW() AND status='running' AND state='processing'`；0 行更新必须解释 reason。  
 6. `INV-6` 可观测约束：metrics 禁止 `job_id` label；日志/追踪可带 `job_id+attempt_id+trace_id` 且需采样/限流。  
 7. `INV-7` 可回滚性：关键路径具备 feature flag，agent 失败可降级 `exec CLI`。  
 8. `INV-8` 双写一致性：提交持久化与入队事件必须通过事务+outbox（或等效机制）避免丢单。  
@@ -168,7 +168,7 @@ INV-2 精确定义与执行分流（代码：`src/go/internal/worker/stream_cons
 1. 字段缺失（`job_id/enqueue_ts/payload_ref/priority`）=> reason=`missing_field`，`XACK`（poison message 不阻塞）。
 2. payload 缺失或解析失败 => reason=`payload_missing_or_invalid`，`XACK`。
 3. DB claim/CAS 拒绝（非 pending）=> reason=`db_claim_reject`，`XACK`。
-4. DB 错误（连接/超时等）=> reason=`db_error`，**不 XACK**（消息留在 PEL，C4 再引入 reclaim）。
+4. DB 错误（连接/超时等）=> reason=`db_error`，**不 XACK**（消息留在 PEL，由 C4 reclaim loop 处理）。
 5. DB CAS 成功后才允许 `XACK`；`XACK` 失败记录 reason=`xack_error`（重试一次，无限重试禁止）。
 
 说明：
@@ -184,15 +184,83 @@ Worker 在消费 `deepoj:jobs` 时执行以下闭环（代码：`src/go/internal
 1. `claim -> DB CAS(RUNNING)`：`attempt_id = attempt_id + 1`，写入 `lease_owner` / `lease_until`，返回新的 `attempt_id` fencing token。
 2. heartbeat：按 `JOB_HEARTBEAT_SEC` 刷新租约（`JOB_LEASE_SEC`）。
 3. judge 执行：携带 claim 返回的 `attempt_id` 调用 judge（B2 协议校验继续生效）。
-4. fenced 写回：`UPDATE ... WHERE job_id=? AND attempt_id=? AND status='running'`，0 行即 `stale_attempt`。
+4. fenced 写回：`UPDATE ... WHERE job_id=? AND attempt_id=? AND lease_owner=? AND lease_until>NOW() AND status='running' AND state='processing'`。
 5. 仅 fenced 写回成功后 `XACK` 当前 stream entry（INV-2）。
 
 分流规则：
 
 - `db_claim_reject`：业务重复/已被抢占，`XACK`。
-- `db_error`：DB 故障，不 `XACK`（留在 PEL，C4 reclaim）。
+- `db_error`：DB 故障，不 `XACK`（留在 PEL，由 C4 reclaim）。
 - `lease_lost` 或 `db_error_heartbeat`：停止本地执行，不写回、不 `XACK`。
 - poison（`missing_field` / `payload_missing_or_invalid`）：先标记 DB `System Error + error_code`，再 `XACK`。
+
+## C4 PEL Reclaim（XAUTOCLAIM + INV-4）
+
+Worker 在主消费循环外启动周期性 reclaim loop（代码：`src/go/internal/worker/stream_consumer.go`）：
+
+- 周期：`JOB_RECLAIM_INTERVAL_SEC`（默认 5s）
+- 批量：`JOB_RECLAIM_COUNT`（默认 16）
+- idle 门槛：`min_idle_ms >= (JOB_LEASE_SEC + JOB_RECLAIM_GRACE_SEC) * 1000`（默认 `75,000ms`）
+- 命令：`XAUTOCLAIM <stream> <group> <consumer> <min-idle-ms> <start>`
+- 游标推进：reclaim loop 持久化 `next_start_id`（跨 tick 保留），每次从上次 `XAUTOCLAIM` 返回的游标继续扫描；避免每轮固定从 `0-0` 全量重扫。
+
+处理分流（INV-4）：
+
+1. `XAUTOCLAIM` 拉回 entry 后先校验字段/payload；poison（`missing_field`、`payload_missing_or_invalid`）先写 DB 终态，再 `XACK`。
+2. 对可解析 entry 执行 DB reclaim CAS（`ReclaimSubmissionForRun`）：
+   - 仅当 `status='running' AND state='processing' AND lease_until < now()` 才允许 reclaim，并执行 `attempt_id = attempt_id + 1`（fencing token 更新）。
+3. reclaim decision 分流：
+   - `claimed`：允许执行 judge，之后仍走 C3/C5 的 fenced finalize（`WHERE job_id AND attempt_id AND lease_owner AND lease_until>NOW() AND status='running' AND state='processing'`），**仅 finalize 成功后 `XACK`**。
+   - `done_or_stale` / `not_found`：业务性不可恢复，直接 `XACK` 丢弃，避免 PEL 堆积。
+   - `lease_still_valid`：当前 lease 仍有效，不执行、不 `XACK`，保留给原 consumer。
+   - `db_error`：系统故障，不 `XACK`，保留待下次重试。
+4. 执行完成后的结果 `attempt_id` 若与本次 claim/reclaim attempt 不一致，不提前 `return`；会强制覆盖为本次 attempt 再走 fenced finalize。若 finalize 返回 0 行则归类 `stale_attempt` 并 `XACK`。
+
+说明：
+
+- DB 仍是唯一状态机；Streams reclaim 仅负责驱动重试，不改变最终完成定义。
+- `XACK` 失败不会破坏去重安全性，因为 DB claim/reclaim CAS + finalize fencing 共同保证旧 attempt 写回被拒绝。
+
+## C5 FINISHED 幂等入库（INV-5）
+
+Worker finalize 落库采用“先 UPDATE，后解释 0 行”的固定口径（代码：`src/go/internal/repository/postgres.go`）：
+
+```sql
+UPDATE submissions
+SET status = $3,
+    state = 'done',
+    result = $4,
+    lease_owner = NULL,
+    lease_until = NULL,
+    updated_at = NOW()
+WHERE job_id = $1
+  AND attempt_id = $2
+  AND lease_owner = $5
+  AND lease_until IS NOT NULL
+  AND lease_until > NOW()
+  AND status = 'running'
+  AND state = 'processing';
+```
+
+规则：
+
+1. `rows_affected = 1`：finalize 成功，允许后续 `XACK`。
+2. `rows_affected = 0`：必须查询当前行并解释拒绝 reason（禁止 silent drop）：
+   - `stale_attempt`：DB `attempt_id > current_attempt_id`
+   - `already_finished`：`state='done'` 或 status 已终态
+   - `not_in_expected_state`：status/state 不在 `running/processing`
+   - `lease_lost_or_owner_mismatch`：lease_owner 不匹配或 lease 已过期/缺失
+   - `db_error`：解释阶段 DB 查询失败（系统性错误）
+
+处理策略（`src/go/internal/worker/stream_consumer.go`）：
+
+- 业务性拒绝（`stale_attempt` / `already_finished` / `not_in_expected_state` / `lease_lost_or_owner_mismatch`）：
+  - 记录结构化日志（`job_id/attempt_id/reason/db_attempt_id/db_status/db_state/db_lease_owner/db_lease_until`）
+  - 递增低基数指标 `worker_finalize_rejected_total{reason=...}`
+  - 作为业务拒绝处理并 `XACK`（避免卡 PEL）
+- 系统性失败（`db_error`）：
+  - 记录错误日志 + `worker_finalize_errors_total`
+  - 不 `XACK`，保留消息在 PEL 等待后续 reclaim
 
 ## Judge JSON 协议 v1
 
@@ -241,6 +309,13 @@ Worker 在消费 `deepoj:jobs` 时执行以下闭环（代码：`src/go/internal
 - `worker_claim_total{status,reason}`
 - `worker_lease_heartbeat_total{status,reason}`
 - `worker_stale_attempt_total`
+- `worker_finalize_total{status}`
+- `worker_finalize_rejected_total{reason}`
+- `worker_finalize_errors_total`
+- `worker_finalize_latency_ms`
+- `worker_reclaim_total{status,reason}`
+- `worker_reclaim_latency_ms`
+- `worker_reclaim_inflight`
 
 约束：
 

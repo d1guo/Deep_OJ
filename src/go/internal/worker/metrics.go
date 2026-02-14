@@ -154,6 +154,60 @@ var (
 			Help: "Total number of stale attempt fenced write-back rejections",
 		},
 	)
+
+	workerFinalizeTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_finalize_total",
+			Help: "Total number of finalize attempts grouped by status",
+		},
+		[]string{"status"},
+	)
+
+	workerFinalizeRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_finalize_rejected_total",
+			Help: "Total number of finalize fence rejections grouped by reason",
+		},
+		[]string{"reason"},
+	)
+
+	workerFinalizeErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "worker_finalize_errors_total",
+			Help: "Total number of finalize system errors",
+		},
+	)
+
+	workerFinalizeLatencyMs = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "worker_finalize_latency_ms",
+			Help:    "Latency of finalize DB fenced write in milliseconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000},
+		},
+	)
+
+	workerReclaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_reclaim_total",
+			Help: "Total number of reclaimed stream entries processed",
+		},
+		[]string{"status", "reason"},
+	)
+
+	workerReclaimLatencyMs = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "worker_reclaim_latency_ms",
+			Help:    "Latency of one reclaim batch in milliseconds",
+			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000},
+		},
+	)
+
+	workerReclaimInflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "worker_reclaim_inflight",
+			Help: "Current number of running reclaim batches",
+		},
+	)
 )
 
 // InitMetrics registers worker metrics
@@ -175,4 +229,11 @@ func InitMetrics() {
 	reg.MustRegister(workerClaimTotal)
 	reg.MustRegister(workerLeaseHeartbeatTotal)
 	reg.MustRegister(workerStaleAttemptTotal)
+	reg.MustRegister(workerFinalizeTotal)
+	reg.MustRegister(workerFinalizeRejectedTotal)
+	reg.MustRegister(workerFinalizeErrorsTotal)
+	reg.MustRegister(workerFinalizeLatencyMs)
+	reg.MustRegister(workerReclaimTotal)
+	reg.MustRegister(workerReclaimLatencyMs)
+	reg.MustRegister(workerReclaimInflight)
 }

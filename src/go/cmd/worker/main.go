@@ -159,6 +159,9 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("JOB_STREAM_BLOCK_MS", wcfg.Stream.BlockMs)
 		appconfig.SetEnvIfEmptyInt("JOB_LEASE_SEC", wcfg.Stream.LeaseSec)
 		appconfig.SetEnvIfEmptyInt("JOB_HEARTBEAT_SEC", wcfg.Stream.HeartbeatSec)
+		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_INTERVAL_SEC", wcfg.Stream.ReclaimIntervalSec)
+		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_COUNT", wcfg.Stream.ReclaimCount)
+		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_GRACE_SEC", wcfg.Stream.ReclaimGraceSec)
 	}
 
 	// 1. Config
