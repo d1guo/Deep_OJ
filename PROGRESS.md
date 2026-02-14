@@ -233,3 +233,65 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY"
 - `docker-compose.yml`
 - `DESIGN.md`
 - `RUNBOOK.md`
+
+## D1（已完成）
+
+- 日期：2026-02-15
+- 目标：Outbox Pattern（API 同事务写 submissions + outbox_events；dispatcher 异步补投递 Streams）
+- 基线 commit hash：`1ab79b2`
+
+### 完成项
+
+- 新增迁移：`sql/migrations/007_add_outbox_events.sql`
+  - 建表 `outbox_events`（`job_id` 唯一、`payload`、`attempts`、`next_attempt_at`、`last_error`、`dispatched_at`、`stream_entry_id` 等）
+  - 索引：`idx_outbox_pending_retry`、`idx_outbox_job_id`
+  - SQL 文件内提供回滚语句注释
+- Repository 新增 outbox 能力（`src/go/internal/repository/postgres_outbox.go`）：
+  - `CreateSubmissionAndOutbox`：同事务写 `submissions + outbox_events`
+  - `ClaimPendingOutboxEvents`：`FOR UPDATE SKIP LOCKED` claim + 退避更新
+  - `MarkOutboxDispatched` / `MarkOutboxDispatchError` / `CountOutboxPending`
+- API submit 改造（`src/go/internal/api/handler.go`）：
+  - 默认 `OUTBOX_ENABLED=true` 走 outbox 事务路径，Redis 不可用时提交仍成功
+  - `OUTBOX_ENABLED=false` 保留旧直投递路径（回滚开关）
+- 新增 dispatcher（`src/go/internal/api/outbox_dispatcher.go`）：
+  - 周期拉 pending outbox，写 Redis payload + XADD stream
+  - 成功标记 delivered，失败记录 last_error 并可重试
+  - 语义为 at-least-once，重复投递由 Worker 现有 claim/lease/fence 拦截
+- API 新增低基数指标（`src/go/internal/api/metrics.go`）：
+  - `api_outbox_dispatch_total{status,reason}`
+  - `api_outbox_dispatch_latency_seconds`
+  - `api_outbox_pending`
+- API 进程启动 dispatcher（`src/go/cmd/api/main.go`）
+- 新增验证脚本：`scripts/verify_d1_outbox.sh`
+
+### 验收命令
+
+```bash
+cd /home/diguo/Deep_OJ/src/go
+go test ./internal/api -v
+go test ./... -count=1
+go test ./internal/api -run 'TestOutbox_' -count=20 -v
+```
+
+```bash
+# 需要 API/Redis/Postgres 在线与 PROBLEM_ID
+PROBLEM_ID=<problem_id> \
+POSTGRES_PASSWORD=<postgres_password> \
+REDIS_PASSWORD=<redis_password> \
+bash /home/diguo/Deep_OJ/scripts/verify_d1_outbox.sh
+```
+
+### 涉及文件
+
+- `sql/migrations/007_add_outbox_events.sql`
+- `src/go/internal/repository/postgres_outbox.go`
+- `src/go/internal/api/handler.go`
+- `src/go/internal/api/stream_enqueue.go`
+- `src/go/internal/api/outbox_dispatcher.go`
+- `src/go/internal/api/outbox_dispatcher_test.go`
+- `src/go/internal/api/metrics.go`
+- `src/go/internal/api/env.go`
+- `src/go/cmd/api/main.go`
+- `scripts/verify_d1_outbox.sh`
+- `DESIGN.md`
+- `RUNBOOK.md`

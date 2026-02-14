@@ -66,6 +66,29 @@ var (
 			Buckets: []float64{1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000},
 		},
 	)
+
+	apiOutboxDispatchTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "api_outbox_dispatch_total",
+			Help: "Total number of outbox dispatch attempts",
+		},
+		[]string{"status", "reason"},
+	)
+
+	apiOutboxDispatchLatencySeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "api_outbox_dispatch_latency_seconds",
+			Help:    "Latency of one outbox dispatch loop in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	apiOutboxPending = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "api_outbox_pending",
+			Help: "Current number of pending outbox events",
+		},
+	)
 )
 
 func init() {
@@ -77,4 +100,7 @@ func init() {
 	reg.MustRegister(SubmissionTotal)
 	reg.MustRegister(apiStreamEnqueueTotal)
 	reg.MustRegister(apiStreamEnqueueLatencyMs)
+	reg.MustRegister(apiOutboxDispatchTotal)
+	reg.MustRegister(apiOutboxDispatchLatencySeconds)
+	reg.MustRegister(apiOutboxPending)
 }

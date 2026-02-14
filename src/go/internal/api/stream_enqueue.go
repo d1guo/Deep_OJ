@@ -82,20 +82,12 @@ func enqueueJobToStream(
 		return "", fmt.Errorf("set payload: %w", err)
 	}
 
-	xaddArgs := &redis.XAddArgs{
-		Stream: streamKey,
-		Values: map[string]interface{}{
-			"job_id":      jobID,
-			"enqueue_ts":  enqueueTS,
-			"payload_ref": payloadRef,
-			"priority":    0,
-		},
-	}
-	if streamMaxLen > 0 {
-		// Approximate trim keeps enqueue path O(1) on average while bounding stream memory.
-		xaddArgs.MaxLen = streamMaxLen
-		xaddArgs.Approx = true
-	}
+	xaddArgs := buildStreamXAddArgs(streamKey, streamMaxLen, map[string]interface{}{
+		"job_id":      jobID,
+		"enqueue_ts":  enqueueTS,
+		"payload_ref": payloadRef,
+		"priority":    0,
+	})
 
 	entryID, err := client.XAdd(ctx, xaddArgs)
 	if err != nil {
@@ -124,6 +116,32 @@ func enqueueJobToStream(
 
 	observe("ok")
 	return entryID, nil
+}
+
+func buildPayloadEnvelope(taskData []byte) (string, error) {
+	payloadBytes, err := json.Marshal(payloadEnvelopeV1{
+		SchemaVersion: jobStreamSchemaVersionV1,
+		TaskDataB64:   base64.StdEncoding.EncodeToString(taskData),
+		Encoding:      "base64",
+		ContentType:   "application/json",
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal payload envelope: %w", err)
+	}
+	return string(payloadBytes), nil
+}
+
+func buildStreamXAddArgs(streamKey string, streamMaxLen int64, values map[string]interface{}) *redis.XAddArgs {
+	args := &redis.XAddArgs{
+		Stream: streamKey,
+		Values: values,
+	}
+	if streamMaxLen > 0 {
+		// Approximate trim keeps enqueue path O(1) on average while bounding stream memory.
+		args.MaxLen = streamMaxLen
+		args.Approx = true
+	}
+	return args
 }
 
 func enqueueJobToStreamOrReply5xx(

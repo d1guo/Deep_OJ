@@ -60,6 +60,21 @@ func getEnvInt(key string, fallback int) int {
 	return fallback
 }
 
+func getEnvBool(key string, fallback bool) bool {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
 func configureTrustedProxies(r *gin.Engine) error {
 	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
 	if raw == "" {
@@ -226,6 +241,15 @@ func main() {
 	// =========================================================================
 	handler := api.NewHandler(db, redisClient, minioClient)
 
+	var outboxCancel context.CancelFunc
+	if getEnvBool("OUTBOX_ENABLED", true) {
+		outboxCtx, cancel := context.WithCancel(context.Background())
+		outboxCancel = cancel
+		dispatcher := api.NewOutboxDispatcher(db, redisClient, slog.With("component", "api_outbox_dispatcher"))
+		go dispatcher.Run(outboxCtx)
+		slog.Info("Outbox dispatcher started")
+	}
+
 	// Gin 模式设置
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -312,6 +336,9 @@ func main() {
 	shutdownSec := getEnvInt("API_SHUTDOWN_TIMEOUT_SEC", 5)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(shutdownSec)*time.Second)
 	defer cancel()
+	if outboxCancel != nil {
+		outboxCancel()
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("Server forced to shutdown", "error", err)

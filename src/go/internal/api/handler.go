@@ -5,6 +5,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,11 @@ type Handler struct {
 // NewHandler 创建新的 Handler
 func NewHandler(db *repository.PostgresDB, redis *repository.RedisClient, minio *repository.MinIOClient) *Handler {
 	return &Handler{db: db, redis: redis, minio: minio}
+}
+
+type submitPersistenceStore interface {
+	CreateSubmission(ctx context.Context, s *model.Submission) error
+	CreateSubmissionAndOutbox(ctx context.Context, submission *model.Submission, event *repository.OutboxEvent) error
 }
 
 // SubmitRequest 提交请求结构
@@ -262,7 +268,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 	}
 
 	// =========================================================================
-	// 4. 写入 PostgreSQL (状态: Pending)
+	// 4. 构建提交对象与任务载荷
 	// =========================================================================
 	submission := &model.Submission{
 		JobID:       jobID,
@@ -281,25 +287,11 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		logger = logger.With("user_id", submission.UserID)
 	}
 
-	if err := h.db.CreateSubmission(ctx, submission); err != nil {
-		logger.Error("数据库创建失败", "error", err)
-		_ = h.redis.Del(ctx, inflightKey)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "数据库错误",
-			"code":  "DB_ERROR",
-		})
-
-		SubmissionTotal.WithLabelValues(fmt.Sprintf("%d", req.Language), "error").Inc()
-		return
-	}
-
-	// =========================================================================
-	// 5. 序列化并推送到 Redis 队列
-	// =========================================================================
 	traceID := reqID
 	if traceID == "" {
 		traceID = jobID
 	}
+	enqueueTS := time.Now().UnixMilli()
 	task := &pb.TaskRequest{
 		JobId:       jobID,
 		Code:        []byte(req.Code),
@@ -308,7 +300,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		MemoryLimit: int32(req.MemoryLimit),
 		CacheKey:    cacheKey,
 		ProblemId:   uint32(req.ProblemID),
-		SubmitTime:  time.Now().UnixMilli(),
+		SubmitTime:  enqueueTS,
 		TraceId:     traceID,
 	}
 
@@ -320,12 +312,51 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		return
 	}
 
-	streamEntryID, ok := enqueueJobToStreamOrReply5xx(c, h.redis, logger, jobID, traceID, inflightKey, taskData)
-	if !ok {
-		return
+	outboxEnabled := getEnvBool("OUTBOX_ENABLED", true)
+	if outboxEnabled {
+		streamKey := getEnvString("JOB_STREAM_KEY", defaultJobStreamKey)
+		outboxEvent := &repository.OutboxEvent{
+			EventType: repository.OutboxEventTypeSubmissionEnqueue,
+			JobID:     jobID,
+			StreamKey: streamKey,
+			EnqueueTS: enqueueTS,
+			Priority:  0,
+			Payload:   taskData,
+			Status:    repository.OutboxStatusPending,
+		}
+		if err := persistSubmissionWithDeliveryMode(ctx, h.db, true, submission, outboxEvent, nil); err != nil {
+			logger.Error("数据库创建失败(outbox)", "error", err)
+			_ = h.redis.Del(ctx, inflightKey)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "数据库错误",
+				"code":  "DB_ERROR",
+			})
+			SubmissionTotal.WithLabelValues(fmt.Sprintf("%d", req.Language), "error").Inc()
+			return
+		}
+		logger.Info("任务提交成功(outbox)", "trace_id", traceID, "outbox_id", outboxEvent.ID)
+	} else {
+		enqueueFn := func() error {
+			streamEntryID, ok := enqueueJobToStreamOrReply5xx(c, h.redis, logger, jobID, traceID, inflightKey, taskData)
+			if !ok {
+				return fmt.Errorf("stream enqueue failed")
+			}
+			logger.Info("任务提交成功", "stream_entry_id", streamEntryID)
+			return nil
+		}
+		if err := persistSubmissionWithDeliveryMode(ctx, h.db, false, submission, nil, enqueueFn); err != nil {
+			logger.Error("提交失败(直投递模式)", "error", err)
+			if !c.Writer.Written() {
+				_ = h.redis.Del(ctx, inflightKey)
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "数据库错误",
+					"code":  "DB_ERROR",
+				})
+			}
+			SubmissionTotal.WithLabelValues(fmt.Sprintf("%d", req.Language), "error").Inc()
+			return
+		}
 	}
-
-	logger.Info("任务提交成功", "stream_entry_id", streamEntryID)
 
 	// metrics
 	SubmissionTotal.WithLabelValues(fmt.Sprintf("%d", req.Language), "submitted").Inc()
@@ -339,6 +370,26 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		JobID:  jobID,
 		Status: "Queuing",
 	})
+}
+
+func persistSubmissionWithDeliveryMode(
+	ctx context.Context,
+	store submitPersistenceStore,
+	outboxEnabled bool,
+	submission *model.Submission,
+	event *repository.OutboxEvent,
+	directEnqueue func() error,
+) error {
+	if outboxEnabled {
+		return store.CreateSubmissionAndOutbox(ctx, submission, event)
+	}
+	if err := store.CreateSubmission(ctx, submission); err != nil {
+		return err
+	}
+	if directEnqueue != nil {
+		return directEnqueue()
+	}
+	return nil
 }
 
 // HandleStatus 查询判题状态

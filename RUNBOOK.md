@@ -246,6 +246,101 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - `window_seconds ≈ maxlen / enqueue_qps`
 - consumer 名称优先 `JOB_STREAM_CONSUMER`，否则复用 `WORKER_ID`，再回退 `hostname-pid`。重启后产生新 consumer 属预期，旧 consumer 的 PEL 在 C4 处理。
 
+## 4.2 Outbox 验证与排障（D1）
+
+默认行为（`OUTBOX_ENABLED=true`）：
+
+- API 提交成功仅依赖 DB 事务（`submissions + outbox_events`）；
+- Redis 暂不可用时，outbox 会保留 `pending`，待 dispatcher 自动补投递。
+
+验证命令（容器部署）：
+
+```bash
+STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+POSTGRES_DB="${POSTGRES_DB:-deep_oj}"
+POSTGRES_USER="${POSTGRES_USER:-deep_oj}"
+
+# 查看 outbox pending 数与最近错误
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -it oj-postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT status, COUNT(*) FROM outbox_events GROUP BY status ORDER BY status;"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -it oj-postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT id, job_id, attempts, next_attempt_at, last_error, dispatched_at, stream_entry_id FROM outbox_events ORDER BY id DESC LIMIT 20;"
+
+# 查看 stream 是否收到补投递消息
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XRANGE "$STREAM_KEY" - + COUNT 10
+```
+
+Redis down 场景预期：
+
+1. 停 Redis 后提交：API 仍返回 200 + `job_id`。
+2. `outbox_events` 出现 `pending` 行，`attempts` 递增，`last_error` 记录 Redis 失败原因。
+3. Redis 恢复后，`dispatched_at/stream_entry_id` 被回填，`XRANGE` 可见对应 `job_id`。
+
+可复现脚本：
+
+```bash
+bash scripts/verify_d1_outbox.sh
+```
+
+迁移与回滚（手动）：
+
+```bash
+# 应用迁移（新环境随 sql/migrations 自动初始化）
+# 对已运行环境手动执行：
+docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" oj-postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < sql/migrations/007_add_outbox_events.sql
+
+# 回滚
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -it oj-postgres \
+  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "DROP INDEX IF EXISTS idx_outbox_pending_retry; DROP INDEX IF EXISTS idx_outbox_job_id; DROP TABLE IF EXISTS outbox_events;"
+```
+
+## 4.3 Streams 压力快照（D2）
+
+该快照用于 D3 背压判断输入。采集命令：
+
+```bash
+cd /home/diguo/Deep_OJ
+STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}" \
+GROUP="${JOB_STREAM_GROUP:-deepoj:workers}" \
+REDIS_PASSWORD="${REDIS_PASSWORD}" \
+bash scripts/collect_stream_pressure.sh
+```
+
+输出（单行 JSON）字段：
+- `xlen`：`XLEN` 结果
+- `pending`：`XPENDING summary` count
+- `lag` / `lag_valid`：`XINFO GROUPS lag`（允许 `null`，`null != 0`）
+- `oldest_age_ms` + `oldest_age_source`：优先 pending oldest，其次 backlog oldest，最后 none
+- `approx`：是否使用近似（backlog 推断或 stream id 兜底）
+
+示例：
+
+```json
+{"ts_ms":1771090570165,"stream_key":"deepoj:jobs","group":"deepoj:workers","xlen":30,"pending":10,"lag":20,"lag_valid":true,"oldest_age_ms":130306,"oldest_age_source":"pending","approx":false}
+```
+
+当 `lag=null` 时的排障步骤（不要按 0 处理）：
+
+```bash
+STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+GROUP="${JOB_STREAM_GROUP:-deepoj:workers}"
+
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "$GROUP"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "$GROUP" - + 10
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KEY"
+```
+
+判读建议：
+- `lag_valid=true` 且 `lag` 持续升高：消费跟不上入队。
+- `pending` 与 `oldest_age_ms` 同升：存在卡单，优先查 DB 慢查询、judge 时延、reclaim。
+- `oldest_age_source=backlog` 且 `approx=true`：说明当前没有 pending，但 backlog 正在累积。
+- `xlen` 长期贴近 `JOB_STREAM_MAXLEN`：评估调大保留窗口或削峰。
+
 ## 5. 可观测性
 
 ### 5.1 指标入口

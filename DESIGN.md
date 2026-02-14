@@ -285,6 +285,49 @@ API 入队在 `XADD` 时启用近似裁剪：
 - 推荐将 `maxlen` 设为明显大于峰值 backlog 的数量级，并结合 `XLEN / XINFO GROUPS / XPENDING` 的 backlog 指标动态调优。
 - 运维可在必要时手动执行 `XTRIM MAXLEN ~ <N>` 进行补救清理；该操作幂等。
 
+## D1 Outbox Pattern（DB 同事务写 submissions + outbox）
+
+目标：消除 API 提交路径的 DB+Redis 双写窗口。提交请求只依赖 DB 成功即可返回，Redis 不可用时不丢单。
+
+事务边界（`src/go/internal/repository/postgres_outbox.go`）：
+
+1. 在同一个 DB 事务中写 `submissions`（`pending`）和 `outbox_events`（`pending`）。
+2. 事务提交后 API 直接返回 `job_id`，不等待 Redis。
+3. `OUTBOX_ENABLED=true`（默认）时走该路径；`false` 时回退到旧直投递路径（仅回滚/调试）。
+
+`outbox_events` 核心字段：
+
+- `job_id`（UNIQUE）
+- `payload`（jsonb，存可重建 task payload 的完整数据）
+- `status`（`pending|delivered`）
+- `attempts` / `next_attempt_at` / `last_error`
+- `dispatched_at` / `stream_entry_id`
+
+dispatcher 语义（`src/go/internal/api/outbox_dispatcher.go`）：
+
+1. 周期拉取：`status='pending' AND dispatched_at IS NULL AND next_attempt_at <= now()`。
+2. 使用 `FOR UPDATE SKIP LOCKED` + 单条 `UPDATE ... RETURNING` claim 行，并在 claim 时增加 `attempts`、计算指数退避 `next_attempt_at`。
+3. 投递流程：`SET task:payload:<job_id>`（含 TTL） -> `XADD deepoj:jobs`（字段保持 `job_id/enqueue_ts/payload_ref/priority`）。
+4. 成功：标记 `delivered` + 记录 `stream_entry_id`。
+5. 失败：保留 `pending`，写 `last_error`，等待下次重试。
+
+失败语义与一致性：
+
+- API 在 Redis down 时仍成功（只要 DB 事务成功）。
+- dispatcher 是 at-least-once；允许重复投递。
+- 重复消息由既有 Worker claim/lease/fencing（INV-3/INV-5）在业务侧快速拒绝并 `XACK`，不会覆盖新 attempt 结果。
+
+可观测性（低基数）：
+
+- `api_outbox_dispatch_total{status,reason}`
+- `api_outbox_dispatch_latency_seconds`（Histogram）
+- `api_outbox_pending`
+
+迁移与回滚：
+
+- 迁移：`sql/migrations/007_add_outbox_events.sql`（新增 outbox 表及索引）。
+- 回滚（手动）：`DROP INDEX idx_outbox_pending_retry/idx_outbox_job_id` 后 `DROP TABLE outbox_events`。
+
 ## Judge JSON 协议 v1
 
 用于 Worker 与 C++ Judge 之间的运行结果交换（stdout 单行 JSON）。
