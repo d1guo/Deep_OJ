@@ -16,6 +16,7 @@ import (
 
 const (
 	defaultJobStreamKey      = "deepoj:jobs"
+	defaultJobStreamMaxLen   = int64(200000)
 	defaultJobPayloadTTLSec  = 24 * 60 * 60
 	jobStreamSchemaVersionV1 = 1
 )
@@ -48,7 +49,7 @@ func enqueueJobToStream(
 	}
 
 	streamKey := getEnvString("JOB_STREAM_KEY", defaultJobStreamKey)
-	streamMaxLen := getEnvInt64("JOB_STREAM_MAXLEN", 0)
+	streamMaxLen := getEnvInt64("JOB_STREAM_MAXLEN", defaultJobStreamMaxLen)
 	payloadTTLSec := getEnvInt("JOB_PAYLOAD_TTL_SEC", defaultJobPayloadTTLSec)
 	if payloadTTLSec <= 0 {
 		payloadTTLSec = defaultJobPayloadTTLSec
@@ -91,6 +92,7 @@ func enqueueJobToStream(
 		},
 	}
 	if streamMaxLen > 0 {
+		// Approximate trim keeps enqueue path O(1) on average while bounding stream memory.
 		xaddArgs.MaxLen = streamMaxLen
 		xaddArgs.Approx = true
 	}

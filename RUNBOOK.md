@@ -203,7 +203,9 @@ done
 
 ```bash
 STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+MAXLEN="${JOB_STREAM_MAXLEN:-200000}"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XRANGE "$STREAM_KEY" - + COUNT 5
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XLEN "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}"
@@ -211,6 +213,8 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "
 # 谨慎使用：会把超时 pending entry 转移到当前 consumer（用于 C4 reclaim 排障）
 MIN_IDLE_MS=$(( (${JOB_LEASE_SEC:-60} + ${JOB_RECLAIM_GRACE_SEC:-15}) * 1000 ))
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" "${JOB_STREAM_CONSUMER:-debug-consumer}" "$MIN_IDLE_MS" 0-0 COUNT 10
+# 手动补救清理（幂等）：按近似长度裁剪
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XTRIM "$STREAM_KEY" MAXLEN "~" "$MAXLEN"
 ```
 
 一键校验脚本（提交一次 job 并检查 `job_id/enqueue_ts/payload_ref/priority` 与 payload schema）：
@@ -230,6 +234,16 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - `XAUTOCLAIM <stream> <group> <consumer> <min-idle-ms> 0-0 COUNT N`：手动观察 reclaim 候选 entry（注意该命令会变更 entry 所属 consumer）。
 - Worker 已启用 C4 reclaim loop：周期执行 `XAUTOCLAIM`，并使用 `next_start_id` 游标跨轮推进；仅在 DB reclaim CAS 成功后才执行并最终 `XACK`。
 - `min-idle-ms` 建议不低于 `(lease_sec + reclaim_grace_sec) * 1000`，避免误抢占仍在心跳窗口内的任务。
+- C6 默认在 API 入队时使用 `XADD ... MAXLEN ~ <JOB_STREAM_MAXLEN>`（默认 `200000`）。
+
+何时需要调大 `JOB_STREAM_MAXLEN`：
+
+- `XLEN` 长时间接近 `JOB_STREAM_MAXLEN`；
+- `XINFO GROUPS` 中 `pending/lag` 持续上升；
+- `XPENDING` 显示大量未确认消息且无法快速回落。
+
+建议将 `JOB_STREAM_MAXLEN` 设置为明显大于峰值 backlog 的数量级，并结合实际入队 QPS 按“保留窗口”估算：
+- `window_seconds ≈ maxlen / enqueue_qps`
 - consumer 名称优先 `JOB_STREAM_CONSUMER`，否则复用 `WORKER_ID`，再回退 `hostname-pid`。重启后产生新 consumer 属预期，旧 consumer 的 PEL 在 C4 处理。
 
 ## 5. 可观测性

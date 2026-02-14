@@ -262,6 +262,29 @@ WHERE job_id = $1
   - 记录错误日志 + `worker_finalize_errors_total`
   - 不 `XACK`，保留消息在 PEL 等待后续 reclaim
 
+## C6 Streams 保留与清理（MAXLEN~）
+
+API 入队在 `XADD` 时启用近似裁剪：
+
+- `XADD <stream> MAXLEN ~ <N> * ...`
+- `N` 由 `JOB_STREAM_MAXLEN` 控制（默认 `200000`，可通过 `config.yaml` 的 `api.stream.stream_maxlen` 回填）
+
+设计原因：
+
+- 避免 Stream 无界增长造成 Redis 内存膨胀；
+- 使用 `MAXLEN ~` 而非精确 `=`，降低每次入队裁剪开销，保持写路径稳定。
+
+保留窗口估算口径：
+
+- `window_seconds ≈ maxlen / enqueue_qps`
+- 例如 `maxlen=200000`、峰值 `enqueue_qps=50` 时，窗口约 `4000s`（约 66 分钟）。
+
+风险与建议：
+
+- `maxlen` 过小会增加“消息被过早裁剪”的风险（尤其 backlog 高时）。
+- 推荐将 `maxlen` 设为明显大于峰值 backlog 的数量级，并结合 `XLEN / XINFO GROUPS / XPENDING` 的 backlog 指标动态调优。
+- 运维可在必要时手动执行 `XTRIM MAXLEN ~ <N>` 进行补救清理；该操作幂等。
+
 ## Judge JSON 协议 v1
 
 用于 Worker 与 C++ Judge 之间的运行结果交换（stdout 单行 JSON）。

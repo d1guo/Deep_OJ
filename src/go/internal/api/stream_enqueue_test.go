@@ -23,6 +23,7 @@ type mockStreamEnqueueClient struct {
 	setKey    string
 	setValue  string
 	setTTL    time.Duration
+	xaddArgs  *redis.XAddArgs
 }
 
 func (m *mockStreamEnqueueClient) Set(ctx context.Context, key, value string, expiration time.Duration) error {
@@ -35,6 +36,8 @@ func (m *mockStreamEnqueueClient) Set(ctx context.Context, key, value string, ex
 
 func (m *mockStreamEnqueueClient) XAdd(ctx context.Context, args *redis.XAddArgs) (string, error) {
 	m.xaddCalls++
+	clone := *args
+	m.xaddArgs = &clone
 	if m.xaddErr != nil {
 		return "", m.xaddErr
 	}
@@ -145,5 +148,45 @@ func TestEnqueueJobToStream_PayloadEnvelopeV1Fields(t *testing.T) {
 	}
 	if envelope["content_type"] != "application/json" {
 		t.Fatalf("unexpected content_type: %v", envelope["content_type"])
+	}
+}
+
+func TestEnqueueJobToStream_DefaultMaxLenApproxTrim(t *testing.T) {
+	t.Setenv("JOB_STREAM_MAXLEN", "")
+	client := &mockStreamEnqueueClient{}
+	logger := slog.Default()
+
+	_, err := enqueueJobToStream(context.Background(), client, logger, "job-maxlen-default", "trace-maxlen-default", []byte(`{"job_id":"job-maxlen-default"}`))
+	if err != nil {
+		t.Fatalf("enqueueJobToStream failed: %v", err)
+	}
+	if client.xaddArgs == nil {
+		t.Fatalf("expected captured XAddArgs")
+	}
+	if client.xaddArgs.MaxLen <= 0 {
+		t.Fatalf("expected default MaxLen > 0, got %d", client.xaddArgs.MaxLen)
+	}
+	if !client.xaddArgs.Approx {
+		t.Fatalf("expected Approx=true when MaxLen enabled")
+	}
+}
+
+func TestEnqueueJobToStream_ConfiguredMaxLenApproxTrim(t *testing.T) {
+	t.Setenv("JOB_STREAM_MAXLEN", "12345")
+	client := &mockStreamEnqueueClient{}
+	logger := slog.Default()
+
+	_, err := enqueueJobToStream(context.Background(), client, logger, "job-maxlen-custom", "trace-maxlen-custom", []byte(`{"job_id":"job-maxlen-custom"}`))
+	if err != nil {
+		t.Fatalf("enqueueJobToStream failed: %v", err)
+	}
+	if client.xaddArgs == nil {
+		t.Fatalf("expected captured XAddArgs")
+	}
+	if client.xaddArgs.MaxLen != 12345 {
+		t.Fatalf("expected MaxLen=12345, got %d", client.xaddArgs.MaxLen)
+	}
+	if !client.xaddArgs.Approx {
+		t.Fatalf("expected Approx=true for configured MaxLen")
 	}
 }

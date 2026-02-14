@@ -92,6 +92,10 @@ api:
     service_name: "deep-oj-api"
     instance_id: ""
   shutdown_timeout_sec: 5
+  stream:
+    stream_key: "deepoj:jobs"
+    stream_maxlen: 200000
+    job_payload_ttl_sec: 86400
 
 scheduler:
   etcd_endpoints:
