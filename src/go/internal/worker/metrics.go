@@ -61,6 +61,38 @@ var (
 		},
 	)
 
+	judgeExecDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "judge_exec_duration_seconds",
+			Help:    "Judge execution duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"result"},
+	)
+
+	judgeExecInflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "judge_exec_inflight",
+			Help: "In-flight judge executions",
+		},
+	)
+
+	judgeExecTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "judge_exec_total",
+			Help: "Total number of judge executions",
+		},
+		[]string{"result"},
+	)
+
+	judgeVerdictTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "judge_verdict_total",
+			Help: "Total number of judge verdicts",
+		},
+		[]string{"verdict"},
+	)
+
 	judgeProtocolErrorsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "judge_protocol_errors_total",
@@ -85,6 +117,10 @@ func InitMetrics() {
 	reg.MustRegister(workerCompileDuration)
 	reg.MustRegister(workerDownloadDuration)
 	reg.MustRegister(workerUnzipDuration)
+	reg.MustRegister(judgeExecDuration)
+	reg.MustRegister(judgeExecInflight)
+	reg.MustRegister(judgeExecTotal)
+	reg.MustRegister(judgeVerdictTotal)
 	reg.MustRegister(judgeProtocolErrorsTotal)
 	reg.MustRegister(judgeOutputTruncatedTotal)
 }

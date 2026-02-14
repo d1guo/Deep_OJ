@@ -214,6 +214,7 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 - API：`http_requests_total`、`http_request_duration_seconds`、`submission_total`
 - Scheduler：`scheduler_queue_depth`、`scheduler_active_workers`、`submission_result_total`、`job_latency_seconds`
 - Worker：`worker_task_total`、`worker_task_duration_seconds`、`worker_compile_duration_seconds`、`worker_download_duration_seconds`、`worker_unzip_duration_seconds`
+- Worker（Judge 执行链路）：`judge_exec_duration_seconds{result}`、`judge_exec_inflight`、`judge_exec_total{result}`、`judge_verdict_total{verdict}`、`judge_protocol_errors_total{reason}`、`judge_output_truncated_total{stream}`
 
 约束：
 
@@ -234,6 +235,13 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 ```bash
 JOB_ID="<your_job_id>"
 docker compose logs --since=30m api scheduler worker | rg "$JOB_ID|trace_id|attempt_id"
+```
+
+通过 trace_id 串联日志：
+
+```bash
+TRACE_ID="<trace_id>"
+docker compose logs --since=30m worker | rg "$TRACE_ID"
 ```
 
 ## 6. 探针脚本

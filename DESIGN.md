@@ -165,6 +165,27 @@ sequenceDiagram
 - Worker 在 `src/go/internal/worker/executor.go` 的 `parseAndValidateJudgeOutput` 做协议校验；失败时返回 error、记录日志并递增 `judge_protocol_errors_total{reason=...}`，结果不写入后续流程。
 - Worker 执行 judge 时并发 drain stdout/stderr，并按上限截断但继续 drain：`JUDGE_STDOUT_LIMIT_BYTES`（默认 256KB）、`JUDGE_STDERR_LIMIT_BYTES`（默认 1MB）。
 
+## Observability（Worker）
+
+日志字段规范（结构化）：
+
+- `job_id`
+- `attempt_id`
+- `trace_id`（Worker 入口若缺失则生成，并贯穿执行/判题/回写日志）
+
+核心指标（低基数标签）：
+
+- `judge_exec_duration_seconds{result}`（result=ok/reject/error/timeout）
+- `judge_exec_inflight`
+- `judge_exec_total{result}`
+- `judge_verdict_total{verdict}`
+- `judge_protocol_errors_total{reason}`
+- `judge_output_truncated_total{stream}`
+
+约束：
+
+- Metrics 标签 **禁止** 使用 `job_id`（或任何请求级唯一 id）；定位单个 job 仅依赖日志/trace。
+
 示例输出（单行）：
 
 ```json

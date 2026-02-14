@@ -4,15 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Result from C++ core (stdout)
@@ -57,6 +58,14 @@ const (
 	reasonAttemptIDMismatch = "attempt_id_mismatch"
 )
 
+const (
+	judgeResultOK       = "ok"
+	judgeResultReject   = "reject"
+	judgeResultError    = "error"
+	judgeResultTimeout  = "timeout"
+	judgeVerdictUnknown = "UNKNOWN"
+)
+
 type protocolError struct {
 	reason            string
 	expectedJobID     string
@@ -84,7 +93,7 @@ func NewExecutor(binPath string) *Executor {
 	return &Executor{binPath: binPath}
 }
 
-func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attemptID int64, codePath, inputPath, outputPath string, timeLimit, memLimit int) (*JudgeResult, error) {
+func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attemptID int64, traceID string, codePath, inputPath, outputPath string, timeLimit, memLimit int) (*JudgeResult, error) {
 	// Command: judge_engine -c <code> -i <input> -o <output> -t <time> -m <mem> -C <config> --job_id <id> --attempt_id <n>
 
 	configPath := cfg.ConfigPath
@@ -111,8 +120,18 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attem
 	cmd := exec.Command(e.binPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	logger := newJobLogger(jobID, attemptID, traceID)
 	stdoutLimit := getDrainLimit(envStdoutLimitBytes, defaultStdoutLimitBytes)
 	stderrLimit := getDrainLimit(envStderrLimitBytes, defaultStderrLimitBytes)
+
+	start := time.Now()
+	judgeExecInflight.Inc()
+	resultLabel := judgeResultError
+	defer func() {
+		judgeExecInflight.Dec()
+		judgeExecTotal.WithLabelValues(resultLabel).Inc()
+		judgeExecDuration.WithLabelValues(resultLabel).Observe(time.Since(start).Seconds())
+	}()
 
 	stdoutRes, stderrRes, waitErr, startErr := runWithDrain(ctx, cmd, stdoutLimit, stderrLimit)
 	if startErr != nil {
@@ -120,10 +139,8 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attem
 	}
 
 	if stdoutRes.truncated || stderrRes.truncated {
-		slog.Warn(
+		logger.Warn(
 			"Judge output truncated",
-			"job_id", jobID,
-			"attempt_id", attemptID,
 			"truncated_stdout", stdoutRes.truncated,
 			"truncated_stderr", stderrRes.truncated,
 			"stdout_len", stdoutRes.n,
@@ -137,16 +154,27 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attem
 		}
 	}
 
+	if waitErr != nil && errors.Is(waitErr, context.DeadlineExceeded) {
+		resultLabel = judgeResultTimeout
+	}
+
 	res, perr := parseAndValidateJudgeOutput(string(stdoutRes.data), jobID, attemptID)
 	if perr != nil {
+		if resultLabel != judgeResultTimeout {
+			resultLabel = judgeResultReject
+		}
 		judgeProtocolErrorsTotal.WithLabelValues(perr.reason).Inc()
 		return nil, perr
 	}
 
+	resultLabel = judgeResultOK
 	if waitErr != nil {
 		// Preserve previous behavior: prefer structured JSON output over process exit code.
 		_ = waitErr
 	}
+
+	logJudgeExecEnd(logger, res, stdoutRes.truncated, stderrRes.truncated)
+	judgeVerdictTotal.WithLabelValues(normalizeVerdict(res.Verdict)).Inc()
 
 	return res, nil
 }
@@ -319,6 +347,25 @@ func minInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func normalizeVerdict(verdict string) string {
+	switch strings.ToUpper(strings.TrimSpace(verdict)) {
+	case "OK":
+		return "OK"
+	case "TLE":
+		return "TLE"
+	case "MLE":
+		return "MLE"
+	case "OLE":
+		return "OLE"
+	case "RE":
+		return "RE"
+	case "SE":
+		return "SE"
+	default:
+		return judgeVerdictUnknown
+	}
 }
 
 func parseAndValidateJudgeOutput(raw string, expectedJobID string, expectedAttemptID int64) (*JudgeResult, *protocolError) {
