@@ -5,9 +5,7 @@
  * 架构定位: I/O 密集层
  * 技术选型: Gin Framework + PostgreSQL + Redis
  *
- * ===========================================================================
  * 面试八股知识点
- * ===========================================================================
  *
  * 1. 为什么选择 Gin?
  *    - 高性能: 基于 httprouter，性能是 net/http 的 40 倍
@@ -161,9 +159,7 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("JOB_PAYLOAD_TTL_SEC", cfg.API.Stream.JobPayloadTTLSec)
 	}
 
-	// =========================================================================
 	// 1. 初始化配置 (从环境变量读取)
-	// =========================================================================
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		slog.Error("DATABASE_URL must be set")
@@ -180,9 +176,7 @@ func main() {
 		port = "8080"
 	}
 
-	// =========================================================================
 	// 2. 初始化数据库连接
-	// =========================================================================
 	ctx := context.Background()
 
 	db, err := repository.NewPostgresDB(ctx, dbURL)
@@ -193,9 +187,7 @@ func main() {
 	defer db.Close()
 	slog.Info("Connected to PostgreSQL")
 
-	// =========================================================================
 	// 3. 初始化 Redis 连接
-	// =========================================================================
 	redisClient := repository.NewRedisClient(redisURL)
 	if err := redisClient.Ping(ctx); err != nil {
 		slog.Error("Failed to connect to Redis", "error", err)
@@ -203,13 +195,9 @@ func main() {
 	}
 	slog.Info("Connected to Redis")
 
-	// =========================================================================
 	// 4. 创建 Handler 和路由
-	// =========================================================================
 
-	// =========================================================================
 	// 3.5 初始化 MinIO 连接
-	// =========================================================================
 	minioEndpoint := os.Getenv("MINIO_ENDPOINT")
 	if minioEndpoint == "" {
 		minioEndpoint = "localhost:9000"
@@ -236,9 +224,7 @@ func main() {
 	}
 	slog.Info("Connected to MinIO")
 
-	// =========================================================================
 	// 4. 创建 Handler 和路由
-	// =========================================================================
 	handler := api.NewHandler(db, redisClient, minioClient)
 
 	var outboxCancel context.CancelFunc
@@ -304,9 +290,7 @@ func main() {
 		})
 	}
 
-	// =========================================================================
 	// 5. 优雅关闭 (Graceful Shutdown)
-	// =========================================================================
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           r,

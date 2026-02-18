@@ -48,9 +48,7 @@ security:
   run_as_uid: 65534
   run_as_gid: 65534
 
-# ===========================
 # Go Services Configuration
-# ===========================
 
 api:
   port: 8080
@@ -106,6 +104,8 @@ scheduler:
   max_retry: 3
   retry_ttl_sec: 86400
   scheduler_id: "scheduler-1"
+  dispatch_mode: "streams_only" # streams_only | legacy_grpc_push
+  dispatch_enabled: false       # legacy_grpc_push requires true
   metrics_port: 9091
   metrics_poll_ms: 1000
   etcd_dial_timeout_ms: 5000

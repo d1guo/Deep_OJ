@@ -165,9 +165,7 @@ func generateToken(userID int64, username string) (string, error) {
 	return token.SignedString(getJWTSecret())
 }
 
-// =========================================================================
 // Task 3.2: GitHub OAuth 2.0
-// =========================================================================
 
 var (
 	githubConfig   *oauth2.Config

@@ -113,9 +113,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 
 	logger.Info("HandleSubmit 开始处理")
 
-	// =========================================================================
 	// 0. Rate Limiting
-	// =========================================================================
 	userID := 0
 	if uid, exists := c.Get("user_id"); exists {
 		userID = int(uid.(int64))
@@ -177,9 +175,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		req.MemoryLimit = maxMemLimit
 	}
 
-	// =========================================================================
 	// 1. 生成缓存 Key (去重)
-	// =========================================================================
 	testcaseHash := ""
 	if req.ProblemID > 0 {
 		problem, err := h.db.GetProblem(ctx, req.ProblemID)
@@ -192,9 +188,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 	}
 	cacheKey := generateCacheKey(req.Code, req.Language, req.TimeLimit, req.MemoryLimit, req.ProblemID, testcaseHash)
 
-	// =========================================================================
 	// 2. 检查缓存 (Cache Aside 模式 - 读)
-	// =========================================================================
 	cached, err := h.redis.Get(ctx, cacheKey)
 	if err == nil && cached != "" {
 		logger.Info("命中缓存", "cache_key", cacheKey)
@@ -246,9 +240,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 
 	}
 
-	// =========================================================================
 	// 3. 生成 Job ID (UUID v4)
-	// =========================================================================
 	jobID := uuid.New().String()
 	logger = logger.With("job_id", jobID) // 将 job_id 注入日志上下文
 
@@ -267,9 +259,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		}
 	}
 
-	// =========================================================================
 	// 4. 构建提交对象与任务载荷
-	// =========================================================================
 	submission := &model.Submission{
 		JobID:       jobID,
 		Code:        req.Code,
@@ -363,9 +353,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 	RequestTotal.WithLabelValues(method, path, "200").Inc()
 	RequestDuration.WithLabelValues(method, path, "200").Observe(time.Since(start).Seconds())
 
-	// =========================================================================
 	// 6. 返回 Job ID
-	// =========================================================================
 	c.JSON(http.StatusOK, SubmitResponse{
 		JobID:  jobID,
 		Status: "Queuing",
@@ -405,9 +393,7 @@ func (h *Handler) HandleStatus(c *gin.Context) {
 	userIDAny, userExists := c.Get("user_id")
 	usernameAny, _ := c.Get("username")
 
-	// =========================================================================
 	// 1. 先查 PostgreSQL (权限校验)
-	// =========================================================================
 	submission, err := h.db.GetSubmission(ctx, jobID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "找不到提交记录", "code": "NOT_FOUND"})
@@ -426,9 +412,7 @@ func (h *Handler) HandleStatus(c *gin.Context) {
 		return
 	}
 
-	// =========================================================================
 	// 2. 再查 Redis 缓存 (热点数据)
-	// =========================================================================
 	resultKey := common.ResultKeyPrefix + jobID
 	result, err := h.redis.Get(ctx, resultKey)
 	if err == nil && result != "" {

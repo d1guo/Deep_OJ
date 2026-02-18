@@ -1,9 +1,7 @@
 # C++ Worker Dockerfile
 # 需要编译 C++ 代码并包含运行时依赖
 
-# =========================================================================
 # Stage 1: Build
-# =========================================================================
 FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -33,9 +31,7 @@ RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
     make -j$(nproc)
 
-# =========================================================================
 # Stage 2: Runtime
-# =========================================================================
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive

@@ -5,9 +5,7 @@
  * 架构定位: 任务调度层
  * 技术选型: Etcd (服务发现) + gRPC (Worker 通信) + Redis (任务队列)
  *
- * ===========================================================================
  * 面试八股知识点
- * ===========================================================================
  *
  * 1. Etcd 服务发现 vs 传统配置:
  *    - 传统: 硬编码 Worker 地址，重启才能更新
@@ -121,9 +119,7 @@ func main() {
 		appconfig.SetEnvIfEmpty("INSTANCE_ID", cfg.Scheduler.Metrics.InstanceID)
 	}
 
-	// =========================================================================
 	// 1. 读取配置
-	// =========================================================================
 	etcdEndpoints := os.Getenv("ETCD_ENDPOINTS")
 	if etcdEndpoints == "" {
 		etcdEndpoints = "localhost:2379"
@@ -140,9 +136,7 @@ func main() {
 		}
 	}
 
-	// =========================================================================
 	// 2. 初始化 Context (支持优雅关闭)
-	// =========================================================================
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -155,9 +149,7 @@ func main() {
 		cancel()
 	}()
 
-	// =========================================================================
 	// 3. 初始化 Etcd 服务发现
-	// =========================================================================
 	endpoints := strings.Split(etcdEndpoints, ",")
 	discovery, err := scheduler.NewEtcdDiscovery(endpoints)
 	if err != nil {
@@ -170,9 +162,7 @@ func main() {
 	// 启动 Worker 监听
 	go discovery.WatchWorkers(ctx)
 
-	// =========================================================================
 	// 4. 初始化 Redis 客户端
-	// =========================================================================
 	redisClient := repository.NewRedisClient(redisURL)
 	if err := redisClient.Ping(ctx); err != nil {
 		slog.Error("❌ Failed to connect to Redis", "error", err)
@@ -180,9 +170,7 @@ func main() {
 	}
 	slog.Info("✅ Connected to Redis")
 
-	// =========================================================================
 	// 4.5 初始化 PostgreSQL (用于 ACK 回调更新状态)
-	// =========================================================================
 	postgresURL := os.Getenv("DATABASE_URL")
 	if postgresURL == "" {
 		slog.Error("❌ DATABASE_URL must be set")
@@ -199,9 +187,7 @@ func main() {
 	// 启动 ACK 监听器
 	go scheduler.StartAckListener(ctx, redisClient, db)
 
-	// =========================================================================
 	// 6. [Task 3.3] 启动监控 (Probes & Metrics)
-	// =========================================================================
 
 	// 6.1 启动 Metrics Poller (Redis/Etcd 状态)
 	go scheduler.StartMetricsPoller(ctx, redisClient, discovery)
@@ -218,7 +204,6 @@ func main() {
 	watchdog := scheduler.NewWatchdog(redisClient, discovery, db, watchdogInterval)
 	go watchdog.Start(ctx)
 
-	// =========================================================================
 	// 5. 启动任务分发循环
 	// =========================================================================	// 5. 启动任务分发循环
 	slog.Info("🚀 Scheduler started, waiting for tasks...")

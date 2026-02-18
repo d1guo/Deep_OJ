@@ -1,9 +1,7 @@
 # Go Scheduler Dockerfile
 # 多阶段构建
 
-# =========================================================================
 # Stage 1: Build
-# =========================================================================
 FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
@@ -17,9 +15,7 @@ COPY go/ ./
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /scheduler ./cmd/scheduler
 
-# =========================================================================
 # Stage 2: Runtime  
-# =========================================================================
 FROM alpine:3.19
 
 RUN apk add --no-cache ca-certificates

@@ -1,15 +1,12 @@
 # Multi-stage Dockerfile for Deep-OJ
 
-# ============================
 # Stage 1: C++ Builder
-# ============================
 FROM ubuntu:22.04 AS cpp_builder
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
-RUN sed -i 's/[a-z]\+.ubuntu.com/mirror.nju.edu.cn/g' /etc/apt/sources.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 && \
+    apt-get install -y --no-install-recommends --fix-missing \
     build-essential cmake g++ make pkg-config git wget ca-certificates \
     libgrpc++-dev libprotobuf-dev protobuf-compiler \
     libabsl-dev libc-ares-dev \
@@ -20,7 +17,9 @@ RUN sed -i 's/[a-z]\+.ubuntu.com/mirror.nju.edu.cn/g' /etc/apt/sources.list && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install JSON library (separate run to use cache for above)
-RUN apt-get update && apt-get install -y nlohmann-json3-dev
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 && \
+    apt-get install -y --no-install-recommends --fix-missing nlohmann-json3-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -42,9 +41,7 @@ RUN rm -rf build && mkdir -p build && \
     cmake --build build --target judge_engine -j"$(nproc)" && \
     cmake --build build --target security_test_runner -j"$(nproc)"
 
-# ============================
 # Stage 2: Go Builder
-# ============================
 FROM golang:1.24 AS go_builder
 ENV GOPROXY=https://goproxy.cn,direct
 
@@ -57,25 +54,19 @@ RUN CGO_ENABLED=0 go build -o /bin/oj_api ./cmd/api
 RUN CGO_ENABLED=0 go build -o /bin/oj_scheduler ./cmd/scheduler
 RUN CGO_ENABLED=0 go build -o /bin/oj_worker ./cmd/worker
 
-# ============================
 # Stage 3: Runtime
-# ============================
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime dependencies (C++ Engine needs libs)
-# Added libseccomp-dev for judge_engine
-# Runtime dependencies
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates g++ \
+RUN apt-get update -o Acquire::Retries=5 -o Acquire::http::Timeout=30 && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    ca-certificates g++ tzdata \
     libgrpc++-dev libprotobuf-dev \
     libabsl-dev \
     libhiredis-dev libssl-dev libyaml-cpp-dev \
     libseccomp-dev \
+    && ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime \
+    && echo "Etc/UTC" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

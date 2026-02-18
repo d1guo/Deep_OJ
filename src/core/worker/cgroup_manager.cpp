@@ -55,9 +55,7 @@ namespace fs = std::filesystem;
 
 namespace deep_oj {
 
-// ============================================================================
 // 构造函数与析构函数
-// ============================================================================
 
 CgroupManager::CgroupManager(const std::string& root, const std::string& job_id)
     : cgroup_root_(root)
@@ -106,9 +104,7 @@ CgroupManager& CgroupManager::operator=(CgroupManager&& other) noexcept {
     return *this;
 }
 
-// ============================================================================
 // 静态方法
-// ============================================================================
 
 bool CgroupManager::IsSupported() {
     // 检查 /sys/fs/cgroup 是否为 cgroup2 文件系统
@@ -119,9 +115,7 @@ bool CgroupManager::IsSupported() {
     return buf.f_type == CGROUP2_SUPER_MAGIC;
 }
 
-// ============================================================================
 // 核心功能实现
-// ============================================================================
 
 bool CgroupManager::EnsureParentReady() {
     std::error_code ec;
@@ -396,9 +390,7 @@ void CgroupManager::Destroy() {
     created_ = false;
 }
 
-// ============================================================================
 // 辅助方法
-// ============================================================================
 
 bool CgroupManager::WriteToFile(const std::string& path, const std::string& value) {
     std::ofstream ofs(path);
