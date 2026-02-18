@@ -72,7 +72,10 @@ func enqueueJobToStream(
 	if err := client.Set(ctx, payloadRef, string(payloadBytes), payloadTTL); err != nil {
 		logger.Error(
 			"Redis payload set failed",
+			"component", "api_stream_enqueue",
+			"event", "enqueue",
 			"job_id", jobID,
+			"attempt_id", int64(0),
 			"trace_id", traceID,
 			"reason", "payload_set_failed",
 			"payload_ref", payloadRef,
@@ -94,7 +97,10 @@ func enqueueJobToStream(
 		if delErr := client.Del(ctx, payloadRef); delErr != nil {
 			logger.Warn(
 				"Redis payload cleanup failed after XADD error",
+				"component", "api_stream_enqueue",
+				"event", "enqueue",
 				"job_id", jobID,
+				"attempt_id", int64(0),
 				"trace_id", traceID,
 				"reason", "payload_cleanup_failed",
 				"payload_ref", payloadRef,
@@ -103,7 +109,10 @@ func enqueueJobToStream(
 		}
 		logger.Error(
 			"Redis stream enqueue failed",
+			"component", "api_stream_enqueue",
+			"event", "enqueue",
 			"job_id", jobID,
+			"attempt_id", int64(0),
 			"trace_id", traceID,
 			"reason", "xadd_failed",
 			"stream", streamKey,
@@ -114,6 +123,16 @@ func enqueueJobToStream(
 		return "", fmt.Errorf("stream xadd: %w", err)
 	}
 
+	logger.Info(
+		"Stream enqueue success",
+		"component", "api_stream_enqueue",
+		"event", "enqueue",
+		"job_id", jobID,
+		"attempt_id", int64(0),
+		"trace_id", traceID,
+		"stream", streamKey,
+		"stream_entry_id", entryID,
+	)
 	observe("ok")
 	return entryID, nil
 }

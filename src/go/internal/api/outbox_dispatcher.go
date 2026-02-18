@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -108,9 +109,11 @@ func (d *outboxDispatcher) DispatchOnce(ctx context.Context) {
 }
 
 func (d *outboxDispatcher) dispatchOne(ctx context.Context, evt repository.OutboxEvent) {
+	traceID := traceIDFromTaskPayload(evt.Payload, evt.JobID)
 	logger := d.logger.With(
 		"job_id", evt.JobID,
-		"trace_id", evt.JobID,
+		"attempt_id", int64(0),
+		"trace_id", traceID,
 		"outbox_id", evt.ID,
 		"attempt", evt.Attempts,
 		"next_retry_at", evt.NextAttemptAt,
@@ -158,7 +161,7 @@ func (d *outboxDispatcher) dispatchOne(ctx context.Context, evt repository.Outbo
 		d.logger.Error(
 			"Mark outbox delivered failed",
 			"job_id", evt.JobID,
-			"trace_id", evt.JobID,
+			"trace_id", traceID,
 			"outbox_id", evt.ID,
 			"reason", "db_error",
 			"error", err,
@@ -167,7 +170,37 @@ func (d *outboxDispatcher) dispatchOne(ctx context.Context, evt repository.Outbo
 	}
 
 	apiOutboxDispatchTotal.WithLabelValues("ok", "ok").Inc()
-	logger.Info("Outbox dispatched", "stream_entry_id", entryID, "reason", "ok")
+	logger.Info(
+		"Outbox dispatched",
+		"event", "enqueue",
+		"stream_entry_id", entryID,
+		"reason", "ok",
+	)
+}
+
+func traceIDFromTaskPayload(payload []byte, fallback string) string {
+	if len(payload) == 0 {
+		return fallback
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return fallback
+	}
+	for _, key := range []string{"trace_id", "traceId", "traceID"} {
+		raw, ok := data[key]
+		if !ok {
+			continue
+		}
+		s, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if s != "" {
+			return s
+		}
+	}
+	return fallback
 }
 
 func (d *outboxDispatcher) markDispatchError(
@@ -178,7 +211,7 @@ func (d *outboxDispatcher) markDispatchError(
 	err error,
 ) {
 	apiOutboxDispatchTotal.WithLabelValues("error", reason).Inc()
-	logger.Warn("Outbox dispatch failed", "reason", reason, "error", err)
+	logger.Warn("Outbox dispatch failed", "event", "enqueue", "reason", reason, "error", err)
 	if derr := d.store.MarkOutboxDispatchError(ctx, evt.ID, truncateErr(err)); derr != nil {
 		apiOutboxDispatchTotal.WithLabelValues("error", "db_error").Inc()
 		logger.Error("Update outbox dispatch error failed", "reason", "db_error", "error", derr)

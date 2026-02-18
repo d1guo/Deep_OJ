@@ -126,11 +126,15 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attem
 
 	start := time.Now()
 	judgeExecInflight.Inc()
+	execInflight.Inc()
 	resultLabel := judgeResultError
 	defer func() {
 		judgeExecInflight.Dec()
+		execInflight.Dec()
 		judgeExecTotal.WithLabelValues(resultLabel).Inc()
 		judgeExecDuration.WithLabelValues(resultLabel).Observe(time.Since(start).Seconds())
+		execTotal.WithLabelValues(resultLabel).Inc()
+		execDurationSeconds.WithLabelValues(resultLabel).Observe(time.Since(start).Seconds())
 	}()
 
 	stdoutRes, stderrRes, waitErr, startErr := runWithDrain(ctx, cmd, stdoutLimit, stderrLimit)
@@ -175,6 +179,7 @@ func (e *Executor) Execute(ctx context.Context, cfg *Config, jobID string, attem
 
 	logJudgeExecEnd(logger, res, stdoutRes.truncated, stderrRes.truncated)
 	judgeVerdictTotal.WithLabelValues(normalizeVerdict(res.Verdict)).Inc()
+	verdictTotal.WithLabelValues(normalizeVerdict(res.Verdict)).Inc()
 
 	return res, nil
 }

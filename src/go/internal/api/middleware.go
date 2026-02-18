@@ -245,6 +245,7 @@ func MetricsMiddleware() gin.HandlerFunc {
 		// 使用 metrics.go 中定义的 RequestTotal 和 RequestDuration
 		RequestTotal.WithLabelValues(method, path, status).Inc()
 		RequestDuration.WithLabelValues(method, path, status).Observe(duration)
+		requestDurationSeconds.WithLabelValues(path, statusClassFromCode(c.Writer.Status())).Observe(duration)
 	}
 }
 

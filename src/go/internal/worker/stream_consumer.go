@@ -73,6 +73,8 @@ const (
 	finalizeStatusOK       = "ok"
 	finalizeStatusRejected = "rejected"
 	finalizeStatusError    = "error"
+
+	defaultWorkerLogThrottleSec = 5
 )
 
 type streamEnvelopeV1 struct {
@@ -168,9 +170,16 @@ type StreamConsumer struct {
 	logger             *slog.Logger
 	reclaimCursorMu    sync.Mutex
 	reclaimNextStartID string
+	logThrottleMu      sync.Mutex
+	logThrottleSeen    map[string]time.Time
+	logThrottleWindow  time.Duration
 }
 
 func NewStreamConsumer(cfg *Config, redisClient *redis.Client, db streamDB, runner streamJudgeRunner) *StreamConsumer {
+	logThrottleSec := getEnvInt("WORKER_LOG_THROTTLE_SEC", defaultWorkerLogThrottleSec)
+	if logThrottleSec <= 0 {
+		logThrottleSec = defaultWorkerLogThrottleSec
+	}
 	return &StreamConsumer{
 		config:             cfg,
 		redis:              newRedisStreamClient(redisClient),
@@ -178,6 +187,8 @@ func NewStreamConsumer(cfg *Config, redisClient *redis.Client, db streamDB, runn
 		runner:             runner,
 		logger:             slog.With("component", "worker_stream_consumer"),
 		reclaimNextStartID: "0-0",
+		logThrottleSeen:    make(map[string]time.Time),
+		logThrottleWindow:  time.Duration(logThrottleSec) * time.Second,
 	}
 }
 
@@ -192,6 +203,8 @@ func newStreamConsumerForTest(cfg *Config, redisClient streamRedisClient, db str
 		runner:             runner,
 		logger:             logger,
 		reclaimNextStartID: "0-0",
+		logThrottleSeen:    make(map[string]time.Time),
+		logThrottleWindow:  defaultWorkerLogThrottleSec * time.Second,
 	}
 }
 
@@ -252,17 +265,20 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 				continue
 			}
 			workerStreamConsumeTotal.WithLabelValues(streamConsumeStatusError, streamReasonXReadGroupError).Inc()
-			c.logger.Error(
-				"XREADGROUP failed",
-				"trace_id", uuid.NewString(),
-				"job_id", "",
-				"attempt_id", int64(0),
-				"stream_entry_id", "",
-				"consumer", c.config.JobStreamConsumer,
-				"group", c.config.JobStreamGroup,
-				"reason", streamReasonXReadGroupError,
-				"error", err,
-			)
+			if c.shouldLog(streamReasonXReadGroupError) {
+				c.logger.Error(
+					"XREADGROUP failed",
+					"event", "claim",
+					"trace_id", uuid.NewString(),
+					"job_id", "",
+					"attempt_id", int64(0),
+					"stream_entry_id", "",
+					"consumer", c.config.JobStreamConsumer,
+					"group", c.config.JobStreamGroup,
+					"reason", streamReasonXReadGroupError,
+					"error", err,
+				)
+			}
 			continue
 		}
 		for _, xstream := range streams {
@@ -334,17 +350,22 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 				return
 			}
 			workerReclaimTotal.WithLabelValues(reclaimStatusError, streamReasonXAutoClaimError).Inc()
-			c.logger.Error(
-				"XAUTOCLAIM failed",
-				"trace_id", uuid.NewString(),
-				"job_id", "",
-				"attempt_id", int64(0),
-				"stream_entry_id", "",
-				"group", c.config.JobStreamGroup,
-				"consumer", c.config.JobStreamConsumer,
-				"reason", streamReasonXAutoClaimError,
-				"error", err,
-			)
+			reclaimTotal.WithLabelValues(streamReasonXAutoClaimError, "xautoclaim").Inc()
+			xautoclaimErrorsTotal.WithLabelValues(streamReasonXAutoClaimError).Inc()
+			if c.shouldLog(streamReasonXAutoClaimError) {
+				c.logger.Error(
+					"XAUTOCLAIM failed",
+					"event", "reclaim_skipped",
+					"trace_id", uuid.NewString(),
+					"job_id", "",
+					"attempt_id", int64(0),
+					"stream_entry_id", "",
+					"group", c.config.JobStreamGroup,
+					"consumer", c.config.JobStreamConsumer,
+					"reason", streamReasonXAutoClaimError,
+					"error", err,
+				)
+			}
 			return
 		}
 		if len(msgs) == 0 {
@@ -379,6 +400,29 @@ func (c *StreamConsumer) setReclaimNextStartID(next string) {
 	c.reclaimCursorMu.Lock()
 	c.reclaimNextStartID = next
 	c.reclaimCursorMu.Unlock()
+}
+
+func (c *StreamConsumer) shouldLog(event string) bool {
+	if c == nil {
+		return true
+	}
+	key := strings.TrimSpace(event)
+	if key == "" {
+		return true
+	}
+	window := c.logThrottleWindow
+	if window <= 0 {
+		window = defaultWorkerLogThrottleSec * time.Second
+	}
+	now := time.Now()
+	c.logThrottleMu.Lock()
+	defer c.logThrottleMu.Unlock()
+	last, ok := c.logThrottleSeen[key]
+	if ok && now.Sub(last) < window {
+		return false
+	}
+	c.logThrottleSeen[key] = now
+	return true
 }
 
 func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) streamProcessResult {
@@ -528,15 +572,17 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 	}
 	workerClaimTotal.WithLabelValues(streamClaimStatusOK, streamReasonOK).Inc()
 	logger = c.newMessageLogger(traceID, jobID, attemptID, msg.ID)
-	logger.Info("DB claim success", "reason", streamReasonOK)
+	logger.Info("DB claim success", "event", "claim", "reason", streamReasonOK)
 	return c.runClaimedExecution(ctx, msg, taskReq, jobID, traceID, attemptID, logger)
 }
 
 func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.XMessage) streamProcessResult {
 	status := reclaimStatusOK
 	reason := streamReasonOK
+	source := "stream_reclaim"
 	defer func() {
 		workerReclaimTotal.WithLabelValues(status, reason).Inc()
+		reclaimTotal.WithLabelValues(reason, source).Inc()
 	}()
 
 	jobID, missingJobID := requiredStreamField(msg.Values, "job_id")
@@ -651,26 +697,28 @@ func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.X
 		logger.Error("DB reclaim failed", "reason", reason, "error", rerr)
 		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonDBError}
 	}
+	logger = c.newMessageLogger(traceID, jobID, attemptID, msg.ID)
 
 	switch decision {
 	case reclaimDecisionClaimed:
 		status = reclaimStatusOK
 		reason = streamReasonReclaimClaimed
 		logger = c.newMessageLogger(traceID, jobID, attemptID, msg.ID)
-		logger.Info("DB reclaim success", "reason", streamReasonReclaimClaimed)
+		logger.Info("DB reclaim success", "event", "reclaim_claimed", "reason", streamReasonReclaimClaimed)
 		res := c.runClaimedExecution(ctx, msg, taskReq, jobID, traceID, attemptID, logger)
 		if res.reason != streamReasonOK {
 			status = reclaimStatusError
 			reason = res.reason
 		} else {
 			status = reclaimStatusOK
-			reason = streamReasonOK
+			reason = streamReasonReclaimClaimed
 		}
 		return res
 	case reclaimDecisionLeaseStillValid:
 		status = reclaimStatusReject
 		reason = streamReasonLeaseStillValid
-		logger.Warn("Reclaim skipped: lease still valid", "reason", reason)
+		logger.Warn("Reclaim skipped: lease still valid", "event", "reclaim_skipped", "reason", reason)
+		logger.Info("Skip XACK on reclaim entry", "event", "xack_skip", "reason", reason)
 		return streamProcessResult{status: streamConsumeStatusError, reason: reason}
 	case reclaimDecisionDoneOrStale:
 		status = reclaimStatusReject
@@ -681,7 +729,7 @@ func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.X
 			logger.Error("XACK failed for done/stale reclaimed entry", "reason", reason, "error", err)
 			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
 		}
-		logger.Info("Reclaimed entry dropped as done/stale and ACKed", "reason", streamReasonDoneOrStale)
+		logger.Info("Reclaimed entry dropped as done/stale and ACKed", "event", "reclaim_skipped", "reason", streamReasonDoneOrStale)
 		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonDoneOrStale}
 	case reclaimDecisionNotFound:
 		status = reclaimStatusReject
@@ -692,7 +740,7 @@ func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.X
 			logger.Error("XACK failed for not_found reclaimed entry", "reason", reason, "error", err)
 			return streamProcessResult{status: streamConsumeStatusError, reason: reason}
 		}
-		logger.Info("Reclaimed entry dropped as not_found and ACKed", "reason", streamReasonNotFound)
+		logger.Info("Reclaimed entry dropped as not_found and ACKed", "event", "reclaim_skipped", "reason", streamReasonNotFound)
 		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonNotFound}
 	default:
 		status = reclaimStatusError
@@ -720,6 +768,7 @@ func (c *StreamConsumer) runClaimedExecution(
 		hbCh <- c.runLeaseHeartbeat(runCtx, cancelRun, jobID, attemptID, traceID, msg.ID)
 	}()
 
+	logger.Info("Worker execution started", "event", "start_exec")
 	execCtx := withAttemptID(runCtx, attemptID)
 	resp, execErr := c.runner.ExecuteTask(execCtx, taskReq)
 
@@ -728,7 +777,7 @@ func (c *StreamConsumer) runClaimedExecution(
 	if hbRes.leaseLost {
 		status = streamConsumeStatusError
 		reason = hbRes.reason
-		logger.Warn("Lease lost, execution canceled", "reason", reason, "exec_error", execErr)
+		logger.Warn("Lease lost, execution canceled", "event", "xack_skip", "reason", reason, "exec_error", execErr)
 		return streamProcessResult{status: status, reason: reason}
 	}
 
@@ -751,7 +800,7 @@ func (c *StreamConsumer) runClaimedExecution(
 		workerFinalizeErrorsTotal.Inc()
 		status = streamConsumeStatusError
 		reason = streamReasonDBError
-		logger.Error("Fenced final write failed", "reason", reason, "error", ferr)
+		logger.Error("Fenced final write failed", "event", "db_finalize_error", "reason", reason, "error", ferr)
 		return streamProcessResult{status: status, reason: reason}
 	}
 
@@ -764,8 +813,13 @@ func (c *StreamConsumer) runClaimedExecution(
 			workerStaleAttemptTotal.Inc()
 		}
 
+		finalizeEvent := "db_finalize_rejected"
+		if reason == streamReasonStaleAttempt {
+			finalizeEvent = "db_finalize_stale"
+		}
 		logger.Warn(
 			"Fenced final write rejected",
+			"event", finalizeEvent,
 			"reason", reason,
 			"db_attempt_id", finalizeResult.DBAttemptID,
 			"db_status", finalizeResult.DBStatus,
@@ -785,9 +839,11 @@ func (c *StreamConsumer) runClaimedExecution(
 			logger.Error("XACK failed after fenced reject", "reason", reason, "error", ackErr)
 			return streamProcessResult{status: status, reason: reason}
 		}
+		logger.Info("XACK completed", "event", "xack_ok", "reason", "fenced_reject")
 		return streamProcessResult{status: status, reason: reason}
 	}
 	workerFinalizeTotal.WithLabelValues(finalizeStatusOK).Inc()
+	logger.Info("Fenced final write applied", "event", "db_finalize_ok", "status", finalStatus)
 
 	if err := c.xackWithRetry(ctx, msg.ID); err != nil {
 		status = streamConsumeStatusError
@@ -795,8 +851,9 @@ func (c *StreamConsumer) runClaimedExecution(
 		logger.Error("XACK failed after fenced write", "reason", reason, "error", err)
 		return streamProcessResult{status: status, reason: reason}
 	}
+	logger.Info("XACK completed", "event", "xack_ok", "reason", streamReasonOK)
 
-	logger.Info("Stream message processed", "reason", streamReasonOK, "status", finalStatus)
+	logger.Info("Stream message processed", "event", "finish_exec", "reason", streamReasonOK, "status", finalStatus)
 	return streamProcessResult{status: streamConsumeStatusOK, reason: streamReasonOK}
 }
 
@@ -985,6 +1042,7 @@ func (c *StreamConsumer) xackWithRetry(ctx context.Context, entryID string) erro
 	for i := 0; i < 2; i++ {
 		_, err := c.redis.Ack(ctx, c.config.JobStreamKey, c.config.JobStreamGroup, entryID)
 		if err == nil {
+			xackTotal.WithLabelValues("ok").Inc()
 			return nil
 		}
 		lastErr = err
@@ -992,6 +1050,7 @@ func (c *StreamConsumer) xackWithRetry(ctx context.Context, entryID string) erro
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
+	xackTotal.WithLabelValues("error").Inc()
 	return lastErr
 }
 

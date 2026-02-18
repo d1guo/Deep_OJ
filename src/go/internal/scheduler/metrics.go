@@ -58,6 +58,20 @@ var (
 			Buckets: prometheus.DefBuckets, // default buckets are fine for now
 		},
 	)
+
+	controlPlaneOnlyGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "control_plane_only",
+			Help: "Whether scheduler runs in control-plane-only mode (1=true, 0=false)",
+		},
+	)
+
+	legacyLoopsStartedGauge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "legacy_loops_started",
+			Help: "Number of legacy scheduler data-plane loops started",
+		},
+	)
 )
 
 func init() {
@@ -65,6 +79,23 @@ func init() {
 	reg.MustRegister(schedulerActiveWorkers)
 	reg.MustRegister(submissionResultTotal)
 	reg.MustRegister(schedulerJobLatency)
+	reg.MustRegister(controlPlaneOnlyGauge)
+	reg.MustRegister(legacyLoopsStartedGauge)
+}
+
+func SetControlPlaneOnly(enabled bool) {
+	if enabled {
+		controlPlaneOnlyGauge.Set(1)
+		return
+	}
+	controlPlaneOnlyGauge.Set(0)
+}
+
+func SetLegacyLoopsStarted(count int) {
+	if count < 0 {
+		count = 0
+	}
+	legacyLoopsStartedGauge.Set(float64(count))
 }
 
 // StartMetricsPoller starts a background loop to update Gauge metrics

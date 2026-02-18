@@ -21,6 +21,62 @@ func metricLabels() prometheus.Labels {
 var reg = prometheus.WrapRegistererWith(metricLabels(), prometheus.DefaultRegisterer)
 
 var (
+	execDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "exec_duration_seconds",
+			Help:    "Judge execution duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"status"},
+	)
+
+	execInflight = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "exec_inflight",
+			Help: "In-flight judge executions",
+		},
+	)
+
+	execTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "exec_total",
+			Help: "Total number of judge executions",
+		},
+		[]string{"status"},
+	)
+
+	verdictTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "verdict_total",
+			Help: "Total number of judge verdicts",
+		},
+		[]string{"verdict"},
+	)
+
+	reclaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "reclaim_total",
+			Help: "Total number of reclaimed stream entries processed",
+		},
+		[]string{"reason", "source"},
+	)
+
+	xackTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "xack_total",
+			Help: "Total number of worker XACK attempts",
+		},
+		[]string{"status"},
+	)
+
+	xautoclaimErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "xautoclaim_errors_total",
+			Help: "Total number of worker XAUTOCLAIM errors",
+		},
+		[]string{"reason"},
+	)
+
 	workerTaskTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "worker_task_total",
@@ -212,6 +268,13 @@ var (
 
 // InitMetrics registers worker metrics
 func InitMetrics() {
+	reg.MustRegister(execDurationSeconds)
+	reg.MustRegister(execInflight)
+	reg.MustRegister(execTotal)
+	reg.MustRegister(verdictTotal)
+	reg.MustRegister(reclaimTotal)
+	reg.MustRegister(xackTotal)
+	reg.MustRegister(xautoclaimErrorsTotal)
 	reg.MustRegister(workerTaskTotal)
 	reg.MustRegister(workerTaskDuration)
 	reg.MustRegister(workerCompileDuration)
@@ -236,4 +299,15 @@ func InitMetrics() {
 	reg.MustRegister(workerReclaimTotal)
 	reg.MustRegister(workerReclaimLatencyMs)
 	reg.MustRegister(workerReclaimInflight)
+
+	// Pre-initialize low-cardinality label sets so required metrics are visible even before first event.
+	execTotal.WithLabelValues("ok")
+	execTotal.WithLabelValues("error")
+	execDurationSeconds.WithLabelValues("ok")
+	execDurationSeconds.WithLabelValues("error")
+	verdictTotal.WithLabelValues("OK")
+	reclaimTotal.WithLabelValues("none", "none")
+	xackTotal.WithLabelValues("ok")
+	xackTotal.WithLabelValues("error")
+	xautoclaimErrorsTotal.WithLabelValues("none")
 }
