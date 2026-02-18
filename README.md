@@ -4,9 +4,9 @@ Deep-OJ 是一个面向在线评测场景的分布式判题系统，采用 Go + 
 
 当前代码状态（以仓库现状为准，2026-02-18）已经从“Scheduler 主导数据面”演进到“Worker 直连 Streams 数据面”。
 
-## 架构是否大改了
+## 架构变化概览
 
-是，核心执行链路已经明显调整。
+当前主执行链路已切换为 Streams-first（由 Worker 直接消费）。
 
 | 维度 | 旧链路（历史） | 新链路（当前主线） |
 | --- | --- | --- |
@@ -32,17 +32,17 @@ Scheduler 目前不再是主数据面的唯一入口，更接近控制面和兼�
 ```mermaid
 flowchart LR
     Client[Client] --> API[API Server]
-    API -->|TX: submissions + outbox_events| PG[(PostgreSQL)]
-    API -->|Outbox Dispatcher XADD| JOBS[(Redis Stream: deepoj:jobs)]
+    API -->|db_tx| PG[(PostgreSQL)]
+    API -->|xadd_jobs| JOBS[(Redis Stream deepoj_jobs)]
 
     JOBS -->|XREADGROUP| Worker[Worker Stream Consumer]
-    Worker -->|claim/reclaim/finalize (attempt fencing)| PG
-    Worker -->|run judge_engine| Judge[C++ Sandbox]
-    Worker -->|SET result:{job_id}| Redis[(Redis)]
+    Worker -->|claim_and_fenced_finalize| PG
+    Worker -->|run_judge| Judge[Cpp Sandbox]
+    Worker -->|cache_result| Redis[(Redis)]
 
-    Worker -->|XADD stream:results (兼容)| Results[(Redis Stream: stream:results)]
-    Scheduler[Scheduler] -->|XREADGROUP (兼容)| Results
-    Scheduler -->|Etcd watch + metrics| Etcd[(Etcd)]
+    Worker -->|xadd_results_legacy| Results[(Redis Stream stream_results)]
+    Scheduler[Scheduler] -->|xreadgroup_legacy| Results
+    Scheduler -->|watch_and_metrics| Etcd[(Etcd)]
 ```
 
 ## 核心不变量
