@@ -130,13 +130,7 @@ namespace deep_oj {
     {
         auto* args = (RunChildArgs*)(arg);
 
-        // 🔥 [DEBUG] 子进程一上来就打印到屏幕 (fd 1 和 2 此时还没被重定向)
-        // 必须使用 write 系统调用，不能用 cout
-        // char buf[128];
-        // int len = snprintf(buf, sizeof(buf), 
-        //     "\n>>> DEBUG_CHILD: Received limit: %lu <<<\n", 
-        //     (unsigned long)args->output_limit_bytes);
-        // if (len > 0) write(2, buf, len); // 写到 stderr (屏幕)
+        // 调试说明：此处若需要输出，只能使用 write，不能使用 cout。
         // -----------------------------------------------------
         // 1. IO 重定向 (最先执行)
         // -----------------------------------------------------
@@ -165,7 +159,7 @@ namespace deep_oj {
         #endif
 
         if (!close_range_success) {
-            // Fallback: 传统循环关闭
+            // 回退：传统循环关闭
             // 获取最大 FD 限制，防止循环过大
             int max_fd = (int)sysconf(_SC_OPEN_MAX);
             if (max_fd < 0) max_fd = 4096;
@@ -194,40 +188,33 @@ namespace deep_oj {
         SetupRootfs(work_dir);
 
         // -----------------------------------------------------
-        // 4.1 Prepare Mount Points & Permissions
-        // Important: Perform mkdir and chmod BEFORE remounting root as Read-Only
+        // 4.1 准备挂载点与权限
+        // 重要：必须在将根目录重新挂载为只读前完成 mkdir/chmod。
         // -----------------------------------------------------
-        // 4.1 Prepare Mount Points & Permissions
-        // Important: Perform mkdir and chmod BEFORE remounting root as Read-Only
-        // -----------------------------------------------------
-        // Provide mount points for /tmp and /proc
+        // 为 /tmp 与 /proc 提供挂载点
         if (mkdir("/tmp", 01777) == -1 && errno != EEXIST) _exit(ERR_MOUNT_TMP);
         if (mkdir("/proc", 0755) == -1 && errno != EEXIST) _exit(ERR_MOUNT_PROC);
         
-        // [Security Fix] Lock down the root directory permissions.
-        // Change mode to 0555 (r-xr-xr-x) so nobody cannot write to /
+        // 安全修复：锁定根目录权限，改为 0555，禁止写入 /
         if (chmod("/", 0555) == -1) {
-            _exit(ERR_CHDIR_FAILED); // Fail safe
+            _exit(ERR_CHDIR_FAILED); // 失败即退出，保证安全
         }
 
-        // ----------------------------------------------------------------------------------
-        // [Critical Security] Make the root filesystem strictly Read-Only NOW.
-        // This is done ASAP to minimize the RW window.
-        // ----------------------------------------------------------------------------------
+        // 关键安全步骤：立刻将根文件系统改为只读，尽量缩短可写窗口。
         if (mount(nullptr, "/", nullptr, MS_REMOUNT | MS_BIND | MS_RDONLY, nullptr) == -1) {
             _exit(ERR_REMOUNT_RO);
         }
 
         // -----------------------------------------------------
-        // 4.2 Mount Runtime filesystems (On top of RO Root)
+        // 4.2 挂载运行时文件系统（覆盖在只读根之上）
         // -----------------------------------------------------
-        // 1. /tmp (RW tmpfs) - configurable size
+        // 1. /tmp（可写 tmpfs）- 大小可配置
         char tmpfs_opts[64];
         long long run_tmpfs_mb = g_runner_config.run_tmpfs_size_mb > 0 ? g_runner_config.run_tmpfs_size_mb : 64;
         snprintf(tmpfs_opts, sizeof(tmpfs_opts), "size=%lldm,mode=1777", run_tmpfs_mb);
         if (mount("tmpfs", "/tmp", "tmpfs", 0, tmpfs_opts) == -1) _exit(ERR_MOUNT_TMP);
 
-        // 2. /proc (RO)
+        // 2. /proc（只读）
         if (mount("proc", "/proc", "proc", 0, nullptr) == -1) _exit(ERR_MOUNT_PROC);
         if (mount("proc", "/proc", "proc", MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV, nullptr) == -1) 
             _exit(ERR_MOUNT_PROC);

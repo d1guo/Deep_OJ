@@ -5,7 +5,6 @@
  * 架构定位: I/O 密集层
  * 技术选型: Gin Framework + PostgreSQL + Redis
  *
- * 面试八股知识点
  *
  * 1. 为什么选择 Gin?
  *    - 高性能: 基于 httprouter，性能是 net/http 的 40 倍
@@ -76,7 +75,7 @@ func getEnvBool(key string, fallback bool) bool {
 func configureTrustedProxies(r *gin.Engine) error {
 	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
 	if raw == "" {
-		// Safe default: trust no proxy headers, ClientIP uses RemoteAddr.
+		// 安全默认值：不信任代理头，ClientIP 使用 RemoteAddr。
 		return r.SetTrustedProxies(nil)
 	}
 	parts := strings.Split(raw, ",")
@@ -94,14 +93,14 @@ func configureTrustedProxies(r *gin.Engine) error {
 func main() {
 	cfg, cfgPath, err := appconfig.Load()
 	if err != nil {
-		slog.Error("Failed to load config", "path", cfgPath, "error", err)
+		slog.Error("加载配置失败", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
 	if cfgPath != "" {
-		slog.Info("Loaded config", "path", cfgPath)
+		slog.Info("已加载配置", "path", cfgPath)
 	}
 	if cfg != nil {
-		// Apply config file values as in-process defaults. Runtime reads from env.
+		// 将配置文件值写入进程内默认环境变量，运行时仍从环境变量读取。
 		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfg.Redis.PoolSize)
 		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfg.Redis.MinIdleConns)
 		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfg.Redis.DialTimeoutMs)
@@ -162,7 +161,7 @@ func main() {
 	// 1. 初始化配置 (从环境变量读取)
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		slog.Error("DATABASE_URL must be set")
+		slog.Error("必须设置 DATABASE_URL")
 		os.Exit(1)
 	}
 
@@ -181,19 +180,19 @@ func main() {
 
 	db, err := repository.NewPostgresDB(ctx, dbURL)
 	if err != nil {
-		slog.Error("Failed to connect to PostgreSQL", "error", err)
+		slog.Error("连接 PostgreSQL 失败", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	slog.Info("Connected to PostgreSQL")
+	slog.Info("已连接 PostgreSQL")
 
 	// 3. 初始化 Redis 连接
 	redisClient := repository.NewRedisClient(redisURL)
 	if err := redisClient.Ping(ctx); err != nil {
-		slog.Error("Failed to connect to Redis", "error", err)
+		slog.Error("连接 Redis 失败", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Connected to Redis")
+	slog.Info("已连接 Redis")
 
 	// 4. 创建 Handler 和路由
 
@@ -204,12 +203,12 @@ func main() {
 	}
 	minioAccessKey := os.Getenv("MINIO_ACCESS_KEY")
 	if minioAccessKey == "" {
-		slog.Error("MINIO_ACCESS_KEY must be set")
+		slog.Error("必须设置 MINIO_ACCESS_KEY")
 		os.Exit(1)
 	}
 	minioSecretKey := os.Getenv("MINIO_SECRET_KEY")
 	if minioSecretKey == "" {
-		slog.Error("MINIO_SECRET_KEY must be set")
+		slog.Error("必须设置 MINIO_SECRET_KEY")
 		os.Exit(1)
 	}
 	minioBucket := os.Getenv("MINIO_BUCKET")
@@ -219,10 +218,10 @@ func main() {
 
 	minioClient, err := repository.NewMinIOClient(minioEndpoint, minioAccessKey, minioSecretKey, minioBucket)
 	if err != nil {
-		slog.Error("Failed to connect to MinIO", "error", err)
+		slog.Error("连接 MinIO 失败", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Connected to MinIO")
+	slog.Info("已连接 MinIO")
 
 	// 4. 创建 Handler 和路由
 	handler := api.NewHandler(db, redisClient, minioClient)
@@ -233,7 +232,7 @@ func main() {
 		outboxCancel = cancel
 		dispatcher := api.NewOutboxDispatcher(db, redisClient, slog.With("component", "api_outbox_dispatcher"))
 		go dispatcher.Run(outboxCtx)
-		slog.Info("Outbox dispatcher started")
+		slog.Info("Outbox 分发器已启动")
 	}
 
 	// Gin 模式设置
@@ -243,16 +242,16 @@ func main() {
 
 	r := gin.Default()
 	if err := configureTrustedProxies(r); err != nil {
-		slog.Error("Failed to configure trusted proxies", "error", err)
+		slog.Error("配置受信代理失败", "error", err)
 		os.Exit(1)
 	}
 
 	// 中间件
 	r.Use(api.CORSMiddleware())
 	r.Use(api.RequestIDMiddleware())
-	r.Use(api.MetricsMiddleware()) // [Task 3.3] Metrics
+	r.Use(api.MetricsMiddleware()) // 指标采集中间件
 
-	// Metrics endpoint
+	// 指标端点
 	r.GET("/metrics", api.MetricsAccessMiddleware(), gin.WrapH(promhttp.Handler()))
 
 	// API 路由
@@ -264,7 +263,7 @@ func main() {
 			auth.POST("/register", handler.Register)
 			auth.POST("/login", handler.Login)
 
-			// OAuth 2.0 (GitHub)
+			// OAuth 2.0（GitHub）
 			auth.GET("/github/login", handler.HandleGitHubLogin)
 			auth.GET("/github/callback", handler.HandleGitHubCallback)
 		}
@@ -290,7 +289,7 @@ func main() {
 		})
 	}
 
-	// 5. 优雅关闭 (Graceful Shutdown)
+	// 5. 优雅关闭
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           r,
@@ -302,9 +301,9 @@ func main() {
 
 	// 启动服务器 (在 Goroutine 中)
 	go func() {
-		slog.Info("API Server starting", "port", port)
+		slog.Info("API 服务启动中", "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Server error", "error", err)
+			slog.Error("服务异常", "error", err)
 			os.Exit(1)
 		}
 	}()
@@ -314,7 +313,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	slog.Info("Shutting down server...")
+	slog.Info("服务正在关闭...")
 
 	// 给请求 5 秒时间完成
 	shutdownSec := getEnvInt("API_SHUTDOWN_TIMEOUT_SEC", 5)
@@ -325,9 +324,9 @@ func main() {
 	}
 
 	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("Server forced to shutdown", "error", err)
+		slog.Error("服务被强制关闭", "error", err)
 		os.Exit(1)
 	}
 
-	slog.Info("Server exited")
+	slog.Info("服务已退出")
 }

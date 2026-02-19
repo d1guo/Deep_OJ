@@ -25,7 +25,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m' # 无颜色
 
 # 目录配置
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -56,11 +56,11 @@ init() {
     elif command -v clang++ &> /dev/null; then
         CXX="clang++"
     else
-        echo -e "${RED}❌ C++ 编译器未找到${NC}"
+        echo -e "${RED} C++ 编译器未找到${NC}"
         exit 1
     fi
     
-    echo -e "${GREEN}✅ 测试环境初始化完成${NC}"
+    echo -e "${GREEN} 测试环境初始化完成${NC}"
     echo -e "   编译器: $CXX"
     echo -e "   工作目录: $WORKSPACE"
     echo ""
@@ -108,11 +108,11 @@ check_result() {
     
     if [ "$expected" = "$actual" ]; then
         PASSED=$((PASSED + 1))
-        echo -e "${GREEN}✅ PASS${NC}: $name"
+        echo -e "${GREEN} 通过${NC}: $name"
         echo -e "   预期: $expected, 实际: $actual"
     else
         FAILED=$((FAILED + 1))
-        echo -e "${RED}❌ FAIL${NC}: $name"
+        echo -e "${RED} 失败${NC}: $name"
         echo -e "   预期: $expected, 实际: $actual"
         if [ -n "$details" ]; then
             echo -e "   详情: $details"
@@ -128,16 +128,14 @@ check_warn() {
     
     TOTAL=$((TOTAL + 1))
     WARNED=$((WARNED + 1))
-    echo -e "${YELLOW}⚠️ WARN${NC}: $name"
+    echo -e "${YELLOW}警告${NC}: $name"
     echo -e "   $msg"
     if [ -n "$details" ]; then
         echo -e "   详情: $details"
     fi
 }
 
-# ============================
 # 测试: 编译错误 (CE)
-# ============================
 test_compile_error() {
     echo -e "\n${YELLOW}=== 编译错误测试 (CE) ===${NC}"
     
@@ -153,9 +151,7 @@ test_compile_error() {
     done
 }
 
-# ============================
 # 测试: 正确答案 (AC)
-# ============================
 test_accepted() {
     echo -e "\n${YELLOW}=== 正确答案测试 (AC) ===${NC}"
     
@@ -190,9 +186,7 @@ test_accepted() {
     done
 }
 
-# ============================
 # 测试: 超时 (TLE)
-# ============================
 test_time_limit() {
     echo -e "\n${YELLOW}=== 超时测试 (TLE) ===${NC}"
     
@@ -219,9 +213,7 @@ test_time_limit() {
     done
 }
 
-# ============================
 # 测试: 内存超限 (MLE)
-# ============================
 test_memory_limit() {
     echo -e "\n${YELLOW}=== 内存超限测试 (MLE) ===${NC}"
     echo -e "${CYAN}   注: 内存超限会导致进程被 OOM Killer 终止 (exit ≠ 0)，这是预期行为${NC}"
@@ -246,9 +238,7 @@ test_memory_limit() {
     done
 }
 
-# ============================
 # 测试: 运行时错误 (RE)
-# ============================
 test_runtime_error() {
     echo -e "\n${YELLOW}=== 运行时错误测试 (RE) ===${NC}"
     
@@ -271,9 +261,7 @@ test_runtime_error() {
     done
 }
 
-# ============================
 # 测试: 安全测试
-# ============================
 test_security() {
     echo -e "\n${YELLOW}=== 安全测试 ===${NC}"
     echo -e "${CYAN}   注: 安全测试在沙箱外运行，部分攻击会'成功'，这是预期行为${NC}"
@@ -394,21 +382,19 @@ test_security() {
     done
 }
 
-# ============================
 # 测试: Cgroups v2 验证
-# ============================
 test_cgroups() {
     echo -e "\n${YELLOW}=== Cgroups v2 验证 ===${NC}"
     
     # 检查 cgroups v2 是否挂载
     if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-        echo -e "${GREEN}✅ Cgroups v2 已挂载${NC}"
+        echo -e "${GREEN} Cgroups v2 已挂载${NC}"
         echo -e "   可用控制器: $(cat /sys/fs/cgroup/cgroup.controllers)"
         
         TOTAL=$((TOTAL + 1))
         PASSED=$((PASSED + 1))
     else
-        echo -e "${YELLOW}⚠️ Cgroups v2 未挂载或使用 v1${NC}"
+        echo -e "${YELLOW}Cgroups v2 未挂载或使用 v1${NC}"
         TOTAL=$((TOTAL + 1))
         WARNED=$((WARNED + 1))
     fi
@@ -418,10 +404,10 @@ test_cgroups() {
         TOTAL=$((TOTAL + 1))
         if [ -f /sys/fs/cgroup/cgroup.controllers ] && grep -q "$controller" /sys/fs/cgroup/cgroup.controllers; then
             PASSED=$((PASSED + 1))
-            echo -e "${GREEN}✅ $controller 控制器可用${NC}"
+            echo -e "${GREEN} $controller 控制器可用${NC}"
         else
             WARNED=$((WARNED + 1))
-            echo -e "${YELLOW}⚠️ $controller 控制器未找到 (可能需要 Docker 容器内运行)${NC}"
+            echo -e "${YELLOW}$controller 控制器未找到 (可能需要 Docker 容器内运行)${NC}"
         fi
     done
 }
@@ -441,12 +427,12 @@ print_summary() {
     echo ""
     
     if [ $FAILED -eq 0 ]; then
-        echo -e "${GREEN}🎉 所有测试通过!${NC}"
+        echo -e "${GREEN} 所有测试通过!${NC}"
         if [ $WARNED -gt 0 ]; then
             echo -e "${YELLOW}   (部分安全测试需在沙箱内验证完整效果)${NC}"
         fi
     else
-        echo -e "${RED}⚠️ 有 $FAILED 个测试失败，请检查日志${NC}"
+        echo -e "${RED}有 $FAILED 个测试失败，请检查日志${NC}"
     fi
 }
 

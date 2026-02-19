@@ -18,16 +18,16 @@ func main() {
 	for name, addr := range services {
 		conn, err := net.DialTimeout("tcp", addr, 1*time.Second)
 		if err != nil {
-			fmt.Printf("❌ %s is NOT reachable at %s (%v)\n", name, addr, err)
+			fmt.Printf("%s 在 %s 不可达（%v）\n", name, addr, err)
 			allGood = false
 		} else {
 			conn.Close()
-			fmt.Printf("✅ %s is reachable at %s\n", name, addr)
+			fmt.Printf("%s 在 %s 可达\n", name, addr)
 		}
 	}
 
 	if !allGood {
 		os.Exit(1)
 	}
-	fmt.Println("🎉 All dependencies are ready!")
+	fmt.Println("所有依赖均已就绪。")
 }

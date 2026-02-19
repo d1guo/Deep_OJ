@@ -24,16 +24,6 @@ namespace deep_oj {
  * - pids.max: 限制进程数，防止 Fork 炸弹
  * - memory.max: 限制内存使用量，防止内存耗尽
  * - memory.swap.max = 0: 禁用 Swap，防止绕过内存限制
- * 
- * 面试八股:
- * Q: 为什么不用 setrlimit(RLIMIT_NPROC)?
- * A: RLIMIT_NPROC 是 per-user 限制，恶意代码可以通过多线程绕过。
- *    Cgroups v2 的 pids.max 是硬限制，对整个 cgroup 内所有进程生效。
- * 
- * Q: 为什么禁用 Swap?
- * A: 如果允许 Swap，程序可以分配超过物理内存限制的内存，
- *    通过不断触发 page fault 来拖慢系统。禁用 Swap 使 OOM Killer
- *    能够及时终止超限进程。
  */
 class CgroupManager {
 public:
@@ -45,20 +35,18 @@ public:
     CgroupManager(const std::string& cgroup_root, const std::string& job_id);
     
     /**
-     * @brief 析构函数 - RAII 自动清理
+     * @brief 析构函数 - 自动清理资源
      * 
-     * RAII (Resource Acquisition Is Initialization):
-     * 资源获取即初始化，资源释放在析构函数中自动完成。
-     * 这确保了即使发生异常，cgroup 也会被正确清理。
+     * 资源在析构函数中自动释放，确保异常场景下也能正确清理 cgroup。
      */
     ~CgroupManager();
     
-    // 禁止拷贝 (Rule of Three/Five)
+    // 禁止拷贝
     // 因为我们管理着文件系统资源，拷贝会导致重复释放
     CgroupManager(const CgroupManager&) = delete;
     CgroupManager& operator=(const CgroupManager&) = delete;
     
-    // 允许移动 (C++11 Move Semantics)
+    // 允许移动
     CgroupManager(CgroupManager&& other) noexcept;
     CgroupManager& operator=(CgroupManager&& other) noexcept;
     

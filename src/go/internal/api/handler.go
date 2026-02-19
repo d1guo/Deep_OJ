@@ -91,7 +91,7 @@ func (h *Handler) checkRateLimit(ctx *gin.Context, ip string, userID int) bool {
 func (h *Handler) consumeRateLimit(ctx *gin.Context, key string, limit int, window time.Duration) bool {
 	count, err := h.redis.Incr(ctx, key)
 	if err != nil {
-		slog.Error("RateLimit Redis Error", "error", err)
+		slog.Error("限流 Redis 异常", "error", err)
 		return true // 降级: 放行
 	}
 	if count == 1 {
@@ -329,7 +329,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		enqueueFn := func() error {
 			streamEntryID, ok := enqueueJobToStreamOrReply5xx(c, h.redis, logger, jobID, traceID, inflightKey, taskData)
 			if !ok {
-				return fmt.Errorf("stream enqueue failed")
+				return fmt.Errorf("流入队失败")
 			}
 			logger.Info("任务提交成功", "stream_entry_id", streamEntryID)
 			return nil
@@ -418,7 +418,7 @@ func (h *Handler) HandleStatus(c *gin.Context) {
 	if err == nil && result != "" {
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(result), &data); err != nil {
-			slog.Warn("缓存反序列化失败，回退到 DB", "job_id", jobID, "error", err)
+			slog.Warn("缓存反序列化失败，回退到数据库", "job_id", jobID, "error", err)
 			_ = h.redis.Del(ctx, resultKey)
 		} else {
 			c.JSON(http.StatusOK, gin.H{

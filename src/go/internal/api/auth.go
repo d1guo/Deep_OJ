@@ -40,7 +40,7 @@ func getJWTSecret() []byte {
 	if len(jwtSecret) == 0 {
 		secret := os.Getenv("JWT_SECRET")
 		if secret == "" {
-			slog.Error("JWT_SECRET must be set")
+			slog.Error("必须设置 JWT_SECRET")
 			os.Exit(1)
 		}
 		jwtSecret = []byte(secret)
@@ -143,8 +143,8 @@ func (h *Handler) Login(c *gin.Context) {
 	// 3. 生成 JWT
 	token, err := generateToken(user.ID, user.Username)
 	if err != nil {
-		slog.Error("Token 生成失败", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token 生成失败"})
+		slog.Error("令牌生成失败", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "令牌生成失败"})
 		return
 	}
 
@@ -165,7 +165,7 @@ func generateToken(userID int64, username string) (string, error) {
 	return token.SignedString(getJWTSecret())
 }
 
-// Task 3.2: GitHub OAuth 2.0
+// 任务 3.2：GitHub OAuth 2.0
 
 var (
 	githubConfig   *oauth2.Config
@@ -257,7 +257,7 @@ func (h *Handler) HandleGitHubCallback(c *gin.Context) {
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(oauthStateCookieName, "", -1, "/", "", secure, true)
 	if err != nil || cookieState == "" || cookieState != state {
-		slog.Warn("OAuth state mismatch", "error", err)
+		slog.Warn("OAuth state 不匹配", "error", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "state 校验失败"})
 		return
 	}
@@ -287,7 +287,7 @@ func (h *Handler) HandleGitHubCallback(c *gin.Context) {
 		AvatarURL string `json:"avatar_url"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&ghUser); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse user info"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "解析用户信息失败"})
 		return
 	}
 

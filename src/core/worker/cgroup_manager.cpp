@@ -6,7 +6,6 @@
  * - DOMjudge runguard.cc (ICPC World Finals 使用)
  *   https://github.com/DOMjudge/domjudge/blob/main/judge/runguard.cc
  * 
- * 核心知识点 (面试必备):
  * 
  * 1. Cgroups v2 vs v1 的区别:
  *    - v1: 多层次结构，每个控制器有独立的层次
@@ -68,8 +67,8 @@ CgroupManager::CgroupManager(const std::string& root, const std::string& job_id)
 }
 
 CgroupManager::~CgroupManager() {
-    // RAII: 析构时自动清理资源
-    // 即使程序异常退出，也会调用析构函数 (stack unwinding)
+    // 析构时自动清理资源。
+    // 即使程序异常退出，也会执行栈展开并调用析构函数。
     if (created_) {
         Destroy();
     }
@@ -82,7 +81,7 @@ CgroupManager::CgroupManager(CgroupManager&& other) noexcept
     , cgroup_path_(std::move(other.cgroup_path_))
     , created_(other.created_)
 {
-    // 标记原对象为"已转移"，防止其析构时再次 Destroy
+    // 标记原对象已转移，防止析构时重复调用 Destroy。
     other.created_ = false;
 }
 
@@ -124,7 +123,7 @@ bool CgroupManager::EnsureParentReady() {
     if (!fs::exists(cgroup_root_, ec)) {
         // 创建根目录 (例如 /sys/fs/cgroup/deep_oj)
         if (!fs::create_directories(cgroup_root_, ec)) {
-            std::cerr << "[CgroupManager] Failed to create root dir: " 
+            std::cerr << "[CgroupManager] 创建根目录失败: "
                       << cgroup_root_ << std::endl;
             return false;
         }
@@ -150,8 +149,8 @@ bool CgroupManager::EnsureParentReady() {
     std::string parentControllers = ReadFromFile(parent_path.string() + "/cgroup.controllers");
     std::string enableParent = buildControllerEnableList(parentControllers);
     if (!enableParent.empty() && !WriteToFile(subtree_control, enableParent)) {
-         std::cerr << "[CgroupManager] Warning: Failed to enable controllers in " << subtree_control 
-                   << " (Assuming admin already enabled them)" << std::endl;
+         std::cerr << "[CgroupManager] 警告：在 " << subtree_control
+                   << " 启用控制器失败（可能已由管理员预先开启）" << std::endl;
     }
     
     // 4. 在我们的根目录也启用控制器 (为了让 job 子目录能用)
@@ -160,8 +159,8 @@ bool CgroupManager::EnsureParentReady() {
     std::string ourControllers = ReadFromFile(cgroup_root_ + "/cgroup.controllers");
     std::string enableOur = buildControllerEnableList(ourControllers);
     if (enableOur.empty() || !WriteToFile(our_subtree_control, enableOur)) {
-        std::cerr << "[CgroupManager] Error: Failed to enable controllers in " << our_subtree_control 
-                  << ". Please check ownership or delegation." << std::endl;
+        std::cerr << "[CgroupManager] 错误：在 " << our_subtree_control
+                  << " 启用控制器失败，请检查目录属主或委派配置。" << std::endl;
         return false;
     }
     
@@ -175,7 +174,7 @@ bool CgroupManager::Create() {
     
     // 1. 确保父目录准备好
     if (!EnsureParentReady()) {
-        std::cerr << "[CgroupManager] Failed to prepare parent directories" << std::endl;
+        std::cerr << "[CgroupManager] 准备父目录失败" << std::endl;
         return false;
     }
     
@@ -183,27 +182,27 @@ bool CgroupManager::Create() {
     std::error_code ec;
     if (!fs::create_directories(cgroup_path_, ec)) {
         if (ec) {
-            std::cerr << "[CgroupManager] Failed to create cgroup: " 
+            std::cerr << "[CgroupManager] 创建 cgroup 失败: "
                       << cgroup_path_ << " - " << ec.message() << std::endl;
             return false;
         }
     }
     
     created_ = true;
-    std::cerr << "[CgroupManager] Created cgroup: " << cgroup_path_ << std::endl;
+    std::cerr << "[CgroupManager] 已创建 cgroup: " << cgroup_path_ << std::endl;
     return true;
 }
 
 bool CgroupManager::SetMemoryLimit(uint64_t bytes, bool disable_swap) {
     if (!created_) {
-        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
     
     // 1. 设置 memory.max (硬限制)
-    // 超过此限制时，进程会被 OOM killer 终止
+    // 超过此限制时，进程会被 OOM Killer 终止。
     if (!WriteToFile(cgroup_path_ + "/memory.max", std::to_string(bytes))) {
-        std::cerr << "[CgroupManager] Failed to set memory.max" << std::endl;
+        std::cerr << "[CgroupManager] 设置 memory.max 失败" << std::endl;
         return false;
     }
     
@@ -214,14 +213,14 @@ bool CgroupManager::SetMemoryLimit(uint64_t bytes, bool disable_swap) {
         WriteToFile(cgroup_path_ + "/memory.swap.max", "0");
     }
     
-    std::cerr << "[CgroupManager] Set memory limit: " << bytes << " bytes" 
-              << (disable_swap ? ", swap disabled" : "") << std::endl;
+    std::cerr << "[CgroupManager] 内存限制已设置: " << bytes << " 字节"
+              << (disable_swap ? "，已禁用 swap" : "") << std::endl;
     return true;
 }
 
 bool CgroupManager::SetPidsLimit(int max_pids) {
     if (!created_) {
-        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
     
@@ -229,42 +228,42 @@ bool CgroupManager::SetPidsLimit(int max_pids) {
     // 这是防御 Fork 炸弹的关键
     // 推荐值: 20 (足够正常程序使用，但限制了 Fork 炸弹)
     if (!WriteToFile(cgroup_path_ + "/pids.max", std::to_string(max_pids))) {
-        std::cerr << "[CgroupManager] Failed to set pids.max" << std::endl;
+        std::cerr << "[CgroupManager] 设置 pids.max 失败" << std::endl;
         return false;
     }
     
-    std::cerr << "[CgroupManager] Set pids limit: " << max_pids << std::endl;
+    std::cerr << "[CgroupManager] 进程数限制已设置: " << max_pids << std::endl;
     return true;
 }
 
 bool CgroupManager::SetCPULimit(double max_cores) {
     if (!created_) {
-        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
     if (max_cores <= 0) {
-        std::cerr << "[CgroupManager] Invalid cpu core limit: " << max_cores << std::endl;
+        std::cerr << "[CgroupManager] 无效的 CPU 核数限制: " << max_cores << std::endl;
         return false;
     }
 
-    const long long period_us = 100000; // 100ms
+    const long long period_us = 100000; // 100 毫秒
     long long quota_us = static_cast<long long>(std::llround(max_cores * period_us));
     if (quota_us < 1000) quota_us = 1000;
     std::ostringstream value;
     value << quota_us << " " << period_us;
 
     if (!WriteToFile(cgroup_path_ + "/cpu.max", value.str())) {
-        std::cerr << "[CgroupManager] Failed to set cpu.max" << std::endl;
+        std::cerr << "[CgroupManager] 设置 cpu.max 失败" << std::endl;
         return false;
     }
 
-    std::cerr << "[CgroupManager] Set cpu.max quota=" << quota_us << " period=" << period_us << std::endl;
+    std::cerr << "[CgroupManager] cpu.max 已设置: quota=" << quota_us << " period=" << period_us << std::endl;
     return true;
 }
 
 bool CgroupManager::SetIOLimit(long long read_bps, long long write_bps, const std::string& target_path) {
     if (!created_) {
-        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
     if (read_bps <= 0 && write_bps <= 0) {
@@ -273,7 +272,7 @@ bool CgroupManager::SetIOLimit(long long read_bps, long long write_bps, const st
 
     struct stat st {};
     if (stat(target_path.c_str(), &st) != 0) {
-        std::cerr << "[CgroupManager] Failed to stat target path for io.max: " << target_path << std::endl;
+        std::cerr << "[CgroupManager] 获取 io.max 目标路径信息失败: " << target_path << std::endl;
         return false;
     }
     unsigned int maj = major(st.st_dev);
@@ -285,27 +284,27 @@ bool CgroupManager::SetIOLimit(long long read_bps, long long write_bps, const st
     if (write_bps > 0) value << " wbps=" << write_bps;
 
     if (!WriteToFile(cgroup_path_ + "/io.max", value.str())) {
-        std::cerr << "[CgroupManager] Failed to set io.max" << std::endl;
+        std::cerr << "[CgroupManager] 设置 io.max 失败" << std::endl;
         return false;
     }
-    std::cerr << "[CgroupManager] Set io.max for " << maj << ":" << min << std::endl;
+    std::cerr << "[CgroupManager] io.max 已设置，设备号 " << maj << ":" << min << std::endl;
     return true;
 }
 
 bool CgroupManager::AddProcess(pid_t pid) {
     if (!created_) {
-        std::cerr << "[CgroupManager] Cgroup not created" << std::endl;
+        std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
     
     // 向 cgroup.procs 写入 PID
     // 这会将进程移动到此 cgroup，并应用所有资源限制
     if (!WriteToFile(cgroup_path_ + "/cgroup.procs", std::to_string(pid))) {
-        std::cerr << "[CgroupManager] Failed to add process " << pid << std::endl;
+        std::cerr << "[CgroupManager] 添加进程失败，PID=" << pid << std::endl;
         return false;
     }
     
-    std::cerr << "[CgroupManager] Added process " << pid << " to cgroup" << std::endl;
+    std::cerr << "[CgroupManager] 已将进程 " << pid << " 加入 cgroup" << std::endl;
     return true;
 }
 
@@ -320,7 +319,7 @@ uint64_t CgroupManager::GetMemoryPeak() const {
         } catch (...) {}
     }
     
-    // Fallback: 使用 memory.current
+    // 回退：使用 memory.current
     return GetMemoryCurrent();
 }
 
@@ -354,14 +353,14 @@ void CgroupManager::KillAllProcesses() {
     }
     
     if (killed > 0) {
-        std::cerr << "[CgroupManager] Killed " << killed << " processes" << std::endl;
+        std::cerr << "[CgroupManager] 已终止进程数量: " << killed << std::endl;
     }
 }
 
 void CgroupManager::Destroy() {
     if (!created_) return;
     
-    std::cerr << "[CgroupManager] Destroying cgroup: " << cgroup_path_ << std::endl;
+    std::cerr << "[CgroupManager] 正在销毁 cgroup: " << cgroup_path_ << std::endl;
     
     // 1. 第一次杀死所有进程
     KillAllProcesses();
@@ -378,10 +377,10 @@ void CgroupManager::Destroy() {
     // rmdir 只对空的 cgroup 有效
     std::error_code ec;
     if (fs::remove(cgroup_path_, ec)) {
-        std::cerr << "[CgroupManager] Removed cgroup directory" << std::endl;
+        std::cerr << "[CgroupManager] 已删除 cgroup 目录" << std::endl;
     } else {
         // 可能还有子进程没有完全退出，再等一会
-        usleep(100000);  // 100ms
+        usleep(100000);  // 100 毫秒
         KillAllProcesses();
         usleep(50000);
         fs::remove(cgroup_path_, ec);
@@ -395,7 +394,7 @@ void CgroupManager::Destroy() {
 bool CgroupManager::WriteToFile(const std::string& path, const std::string& value) {
     std::ofstream ofs(path);
     if (!ofs) {
-        std::cerr << "[CgroupManager] Failed to open " << path << " for writing" << std::endl;
+        std::cerr << "[CgroupManager] 打开写入文件失败: " << path << std::endl;
         return false;
     }
     ofs << value;

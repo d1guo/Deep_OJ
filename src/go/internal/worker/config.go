@@ -69,10 +69,10 @@ func LoadConfig() *Config {
 		configPath = "config.yaml"
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			slog.Warn("Failed to read config.yaml", "error", err)
+			slog.Warn("读取 config.yaml 失败", "error", err)
 		} else {
 			if err := yaml.Unmarshal(data, &yamlCfg); err != nil {
-				slog.Warn("Failed to parse config.yaml", "error", err)
+				slog.Warn("解析 config.yaml 失败", "error", err)
 			}
 		}
 	} else {

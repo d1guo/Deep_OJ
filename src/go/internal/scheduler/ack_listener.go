@@ -18,16 +18,16 @@ import (
 
 // StartAckListener 启动 ACK 监听
 func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *repository.PostgresDB) {
-	slog.Info("Starting ACK listener for result stream...")
+	slog.Info("启动结果流 ACK 监听器...")
 
 	pendingCount := getEnvInt("ACK_PENDING_COUNT", 20)
 	pendingBlock := time.Duration(getEnvInt("ACK_PENDING_BLOCK_MS", 1000)) * time.Millisecond
 	newCount := getEnvInt("ACK_NEW_COUNT", 10)
 	newBlock := time.Duration(getEnvInt("ACK_NEW_BLOCK_MS", 5000)) * time.Millisecond
 
-	// Create consumer group (idempotent)
+	// 创建消费组（幂等）
 	if err := redis.XGroupCreateMkStream(ctx, common.ResultStream, common.ResultStreamGroup, "0"); err != nil {
-		slog.Error("Failed to create stream group", "error", err)
+		slog.Error("创建流消费组失败", "error", err)
 	}
 	consumer := os.Getenv("SCHEDULER_ID")
 	if consumer == "" {
@@ -53,7 +53,7 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 				if handleTaskCompletion(ctx, jobID, resultJSON, redis, db) {
 					_ = redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
 				} else {
-					slog.Warn("Result processing failed, keep pending", "job_id", jobID, "id", msg.ID)
+					slog.Warn("结果处理失败，保留在待确认队列", "job_id", jobID, "id", msg.ID)
 				}
 			}
 		}
@@ -74,7 +74,7 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 			Block:    newBlock,
 		})
 		if err != nil {
-			slog.Error("XReadGroup failed", "error", err)
+			slog.Error("XReadGroup 失败", "error", err)
 			continue
 		}
 		if len(streams) == 0 {
@@ -86,18 +86,18 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 				jobID, _ := msg.Values["job_id"].(string)
 				resultJSON, _ := msg.Values["result"].(string)
 				if jobID == "" {
-					slog.Warn("Stream message missing job_id", "id", msg.ID)
+					slog.Warn("流消息缺少 job_id", "id", msg.ID)
 					_ = redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
 					continue
 				}
-				slog.Debug("Received task result", "job_id", jobID)
+				slog.Debug("收到任务结果", "job_id", jobID)
 
 				if handleTaskCompletion(ctx, jobID, resultJSON, redis, db) {
 					if err := redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID); err != nil {
-						slog.Error("XAck failed", "job_id", jobID, "error", err)
+						slog.Error("XAck 失败", "job_id", jobID, "error", err)
 					}
 				} else {
-					slog.Warn("Result processing failed, keep pending", "job_id", jobID, "id", msg.ID)
+					slog.Warn("结果处理失败，保留在待确认队列", "job_id", jobID, "id", msg.ID)
 				}
 			}
 		}
@@ -119,9 +119,9 @@ func handleTaskCompletion(ctx context.Context, jobID, resultJSON string, redis *
 	// 2. 从队列移除
 	if rawItem != "" {
 		if err := redis.LRem(ctx, common.QueueProcessing, 1, rawItem); err != nil {
-			slog.Error("Failed to remove task from processing queue", "job_id", jobID, "error", err)
+			slog.Error("从 processing 队列移除任务失败", "job_id", jobID, "error", err)
 		} else {
-			slog.Debug("Removed task from processing queue", "job_id", jobID)
+			slog.Debug("已从 processing 队列移除任务", "job_id", jobID)
 		}
 	}
 
@@ -141,12 +141,12 @@ func handleTaskCompletion(ctx context.Context, jobID, resultJSON string, redis *
 }
 
 func processResult(ctx context.Context, jobID string, resultJSON string, redis *repository.RedisClient, db *repository.PostgresDB) bool {
-	// 1. 从 Redis 读取结果 (fallback if stream result empty)
+	// 1. 从 Redis 读取结果（当流中 result 为空时回退）。
 	if resultJSON == "" {
 		resultKey := common.ResultKeyPrefix + jobID
 		val, err := redis.Get(ctx, resultKey)
 		if err != nil || val == "" {
-			slog.Error("Result not found in Redis", "job_id", jobID, "error", err)
+			slog.Error("在 Redis 中未找到结果", "job_id", jobID, "error", err)
 			return false
 		}
 		resultJSON = val
@@ -155,37 +155,37 @@ func processResult(ctx context.Context, jobID string, resultJSON string, redis *
 	// 2. 解析结果
 	var result map[string]interface{}
 	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-		slog.Error("Failed to parse result JSON", "job_id", jobID, "error", err)
+		slog.Error("解析结果 JSON 失败", "job_id", jobID, "error", err)
 		return false
 	}
 
-	status, _ := result["status"].(string)     // "Accepted", "Wrong Answer", etc.
-	language, _ := result["language"].(string) // [New] Read from Worker result
+	status, _ := result["status"].(string)     // 例如 "Accepted"、"Wrong Answer"
+	language, _ := result["language"].(string) // 从工作节点结果读取语言
 	if language == "" {
-		language = "unknown"
+		language = "未知"
 	}
 
 	traceID, _ := result["trace_id"].(string)
 	cacheKey, _ := result["cache_key"].(string)
 
-	// [Task 3.3] 更新业务指标
+	// 更新业务指标
 	submissionResultTotal.WithLabelValues(status, language).Inc()
 
 	// 3. 更新 PostgreSQL (幂等: 仅在未完成时更新)
 	latency, updated, err := db.UpdateSubmissionResultIfNotDone(ctx, jobID, status, result)
 	if err != nil {
-		slog.Error("Failed to update submission in DB", "job_id", jobID, "error", err)
+		slog.Error("更新数据库提交结果失败", "job_id", jobID, "error", err)
 		return false
 	}
 	if !updated {
-		slog.Warn("Duplicate result ignored (already done)", "job_id", jobID)
+		slog.Warn("重复结果已忽略（已完成）", "job_id", jobID)
 		return true
 	}
 
-	// [Metrics] Record Latency
+	// 记录耗时指标
 	schedulerJobLatency.Observe(latency)
 
-	slog.Info("Job finished and synced to DB",
+	slog.Info("任务完成并已同步到数据库",
 		"job_id", jobID,
 		"status", status,
 		"lang", language,

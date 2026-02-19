@@ -87,11 +87,11 @@ func buildRedisOptions(addr string) *redis.Options {
 func main() {
 	cfgFile, cfgPath, err := appconfig.Load()
 	if err != nil {
-		slog.Error("Failed to load config", "path", cfgPath, "error", err)
+		slog.Error("加载配置失败", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
 	if cfgPath != "" {
-		slog.Info("Loaded config", "path", cfgPath)
+		slog.Info("已加载配置", "path", cfgPath)
 	}
 	if cfgFile != nil {
 		// Apply config file values as in-process defaults. Runtime reads from env via LoadConfig().
@@ -164,56 +164,56 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_GRACE_SEC", wcfg.Stream.ReclaimGraceSec)
 	}
 
-	// 1. Config
+	// 1. 配置
 	cfg := worker.LoadConfig()
-	slog.Info("Worker starting", "id", cfg.WorkerID, "addr", cfg.WorkerAddr, "bin", cfg.JudgerBin)
+	slog.Info("工作节点启动中", "id", cfg.WorkerID, "addr", cfg.WorkerAddr, "bin", cfg.JudgerBin)
 
 	if getEnvBool("REQUIRE_CGROUPS_V2", false) {
 		if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
-			slog.Error("Cgroups v2 not available, aborting (REQUIRE_CGROUPS_V2=1)", "error", err)
+			slog.Error("Cgroups v2 不可用，按 REQUIRE_CGROUPS_V2=1 配置退出", "error", err)
 			os.Exit(1)
 		}
 	}
 
-	// 1.5 Start Metrics Server (Worker uses 9092)
+	// 1.5 启动指标服务（Worker 默认使用 9092）
 	worker.InitMetrics()
 	metricsPort := getEnvInt("WORKER_METRICS_PORT", 9092)
 	observability.StartMetricsServer(fmt.Sprintf(":%d", metricsPort))
 
-	// 2. Dependencies
+	// 2. 依赖初始化
 	exec := worker.NewExecutor(cfg.JudgerBin)
-	slog.Info("Initializing TestCaseManager...")
+	slog.Info("初始化测试用例管理器...")
 	tcMgr, err := worker.NewTestCaseManager(cfg)
 	if err != nil {
-		slog.Error("Failed to init tcMgr", "error", err)
+		slog.Error("初始化测试用例管理器失败", "error", err)
 		os.Exit(1)
 	}
 
-	slog.Info("Connecting to Redis", "addr", cfg.RedisURL)
+	slog.Info("正在连接 Redis", "addr", cfg.RedisURL)
 	rdb := redis.NewClient(buildRedisOptions(cfg.RedisURL))
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		slog.Error("Failed to connect to Redis", "error", err)
+		slog.Error("连接 Redis 失败", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("Connected to Redis")
+	slog.Info("已连接 Redis")
 
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
-		slog.Error("DATABASE_URL must be set for stream consumer")
+		slog.Error("流消费器必须设置 DATABASE_URL")
 		os.Exit(1)
 	}
-	slog.Info("Connecting to PostgreSQL for stream consumer")
+	slog.Info("流消费器正在连接 PostgreSQL")
 	db, err := repository.NewPostgresDB(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		slog.Error("Failed to connect to PostgreSQL", "error", err)
+		slog.Error("连接 PostgreSQL 失败", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	slog.Info("Connected to PostgreSQL")
+	slog.Info("已连接 PostgreSQL")
 
-	// 3. gRPC Server
+	// 3. gRPC 服务
 	lis, err := net.Listen("tcp", cfg.WorkerAddr)
 	if err != nil {
-		slog.Error("Failed to listen", "error", err)
+		slog.Error("监听端口失败", "error", err)
 		os.Exit(1)
 	}
 
@@ -223,7 +223,7 @@ func main() {
 
 	workerAuthToken := strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN"))
 	if workerAuthToken == "" && !getEnvBool("ALLOW_INSECURE_WORKER_GRPC", false) {
-		slog.Error("WORKER_AUTH_TOKEN must be set unless ALLOW_INSECURE_WORKER_GRPC=true")
+		slog.Error("除非 ALLOW_INSECURE_WORKER_GRPC=true，否则必须设置 WORKER_AUTH_TOKEN")
 		os.Exit(1)
 	}
 	if workerAuthToken != "" {
@@ -231,7 +231,7 @@ func main() {
 	}
 
 	if opt, err := loadServerTLS(); err != nil {
-		slog.Error("Failed to load TLS", "error", err)
+		slog.Error("加载 TLS 失败", "error", err)
 		os.Exit(1)
 	} else if opt != nil {
 		serverOpts = append(serverOpts, opt)
@@ -248,18 +248,18 @@ func main() {
 	go func() {
 		defer streamWG.Done()
 		if err := streamConsumer.Run(streamCtx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("Worker stream consumer exited with error", "error", err)
+			slog.Error("工作节点流消费器异常退出", "error", err)
 		}
 	}()
 
-	// 4. Etcd Registration
+	// 4. Etcd 注册
 	dialMs := getEnvInt("ETCD_DIAL_TIMEOUT_MS", 5000)
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   cfg.EtcdEndpoints,
 		DialTimeout: time.Duration(dialMs) * time.Millisecond,
 	})
 	if err != nil {
-		slog.Error("Failed to connect to etcd", "error", err)
+		slog.Error("连接 etcd 失败", "error", err)
 		os.Exit(1)
 	}
 	defer cli.Close()
@@ -272,34 +272,34 @@ func main() {
 	defer cancelReg()
 	leaseID, keepAliveCh, err := registerWorkerWithLease(regCtx, cli, key, val, leaseTTL)
 	if err != nil {
-		slog.Error("Initial worker register failed", "error", err)
+		slog.Error("首次注册工作节点失败", "error", err)
 		os.Exit(1)
 	}
 	go maintainWorkerRegistration(regCtx, cli, key, val, leaseTTL, leaseID, keepAliveCh)
 
-	slog.Info("Worker registered", "key", key, "lease_id", leaseID)
+	slog.Info("工作节点已注册", "key", key, "lease_id", leaseID)
 
-	// 5. Start
+	// 5. 启动服务
 	go func() {
-		slog.Info("gRPC server listening", "addr", lis.Addr())
+		slog.Info("gRPC 服务监听中", "addr", lis.Addr())
 		if err := grpcServer.Serve(lis); err != nil {
-			slog.Error("failed to serve", "error", err)
+			slog.Error("服务运行失败", "error", err)
 			os.Exit(1)
 		}
 	}()
 
-	// Graceful Shutdown
+	// 优雅关闭
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	slog.Info("Shutting down...")
+	slog.Info("正在关闭...")
 	cancelReg()
 	cancelStream()
 	streamWG.Wait()
 	grpcServer.GracefulStop()
 	_, _ = cli.Delete(context.Background(), key)
-	slog.Info("Worker exited")
+	slog.Info("工作节点已退出")
 }
 
 func loadServerTLS() (grpc.ServerOption, error) {
@@ -368,7 +368,7 @@ func maintainWorkerRegistration(
 			if ok {
 				continue
 			}
-			slog.Warn("Etcd keepalive channel closed, attempting to re-register", "lease_id", currentLeaseID)
+			slog.Warn("Etcd 保活通道已关闭，尝试重新注册", "lease_id", currentLeaseID)
 			for {
 				select {
 				case <-ctx.Done():
@@ -377,13 +377,13 @@ func maintainWorkerRegistration(
 				}
 				newLeaseID, newCh, err := registerWorkerWithLease(ctx, cli, key, val, leaseTTL)
 				if err != nil {
-					slog.Error("Worker re-register failed", "error", err)
+					slog.Error("工作节点重新注册失败", "error", err)
 					time.Sleep(time.Second)
 					continue
 				}
 				currentLeaseID = newLeaseID
 				currentCh = newCh
-				slog.Info("Worker re-registered to etcd", "lease_id", currentLeaseID)
+				slog.Info("工作节点已重新注册到 etcd", "lease_id", currentLeaseID)
 				break
 			}
 		}

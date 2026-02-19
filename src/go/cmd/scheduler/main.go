@@ -5,7 +5,6 @@
  * 架构定位: 任务调度层
  * 技术选型: Etcd (服务发现) + gRPC (Worker 通信) + Redis (任务队列)
  *
- * 面试八股知识点
  *
  * 1. Etcd 服务发现 vs 传统配置:
  *    - 传统: 硬编码 Worker 地址，重启才能更新
@@ -66,11 +65,11 @@ func getEnvInt(key string, fallback int) int {
 func main() {
 	cfg, cfgPath, err := appconfig.Load()
 	if err != nil {
-		slog.Error("Failed to load config", "path", cfgPath, "error", err)
+		slog.Error("加载配置失败", "path", cfgPath, "error", err)
 		os.Exit(1)
 	}
 	if cfgPath != "" {
-		slog.Info("Loaded config", "path", cfgPath)
+		slog.Info("已加载配置", "path", cfgPath)
 	}
 	if cfg != nil {
 		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfg.Redis.PoolSize)
@@ -145,7 +144,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		slog.Info("🛑 Received shutdown signal...")
+		slog.Info("收到退出信号，准备关闭")
 		cancel()
 	}()
 
@@ -153,11 +152,11 @@ func main() {
 	endpoints := strings.Split(etcdEndpoints, ",")
 	discovery, err := scheduler.NewEtcdDiscovery(endpoints)
 	if err != nil {
-		slog.Error("❌ Failed to connect to Etcd", "error", err)
+		slog.Error("连接 Etcd 失败", "error", err)
 		os.Exit(1)
 	}
 	defer discovery.Close()
-	slog.Info("✅ Connected to Etcd")
+	slog.Info("已连接 Etcd")
 
 	// 启动 Worker 监听
 	go discovery.WatchWorkers(ctx)
@@ -165,57 +164,56 @@ func main() {
 	// 4. 初始化 Redis 客户端
 	redisClient := repository.NewRedisClient(redisURL)
 	if err := redisClient.Ping(ctx); err != nil {
-		slog.Error("❌ Failed to connect to Redis", "error", err)
+		slog.Error("连接 Redis 失败", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("✅ Connected to Redis")
+	slog.Info("已连接 Redis")
 
 	// 4.5 初始化 PostgreSQL (用于 ACK 回调更新状态)
 	postgresURL := os.Getenv("DATABASE_URL")
 	if postgresURL == "" {
-		slog.Error("❌ DATABASE_URL must be set")
+		slog.Error("必须设置 DATABASE_URL")
 		os.Exit(1)
 	}
 	db, err := repository.NewPostgresDB(ctx, postgresURL)
 	if err != nil {
-		slog.Error("❌ Failed to connect to PostgreSQL", "error", err)
+		slog.Error("连接 PostgreSQL 失败", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	slog.Info("✅ Connected to PostgreSQL")
+	slog.Info("已连接 PostgreSQL")
 
 	// 启动 ACK 监听器
 	go scheduler.StartAckListener(ctx, redisClient, db)
 
-	// 6. [Task 3.3] 启动监控 (Probes & Metrics)
+	// 6. 启动监控（探针与指标）
 
-	// 6.1 启动 Metrics Poller (Redis/Etcd 状态)
+	// 6.1 启动指标轮询（Redis/Etcd 状态）
 	go scheduler.StartMetricsPoller(ctx, redisClient, discovery)
 
-	// 6.2 暴露 Prometheus Metrics endpoint
+	// 6.2 暴露 Prometheus 指标端点
 	metricsPort := getEnvInt("SCHEDULER_METRICS_PORT", 9091)
 	observability.StartMetricsServer(fmt.Sprintf(":%d", metricsPort))
 
-	// 启动慢路径兜底 (Slow Path)
+	// 启动慢路径兜底
 	go scheduler.StartSlowPath(ctx, redisClient, db)
 
-	// 启动 Watchdog (防止 Worker 宕机导致的任务泄漏)
+	// 启动看门狗（防止工作节点宕机导致任务泄漏）
 	watchdogInterval := time.Duration(getEnvInt("WATCHDOG_INTERVAL_SEC", 5)) * time.Second
 	watchdog := scheduler.NewWatchdog(redisClient, discovery, db, watchdogInterval)
 	go watchdog.Start(ctx)
 
 	// 5. 启动任务分发循环
-	// =========================================================================	// 5. 启动任务分发循环
-	slog.Info("🚀 Scheduler started, waiting for tasks...")
+	slog.Info("调度器已启动，等待任务")
 
 	var wg sync.WaitGroup
 
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Info("👋 Scheduler stopping... waiting for active tasks")
+			slog.Info("调度器停止中，等待活跃任务结束")
 			wg.Wait()
-			slog.Info("👋 Scheduler exited")
+			slog.Info("调度器已退出")
 			return
 		default:
 		}
@@ -228,24 +226,24 @@ func main() {
 		}
 
 		// 解析任务 (Protobuf)
-			task := &pb.TaskRequest{}
-			if err := proto.Unmarshal([]byte(result), task); err != nil {
-				slog.Warn("⚠️ Failed to parse task", "error", err)
-				_ = redisClient.LRem(ctx, common.QueueProcessing, 1, result)
-				_ = redisClient.LPush(ctx, common.QueueDead, result)
-				continue
-			}
+		task := &pb.TaskRequest{}
+		if err := proto.Unmarshal([]byte(result), task); err != nil {
+			slog.Warn("任务解析失败", "error", err)
+			_ = redisClient.LRem(ctx, common.QueueProcessing, 1, result)
+			_ = redisClient.LPush(ctx, common.QueueDead, result)
+			continue
+		}
 
 		jobID := task.JobId
-		slog.Info("📦 Received task", "job_id", jobID)
+		slog.Info("收到任务", "job_id", jobID)
 		processingStart := time.Now().UnixMilli()
 
 		// 获取可用 Worker
 		workerID, workerAddr, ok := selectWorker(ctx, redisClient, discovery, workerCapacity)
 		if !ok {
-			slog.Warn("⚠️ No workers available, task will retry later", "job_id", jobID)
+			slog.Warn("暂无可用工作节点，任务稍后重试", "job_id", jobID)
 			if err := redisClient.RequeueTask(ctx, common.QueueProcessing, common.QueuePending, result); err != nil {
-				slog.Error("Failed to requeue task", "job_id", jobID, "error", err)
+				slog.Error("任务重新入队失败", "job_id", jobID, "error", err)
 			}
 			noWorkerSleep := time.Duration(getEnvInt("NO_WORKER_SLEEP_MS", 1000)) * time.Millisecond
 			time.Sleep(noWorkerSleep)
@@ -257,7 +255,7 @@ func main() {
 		assignmentKey := common.TaskAssignmentPrefix + jobID
 		assignmentTTL := time.Duration(getEnvInt("ASSIGNMENT_TTL_SEC", 600)) * time.Second
 		if err := redisClient.Set(ctx, assignmentKey, workerID, assignmentTTL); err != nil {
-			slog.Error("❌ Failed to set assignment", "job_id", jobID, "error", err)
+			slog.Error("写入任务分配关系失败", "job_id", jobID, "error", err)
 			// 即使失败也尝试继续，或者选择回滚
 		}
 
@@ -265,22 +263,22 @@ func main() {
 		payloadKey := common.TaskPayloadPrefix + jobID
 		payloadTTL := time.Duration(getEnvInt("PAYLOAD_TTL_SEC", 1800)) * time.Second
 		if err := redisClient.Set(ctx, payloadKey, result, payloadTTL); err != nil {
-			slog.Error("❌ Failed to set payload", "job_id", jobID, "error", err)
+			slog.Error("写入任务负载失败", "job_id", jobID, "error", err)
 		}
 
 		// 记录 processing_start 与 ZSET
 		startKey := common.TaskProcessingStartPrefix + jobID
 		processingTTL := time.Duration(getEnvInt("PROCESSING_START_TTL_SEC", 1800)) * time.Second
 		if err := redisClient.Set(ctx, startKey, fmt.Sprintf("%d", processingStart), processingTTL); err != nil {
-			slog.Error("❌ Failed to set processing_start", "job_id", jobID, "error", err)
+			slog.Error("写入 processing_start 失败", "job_id", jobID, "error", err)
 		}
 		if err := redisClient.ZAdd(ctx, common.TaskProcessingZSet, &redis.Z{Score: float64(processingStart), Member: jobID}); err != nil {
-			slog.Error("❌ Failed to zadd processing", "job_id", jobID, "error", err)
+			slog.Error("写入 processing zset 失败", "job_id", jobID, "error", err)
 		}
 
 		// 更新 DB 状态为 processing
 		if err := db.UpdateSubmissionState(ctx, jobID, "processing"); err != nil {
-			slog.Error("❌ Failed to update submission state", "job_id", jobID, "error", err)
+			slog.Error("更新提交状态失败", "job_id", jobID, "error", err)
 		}
 
 		// 增加 inflight 计数
@@ -294,10 +292,10 @@ func main() {
 		go func(addr string, taskData []byte) {
 			defer wg.Done()
 			if err := scheduler.DispatchTask(ctx, addr, taskData, redisClient); err != nil {
-				slog.Error("❌ Failed to dispatch task", "job_id", jobID, "error", err)
+				slog.Error("任务分发失败", "job_id", jobID, "error", err)
 
 				if errors.Is(err, common.ErrNonRetryable) {
-					slog.Error("🛑 Discarding non-retryable task", "job_id", jobID)
+					slog.Error("丢弃不可重试任务", "job_id", jobID)
 					// Poison Pill: 进入死信队列并标记失败
 					_ = redisClient.LPush(ctx, common.QueueDead, string(taskData))
 					_ = db.UpdateSubmissionState(ctx, jobID, "failed")
@@ -307,7 +305,7 @@ func main() {
 					})
 				} else {
 					if err := scheduler.HandleRetry(ctx, redisClient, db, jobID, string(taskData), "dispatch retry exceeded"); err != nil {
-						slog.Error("HandleRetry failed", "job_id", jobID, "error", err)
+						slog.Error("重试处理失败", "job_id", jobID, "error", err)
 					}
 				}
 
@@ -318,7 +316,7 @@ func main() {
 				_, _ = redisClient.Decr(ctx, inflightKey)
 			} else {
 				// 成功时不移除！等待 ACK Listener 移除
-				slog.Debug("Dispatch success", "job_id", jobID)
+				slog.Debug("任务分发成功", "job_id", jobID)
 			}
 		}(workerAddr, []byte(result))
 	}

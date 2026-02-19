@@ -264,12 +264,12 @@ func (s *JudgeService) reportResult(ctx context.Context, jobID string, result ma
 	resultKey := common.ResultKeyPrefix + jobID
 	setOK := false
 	if ok, err := s.redis.SetNX(ctx, resultKey, string(jsonBytes), getResultTTL()).Result(); err != nil {
-		slog.Error("Redis setnx failed", "job_id", jobID, "error", err)
+		slog.Error("Redis SetNX 失败", "job_id", jobID, "error", err)
 		return err
 	} else {
 		setOK = ok
 		if !setOK {
-			slog.Warn("Duplicate result detected, still enqueueing stream", "job_id", jobID)
+			slog.Warn("检测到重复结果，仍写入流", "job_id", jobID)
 		}
 	}
 
@@ -298,7 +298,7 @@ func (s *JudgeService) reportResult(ctx context.Context, jobID string, result ma
 		break
 	}
 	if lastErr != nil {
-		slog.Error("Redis stream add failed", "job_id", jobID, "error", lastErr)
+		slog.Error("Redis Stream 写入失败", "job_id", jobID, "error", lastErr)
 		if setOK {
 			_ = s.redis.Del(ctx, resultKey).Err()
 		}
@@ -307,11 +307,11 @@ func (s *JudgeService) reportResult(ctx context.Context, jobID string, result ma
 
 	// Optional: keep PubSub for debugging/legacy
 	if err := s.redis.Publish(ctx, "job_done", jobID).Err(); err != nil {
-		slog.Error("Redis publish failed", "job_id", jobID, "error", err)
+		slog.Error("Redis 发布失败", "job_id", jobID, "error", err)
 	}
 
 	traceID, _ := result["trace_id"].(string)
-	slog.Info("Reported result", "job_id", jobID, "trace_id", traceID, "app_status", result["status"])
+	slog.Info("已上报结果", "job_id", jobID, "trace_id", traceID, "app_status", result["status"])
 	return nil
 }
 
@@ -319,8 +319,7 @@ func (s *JudgeService) UpdateStatus(ctx context.Context, req *pb.TaskResult) (*p
 	return &pb.Ack{}, nil
 }
 
-// Helper functions
-// Helper functions
+// 辅助函数
 
 func UnzipWithLimits(src, dest string, maxTotalBytes, maxFileBytes int64, maxFiles int) error {
 	r, err := zip.OpenReader(src)
@@ -339,7 +338,7 @@ func UnzipWithLimits(src, dest string, maxTotalBytes, maxFileBytes int64, maxFil
 	for _, f := range r.File {
 		fpath := filepath.Join(dest, f.Name)
 		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", fpath)
+			return fmt.Errorf("非法文件路径: %s", fpath)
 		}
 
 		if f.FileInfo().IsDir() {
@@ -351,10 +350,10 @@ func UnzipWithLimits(src, dest string, maxTotalBytes, maxFileBytes int64, maxFil
 
 		fileCount++
 		if maxFiles > 0 && fileCount > maxFiles {
-			return fmt.Errorf("zip contains too many files: %d", fileCount)
+			return fmt.Errorf("zip 文件数量过多: %d", fileCount)
 		}
 		if maxFileBytes > 0 && int64(f.UncompressedSize64) > maxFileBytes {
-			return fmt.Errorf("zip entry too large: %s", f.Name)
+			return fmt.Errorf("zip 条目过大: %s", f.Name)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(fpath), 0755); err != nil {
@@ -384,18 +383,18 @@ func UnzipWithLimits(src, dest string, maxTotalBytes, maxFileBytes int64, maxFil
 			return err
 		}
 		if maxFileBytes > 0 && written > maxFileBytes {
-			return fmt.Errorf("zip entry exceeds max size: %s", f.Name)
+			return fmt.Errorf("zip 条目超出大小限制: %s", f.Name)
 		}
 
 		totalWritten += written
 		if maxTotalBytes > 0 && totalWritten > maxTotalBytes {
-			return fmt.Errorf("zip exceeds max total size")
+			return fmt.Errorf("zip 总大小超出限制")
 		}
 	}
 	return nil
 }
 
-// runCombinedWithContext removed: compilation is handled by C++ core sandbox
+// runCombinedWithContext 已移除：编译流程由 C++ 核心沙箱处理。
 
 func SaveFile(path string, content []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

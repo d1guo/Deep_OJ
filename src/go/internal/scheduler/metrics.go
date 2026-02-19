@@ -119,7 +119,7 @@ func updateQueueMetrics(ctx context.Context, redis *repository.RedisClient) {
 	// 1. Pending Queue
 	pendingCount, err := redis.LLen(ctx, common.QueuePending)
 	if err != nil {
-		slog.Error("Failed to get pending queue length", "error", err)
+		slog.Error("获取待处理队列长度失败", "error", err)
 	} else {
 		schedulerQueueDepth.WithLabelValues("pending").Set(float64(pendingCount))
 	}
@@ -127,7 +127,7 @@ func updateQueueMetrics(ctx context.Context, redis *repository.RedisClient) {
 	// 2. Processing Queue
 	processingCount, err := redis.LLen(ctx, common.QueueProcessing)
 	if err != nil {
-		slog.Error("Failed to get processing queue length", "error", err)
+		slog.Error("获取处理中队列长度失败", "error", err)
 	} else {
 		schedulerQueueDepth.WithLabelValues("processing").Set(float64(processingCount))
 	}

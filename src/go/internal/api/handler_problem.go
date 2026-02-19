@@ -109,7 +109,7 @@ func (h *Handler) HandleCreateProblem(c *gin.Context) {
 
 	id, err := h.db.CreateProblem(c.Request.Context(), problem)
 	if err != nil {
-		slog.Error("CreateProblem DB error", "error", err)
+		slog.Error("创建题目时数据库异常", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
 	}
@@ -122,7 +122,7 @@ func (h *Handler) HandleCreateProblem(c *gin.Context) {
 	}
 	err = h.minio.UploadFile(c.Request.Context(), objectName, tmpFile, written)
 	if err != nil {
-		slog.Error("CreateProblem MinIO error", "error", err)
+		slog.Error("创建题目时 MinIO 异常", "error", err)
 		// 回滚 DB
 		h.db.DeleteProblem(c.Request.Context(), id)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Storage error"})
@@ -131,7 +131,7 @@ func (h *Handler) HandleCreateProblem(c *gin.Context) {
 
 	// 6. 更新 DB 路径
 	if err := h.db.UpdateTestcasePath(c.Request.Context(), id, objectName); err != nil {
-		slog.Error("UpdateProblemPath error", "error", err)
+		slog.Error("更新题目路径异常", "error", err)
 		_ = h.minio.RemoveFile(c.Request.Context(), objectName)
 		_ = h.db.DeleteProblem(c.Request.Context(), id)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database update error"})

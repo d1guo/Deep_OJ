@@ -14,7 +14,7 @@ def register_user(username, password):
         with urllib.request.urlopen(req) as response:
             return True
     except urllib.error.URLError as e:
-        print(f"❌ Register failed: {e}")
+        print(f"注册失败：{e}")
         return False
 
 def login_user(username, password):
@@ -26,7 +26,7 @@ def login_user(username, password):
             result = json.loads(response.read().decode('utf-8'))
             return result.get('token')
     except urllib.error.URLError as e:
-        print(f"❌ Login failed: {e}")
+        print(f"登录失败：{e}")
         return None
 
 def submit_task(token, code, language=1):
@@ -52,35 +52,35 @@ def submit_task(token, code, language=1):
     try:
         with urllib.request.urlopen(req) as response:
             result = json.loads(response.read().decode('utf-8'))
-            print(f"✅ Submitted task, Job ID: {result.get('job_id')}")
+            print(f"提交成功，Job ID：{result.get('job_id')}")
             return result.get('job_id')
     except urllib.error.URLError as e:
-        print(f"❌ Submit failed: {e}")
+        print(f"提交失败：{e}")
         return None
 
 def poll_status(job_id):
     url = f"{API_URL}/status/{job_id}"
     
-    for _ in range(20): # Poll for 10 seconds (0.5s interval)
+    for _ in range(20): # 轮询 10 秒（间隔 0.5 秒）
         try:
             with urllib.request.urlopen(url) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 status = result.get('status')
-                print(f"   Status for {job_id}: {status}")
+                print(f"任务 {job_id} 状态：{status}")
                 
                 if status == "Finished":
-                    return result.get('data') # Return the detailed result
+                    return result.get('data') # 返回详细结果
                 
         except urllib.error.URLError as e:
-            print(f"⚠️ Poll error: {e}")
+            print(f"轮询异常：{e}")
             
         time.sleep(0.5)
     
-    print(f"❌ Timed out waiting for job {job_id}")
+    print(f"等待任务 {job_id} 超时")
     return None
 
 def test_aplusb(token):
-    print("\n=== Testing A+B Problem (Expect Accepted) ===")
+    print("\n=== 测试 A+B 题目（期望 Accepted）===")
     timestamp = time.time()
     code = f"""
     #include <iostream>
@@ -98,14 +98,14 @@ def test_aplusb(token):
     
     result = poll_status(job_id)
     if result and result.get('status') == "Accepted":
-        print("✅ A+B Test Passed!")
+        print("A+B 测试通过！")
         return True
     else:
-        print(f"❌ A+B Test Failed: {result}")
+        print(f"A+B 测试失败：{result}")
         return False
 
 def test_tle(token):
-    print("\n=== Testing Infinite Loop (Expect Time Limit Exceeded) ===")
+    print("\n=== 测试死循环（期望 Time Limit Exceeded）===")
     code = """
     #include <iostream>
     int main() {
@@ -118,15 +118,15 @@ def test_tle(token):
     
     result = poll_status(job_id)
     if result and result.get('status') == "Time Limit Exceeded":
-        print("✅ TLE Test Passed!")
+        print("TLE 测试通过！")
         return True
     else:
-        print(f"❌ TLE Test Failed: {result}")
+        print(f"TLE 测试失败：{result}")
         return False
 
 def test_forkbomb(token):
-    print("\n=== Testing Fork Bomb (Expect System Survival) ===")
-    # Fork bomb code
+    print("\n=== 测试 Fork Bomb（期望系统可存活）===")
+    # Fork bomb 测试代码
     code = """
     #include <unistd.h>
     int main() {
@@ -137,17 +137,16 @@ def test_forkbomb(token):
     job_id = submit_task(token, code)
     if not job_id: return False
     
-    # We expect either Runtime Error or Time Limit Exceeded (if sandbox works)
-    # Or just system survival.
+    # 若沙箱生效，通常会得到 Runtime Error 或 Time Limit Exceeded。
     result = poll_status(job_id)
     
-    # Verify system is still responsive by submitting A+B again
-    print("   Verifying system health after fork bomb...")
+    # 再次提交 A+B，验证系统是否仍可用。
+    print("正在验证 fork bomb 后的系统健康状态...")
     if test_aplusb(token):
-        print("✅ System Survived Fork Bomb!")
+        print("系统在 Fork Bomb 后仍然可用！")
         return True
     else:
-        print("❌ System Died after Fork Bomb!")
+        print("系统在 Fork Bomb 后不可用！")
         return False
 
 def setup_test_cases():
@@ -155,42 +154,42 @@ def setup_test_cases():
     DATA_DIR = "data"
     os.makedirs(DATA_DIR, exist_ok=True)
     
-    # 1.in / 1.out for A+B (Problem 1001)
+    # 为 A+B（Problem 1001）准备 1.in / 1.out
     with open(f"{DATA_DIR}/1.in", "w") as f:
         f.write("1 2")
     with open(f"{DATA_DIR}/1.out", "w") as f:
         f.write("3")
         
-    print(f"✅ Test cases generated in {DATA_DIR}/")
+    print(f"测试数据已生成：{DATA_DIR}/")
 
 if __name__ == "__main__":
-    print(f"🚀 Starting Integration Test against {API_URL}")
+    print(f"开始集成测试，目标地址：{API_URL}")
     
     setup_test_cases()
     
-    # 1. Register
-    print("\nRegistering User...")
+    # 1. 注册
+    print("\n正在注册用户...")
     if not register_user("testuser", "password123"):
         sys.exit(1)
         
-    # 2. Login
-    print("Logging in...")
+    # 2. 登录
+    print("正在登录...")
     token = login_user("testuser", "password123")
     if not token:
         sys.exit(1)
-    print(f"✅ Got Token: {token[:10]}...")
+    print(f"获取到 Token：{token[:10]}...")
 
     passed = True
     passed &= test_aplusb(token)
     
-    # Enable all
+    # 若前序通过，继续后续用例
     if passed:
         passed &= test_tle(token)
         passed &= test_forkbomb(token)
     
     if passed:
-        print("\n🎉 All Integration Tests Passed!")
+        print("\n所有集成测试通过！")
         sys.exit(0)
     else:
-        print("\n❌ Some tests failed.")
+        print("\n存在测试失败。")
         sys.exit(1)

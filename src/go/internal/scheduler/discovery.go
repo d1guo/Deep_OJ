@@ -45,18 +45,18 @@ func (d *EtcdDiscovery) Close() error {
 
 // WatchWorkers 监听 Worker 注册/注销事件
 func (d *EtcdDiscovery) WatchWorkers(ctx context.Context) {
-	slog.Info("Watching workers", "prefix", WorkerPrefix)
+	slog.Info("正在监听工作节点", "prefix", WorkerPrefix)
 
 	// 1. 首先获取现有的 Workers
 	resp, err := d.client.Get(ctx, WorkerPrefix, clientv3.WithPrefix())
 	if err != nil {
-		slog.Error("Failed to get initial workers", "error", err)
+		slog.Error("获取初始工作节点失败", "error", err)
 	} else {
 		for _, kv := range resp.Kvs {
 			workerID := string(kv.Key)[len(WorkerPrefix):]
 			workerAddr := string(kv.Value)
 			d.workers.Store(workerID, workerAddr)
-			slog.Info("Discovered worker", "worker_id", workerID, "addr", workerAddr)
+			slog.Info("发现工作节点", "worker_id", workerID, "addr", workerAddr)
 		}
 	}
 
@@ -72,12 +72,12 @@ func (d *EtcdDiscovery) WatchWorkers(ctx context.Context) {
 				// Worker 注册或更新
 				workerAddr := string(ev.Kv.Value)
 				d.workers.Store(workerID, workerAddr)
-				slog.Info("Worker registered", "worker_id", workerID, "addr", workerAddr)
+				slog.Info("工作节点已注册", "worker_id", workerID, "addr", workerAddr)
 
 			case clientv3.EventTypeDelete:
 				// Worker 注销 (Lease 过期或主动注销)
 				d.workers.Delete(workerID)
-				slog.Info("Worker unregistered", "worker_id", workerID)
+				slog.Info("工作节点已注销", "worker_id", workerID)
 			}
 		}
 	}

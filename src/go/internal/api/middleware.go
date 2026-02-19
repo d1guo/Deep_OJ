@@ -71,7 +71,7 @@ func RequestIDMiddleware() gin.HandlerFunc {
 	}
 }
 
-// GetRequestID returns normalized request_id populated by middleware.
+// GetRequestID 返回中间件写入的标准化 request_id。
 func GetRequestID(c *gin.Context) string {
 	if ridAny, ok := c.Get("request_id"); ok {
 		if rid, ok := ridAny.(string); ok && rid != "" {
@@ -86,14 +86,14 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少 Authorization 请求头", "code": "UNAUTHORIZED"})
 			c.Abort()
 			return
 		}
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid authorization format", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization 格式无效", "code": "UNAUTHORIZED"})
 			c.Abort()
 			return
 		}
@@ -102,13 +102,13 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+				return nil, fmt.Errorf("签名算法不符合预期: %v", token.Header["alg"])
 			}
 			return getJWTSecret(), nil
 		})
 
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token 无效", "code": "UNAUTHORIZED"})
 			c.Abort()
 			return
 		}
@@ -122,13 +122,13 @@ func AuthMiddleware() gin.HandlerFunc {
 			}
 			c.Next()
 		} else {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token 声明无效", "code": "UNAUTHORIZED"})
 			c.Abort()
 		}
 	}
 }
 
-// AdminMiddleware enforces admin-only access based on username claim.
+// AdminMiddleware 基于 username 声明限制管理员访问。
 func AdminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		usernameAny, ok := c.Get("username")
@@ -172,13 +172,13 @@ func loadAdminUsers() map[string]struct{} {
 	return admins
 }
 
-// MetricsAccessMiddleware protects /metrics from anonymous remote access.
+// MetricsAccessMiddleware 保护 /metrics，禁止匿名远程访问。
 func MetricsAccessMiddleware() gin.HandlerFunc {
 	token := strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
 	return func(c *gin.Context) {
 		if token != "" {
 			if extractBearerToken(c.GetHeader("Authorization")) != token {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "UNAUTHORIZED"})
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权", "code": "UNAUTHORIZED"})
 				c.Abort()
 				return
 			}
@@ -186,9 +186,9 @@ func MetricsAccessMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Safe default: if no token is configured, only allow local scrape.
+		// 安全默认值：未配置 token 时仅允许本机抓取。
 		if !isLoopbackClientIP(c.ClientIP()) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden", "code": "FORBIDDEN"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "禁止访问", "code": "FORBIDDEN"})
 			c.Abort()
 			return
 		}
@@ -221,9 +221,7 @@ func isLoopbackClientIP(clientIP string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// =========================================================================
-// Task 3.3: Prometheus Metrics
-// =========================================================================
+// Prometheus 指标
 
 // MetricsMiddleware 记录请求指标 (使用 metrics.go 中定义的变量)
 func MetricsMiddleware() gin.HandlerFunc {
@@ -239,7 +237,7 @@ func MetricsMiddleware() gin.HandlerFunc {
 
 		// 如果 path 为空 (比如 404)，使用 raw path
 		if path == "" {
-			path = "unknown"
+			path = "未知"
 		}
 
 		// 使用 metrics.go 中定义的 RequestTotal 和 RequestDuration
@@ -248,5 +246,3 @@ func MetricsMiddleware() gin.HandlerFunc {
 		requestDurationSeconds.WithLabelValues(path, statusClassFromCode(c.Writer.Status())).Observe(duration)
 	}
 }
-
-// (End of file)
