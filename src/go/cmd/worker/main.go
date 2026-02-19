@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -167,6 +168,7 @@ func main() {
 	// 1. 配置
 	cfg := worker.LoadConfig()
 	slog.Info("工作节点启动中", "id", cfg.WorkerID, "addr", cfg.WorkerAddr, "bin", cfg.JudgerBin)
+	slog.Info("工作节点并发配置", "max_concurrency", cfg.PoolSize, "num_cpu", runtime.NumCPU())
 
 	if getEnvBool("REQUIRE_CGROUPS_V2", false) {
 		if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {

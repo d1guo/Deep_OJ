@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -52,8 +53,8 @@ type Config struct {
 // YAMLConfig 映射 config.yaml 结构
 type YAMLConfig struct {
 	Server struct {
-		Port     int `yaml:"port"`
-		PoolSize int `yaml:"pool_size"`
+		Port     int  `yaml:"port"`
+		PoolSize *int `yaml:"pool_size"`
 	} `yaml:"server"`
 	Path struct {
 		WorkspaceRoot string `yaml:"workspace_root"`
@@ -153,10 +154,8 @@ func LoadConfig() *Config {
 		UnzipTimeoutMs:      getEnvInt("UNZIP_TIMEOUT_MS", 30000),
 		KeepWorkdir:         getEnvBool("KEEP_WORKDIR", false),
 	}
-	cfg.PoolSize = getEnvInt("WORKER_POOL_SIZE", yamlCfg.Server.PoolSize)
-	if cfg.PoolSize <= 0 {
-		cfg.PoolSize = 4
-	}
+	configuredPoolSize, configuredPoolSizeSet := loadConfiguredPoolSize(yamlCfg.Server.PoolSize)
+	cfg.PoolSize = normalizeWorkerPoolSize(configuredPoolSize, configuredPoolSizeSet, runtime.NumCPU())
 	cfg.TestcaseCacheMax = getEnvInt("TESTCASE_CACHE_MAX", 100)
 	cfg.TestcaseCacheTTL = getEnvInt("TESTCASE_CACHE_TTL_SEC", 3600)
 	cfg.UnzipMaxBytes = getEnvInt64("UNZIP_MAX_BYTES", 256*1024*1024)
@@ -216,4 +215,35 @@ func getEnvBool(key string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func loadConfiguredPoolSize(yamlPoolSize *int) (int, bool) {
+	if value, ok := os.LookupEnv("WORKER_POOL_SIZE"); ok {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			slog.Warn("WORKER_POOL_SIZE 解析失败，回退到配置文件或 CPU 默认值", "value", value, "error", err)
+		} else {
+			return parsed, true
+		}
+	}
+	if yamlPoolSize == nil {
+		return 0, false
+	}
+	return *yamlPoolSize, true
+}
+
+func normalizeWorkerPoolSize(configured int, configuredSet bool, cpuCount int) int {
+	if cpuCount < 1 {
+		cpuCount = 1
+	}
+	if !configuredSet {
+		return cpuCount
+	}
+	if configured < 1 {
+		return cpuCount
+	}
+	if configured > cpuCount {
+		configured = cpuCount
+	}
+	return configured
 }

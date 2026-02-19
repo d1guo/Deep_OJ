@@ -74,7 +74,11 @@ const (
 	finalizeStatusRejected = "rejected"
 	finalizeStatusError    = "error"
 
-	defaultWorkerLogThrottleSec = 5
+	defaultWorkerLogThrottleSec      = 5
+	defaultWorkerBackpressureSleepMs = 100
+
+	backpressureSourceReadNew = "read_new"
+	backpressureSourceReclaim = "reclaim"
 )
 
 type streamEnvelopeV1 struct {
@@ -168,6 +172,9 @@ type StreamConsumer struct {
 	db                 streamDB
 	runner             streamJudgeRunner
 	logger             *slog.Logger
+	maxConcurrency     int
+	slots              chan struct{}
+	backpressureSleep  time.Duration
 	reclaimCursorMu    sync.Mutex
 	reclaimNextStartID string
 	logThrottleMu      sync.Mutex
@@ -180,12 +187,21 @@ func NewStreamConsumer(cfg *Config, redisClient *redis.Client, db streamDB, runn
 	if logThrottleSec <= 0 {
 		logThrottleSec = defaultWorkerLogThrottleSec
 	}
+	backpressureSleepMs := getEnvInt("WORKER_BACKPRESSURE_SLEEP_MS", defaultWorkerBackpressureSleepMs)
+	if backpressureSleepMs <= 0 {
+		backpressureSleepMs = defaultWorkerBackpressureSleepMs
+	}
+	maxConcurrency := getWorkerConcurrency(cfg)
+	slots := newSlotPool(maxConcurrency)
 	return &StreamConsumer{
 		config:             cfg,
 		redis:              newRedisStreamClient(redisClient),
 		db:                 db,
 		runner:             runner,
 		logger:             slog.With("component", "worker_stream_consumer"),
+		maxConcurrency:     maxConcurrency,
+		slots:              slots,
+		backpressureSleep:  time.Duration(backpressureSleepMs) * time.Millisecond,
 		reclaimNextStartID: "0-0",
 		logThrottleSeen:    make(map[string]time.Time),
 		logThrottleWindow:  time.Duration(logThrottleSec) * time.Second,
@@ -196,12 +212,16 @@ func newStreamConsumerForTest(cfg *Config, redisClient streamRedisClient, db str
 	if logger == nil {
 		logger = slog.Default()
 	}
+	maxConcurrency := getWorkerConcurrency(cfg)
 	return &StreamConsumer{
 		config:             cfg,
 		redis:              redisClient,
 		db:                 db,
 		runner:             runner,
 		logger:             logger,
+		maxConcurrency:     maxConcurrency,
+		slots:              newSlotPool(maxConcurrency),
+		backpressureSleep:  defaultWorkerBackpressureSleepMs * time.Millisecond,
 		reclaimNextStartID: "0-0",
 		logThrottleSeen:    make(map[string]time.Time),
 		logThrottleWindow:  defaultWorkerLogThrottleSec * time.Second,
@@ -238,6 +258,7 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 		"group", c.config.JobStreamGroup,
 		"reason", "started",
 		"stream_key", c.config.JobStreamKey,
+		"max_concurrency", c.maxConcurrency,
 	)
 
 	readCount := int64(c.config.JobStreamReadCount)
@@ -250,14 +271,36 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 	}
 	block := time.Duration(blockMs) * time.Millisecond
 	go c.runReclaimLoop(ctx)
+	var workerWG sync.WaitGroup
+	defer workerWG.Wait()
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		streams, err := c.redis.ReadNew(ctx, c.config.JobStreamKey, c.config.JobStreamGroup, c.config.JobStreamConsumer, readCount, block)
+		reserved := c.reserveSlots(int(readCount))
+		if reserved == 0 {
+			workerStreamBackpressureTotal.WithLabelValues(backpressureSourceReadNew).Inc()
+			if c.shouldLog("stream_backpressure_read_new") {
+				c.logger.Info(
+					"Stream consumer paused by backpressure",
+					"event", "backpressure_pause",
+					"source", backpressureSourceReadNew,
+					"max_concurrency", c.maxConcurrency,
+				)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(c.backpressureSleep):
+			}
+			continue
+		}
+
+		streams, err := c.redis.ReadNew(ctx, c.config.JobStreamKey, c.config.JobStreamGroup, c.config.JobStreamConsumer, int64(reserved), block)
 		if err != nil {
+			c.releaseSlots(reserved)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return ctx.Err()
 			}
@@ -281,10 +324,20 @@ func (c *StreamConsumer) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		dispatched := 0
 		for _, xstream := range streams {
 			for _, msg := range xstream.Messages {
-				c.handleMessage(ctx, msg)
+				dispatched++
+				workerWG.Add(1)
+				go func(message redis.XMessage) {
+					defer workerWG.Done()
+					defer c.releaseSlots(1)
+					c.handleMessage(ctx, message)
+				}(msg)
 			}
+		}
+		if released := reserved - dispatched; released > 0 {
+			c.releaseSlots(released)
 		}
 	}
 }
@@ -333,6 +386,20 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 		startID = "0-0"
 	}
 	for {
+		reserved := c.reserveSlots(int(count))
+		if reserved == 0 {
+			workerStreamBackpressureTotal.WithLabelValues(backpressureSourceReclaim).Inc()
+			if c.shouldLog("stream_backpressure_reclaim") {
+				c.logger.Info(
+					"Reclaim paused by backpressure",
+					"event", "reclaim_skipped",
+					"source", backpressureSourceReclaim,
+					"max_concurrency", c.maxConcurrency,
+				)
+			}
+			return
+		}
+
 		msgs, nextID, err := c.redis.AutoClaim(
 			ctx,
 			c.config.JobStreamKey,
@@ -340,9 +407,10 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 			c.config.JobStreamConsumer,
 			minIdle,
 			startID,
-			count,
+			int64(reserved),
 		)
 		if err != nil {
+			c.releaseSlots(reserved)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
@@ -369,14 +437,25 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 			return
 		}
 		if len(msgs) == 0 {
+			c.releaseSlots(reserved)
 			if nextID != "" {
 				c.setReclaimNextStartID(nextID)
 			}
 			return
 		}
+		var reclaimWG sync.WaitGroup
 		for _, msg := range msgs {
-			c.handleReclaimedMessage(ctx, msg)
+			reclaimWG.Add(1)
+			go func(message redis.XMessage) {
+				defer reclaimWG.Done()
+				defer c.releaseSlots(1)
+				c.handleReclaimedMessage(ctx, message)
+			}(msg)
 		}
+		if released := reserved - len(msgs); released > 0 {
+			c.releaseSlots(released)
+		}
+		reclaimWG.Wait()
 		if nextID != "" {
 			c.setReclaimNextStartID(nextID)
 		}
@@ -384,7 +463,61 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 			return
 		}
 		startID = nextID
-		if int64(len(msgs)) < count {
+		if int64(len(msgs)) < int64(reserved) {
+			return
+		}
+	}
+}
+
+func getWorkerConcurrency(cfg *Config) int {
+	if cfg == nil || cfg.PoolSize < 1 {
+		return 1
+	}
+	return cfg.PoolSize
+}
+
+func newSlotPool(size int) chan struct{} {
+	if size < 1 {
+		size = 1
+	}
+	slots := make(chan struct{}, size)
+	for i := 0; i < size; i++ {
+		slots <- struct{}{}
+	}
+	return slots
+}
+
+func (c *StreamConsumer) reserveSlots(limit int) int {
+	if c == nil || c.slots == nil || limit <= 0 {
+		return 0
+	}
+	reserved := 0
+	for i := 0; i < limit; i++ {
+		select {
+		case <-c.slots:
+			reserved++
+		default:
+			return reserved
+		}
+	}
+	return reserved
+}
+
+func (c *StreamConsumer) releaseSlots(count int) {
+	if c == nil || c.slots == nil || count <= 0 {
+		return
+	}
+	for i := 0; i < count; i++ {
+		select {
+		case c.slots <- struct{}{}:
+		default:
+			if c.shouldLog("slot_release_overflow") {
+				c.logger.Warn(
+					"Stream slot release overflow",
+					"event", "slot_release_overflow",
+					"max_concurrency", c.maxConcurrency,
+				)
+			}
 			return
 		}
 	}

@@ -23,11 +23,20 @@ type mockAutoClaimBatch struct {
 	err      error
 }
 
+type mockReadBatch struct {
+	streams []redis.XStream
+	err     error
+}
+
 type mockStreamRedis struct {
 	mu sync.Mutex
 
 	payloadByKey map[string]string
 	getErrByKey  map[string]error
+
+	readBatches []mockReadBatch
+	readCalls   int
+	readCounts  []int64
 
 	autoClaimBatches []mockAutoClaimBatch
 	autoClaimCalls   int
@@ -46,7 +55,16 @@ func (m *mockStreamRedis) EnsureGroup(ctx context.Context, stream, group string)
 }
 
 func (m *mockStreamRedis) ReadNew(ctx context.Context, stream, group, consumer string, count int64, block time.Duration) ([]redis.XStream, error) {
-	return nil, redis.Nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	idx := m.readCalls
+	m.readCalls++
+	m.readCounts = append(m.readCounts, count)
+	if idx >= len(m.readBatches) {
+		return nil, redis.Nil
+	}
+	batch := m.readBatches[idx]
+	return batch.streams, batch.err
 }
 
 func (m *mockStreamRedis) AutoClaim(ctx context.Context, stream, group, consumer string, minIdle time.Duration, start string, count int64) ([]redis.XMessage, string, error) {
@@ -89,6 +107,20 @@ func (m *mockStreamRedis) Get(ctx context.Context, key string) (string, error) {
 		return "", redis.Nil
 	}
 	return val, nil
+}
+
+func (m *mockStreamRedis) readCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readCalls
+}
+
+func (m *mockStreamRedis) readRequestCounts() []int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]int64, len(m.readCounts))
+	copy(out, m.readCounts)
+	return out
 }
 
 type mockStreamDB struct {
@@ -253,6 +285,7 @@ func newTestStreamConfig() *Config {
 		JobStreamKey:          "deepoj:jobs",
 		JobStreamGroup:        "deepoj:workers",
 		JobStreamConsumer:     "worker-test-1",
+		PoolSize:              4,
 		JobLeaseSec:           60,
 		JobHeartbeatSec:       10,
 		JobReclaimIntervalSec: 5,
@@ -927,6 +960,126 @@ func TestStreamConsumer_ReclaimDBErrorNoXAck(t *testing.T) {
 	}
 	if runner.callCount() != 0 {
 		t.Fatalf("expected no runner execution on reclaim db error, got %d", runner.callCount())
+	}
+}
+
+func TestStreamConsumer_RunPausesReadWhenPoolFull(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.PoolSize = 2
+	cfg.JobStreamReadCount = 16
+	cfg.JobStreamBlockMs = 1
+
+	jobID1 := "job-f3-run-1"
+	jobID2 := "job-f3-run-2"
+	payloadKey1 := "task:payload:" + jobID1
+	payloadKey2 := "task:payload:" + jobID2
+
+	entry1 := redis.XMessage{
+		ID: "1700000001000-0",
+		Values: map[string]interface{}{
+			"job_id":      jobID1,
+			"enqueue_ts":  "1700000001000",
+			"payload_ref": payloadKey1,
+			"priority":    "0",
+		},
+	}
+	entry2 := redis.XMessage{
+		ID: "1700000001001-0",
+		Values: map[string]interface{}{
+			"job_id":      jobID2,
+			"enqueue_ts":  "1700000001001",
+			"payload_ref": payloadKey2,
+			"priority":    "0",
+		},
+	}
+
+	redisClient := &mockStreamRedis{
+		readBatches: []mockReadBatch{
+			{
+				streams: []redis.XStream{
+					{
+						Stream:   cfg.JobStreamKey,
+						Messages: []redis.XMessage{entry1, entry2},
+					},
+				},
+			},
+		},
+		payloadByKey: map[string]string{
+			payloadKey1: mustBuildPayloadEnvelopeFromTask(t, &pb.TaskRequest{JobId: jobID1, TraceId: "trace-f3-run-1"}),
+			payloadKey2: mustBuildPayloadEnvelopeFromTask(t, &pb.TaskRequest{JobId: jobID2, TraceId: "trace-f3-run-2"}),
+		},
+	}
+	db := &mockStreamDB{
+		claimAttempt: 7,
+		claimOK:      true,
+		finalizeOK:   true,
+		poisonOK:     true,
+	}
+	runner := &mockStreamRunner{
+		response: &pb.TaskResponse{Message: "OK"},
+		sleep:    400 * time.Millisecond,
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	consumer := newStreamConsumerForTest(cfg, redisClient, db, runner, logger)
+	consumer.backpressureSleep = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- consumer.Run(ctx)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if redisClient.readCallCount() >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for first ReadNew call")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	time.Sleep(120 * time.Millisecond)
+	if got := redisClient.readCallCount(); got != 1 {
+		t.Fatalf("expected ReadNew paused while pool is full, got read_calls=%d", got)
+	}
+	counts := redisClient.readRequestCounts()
+	if len(counts) == 0 || counts[0] != 2 {
+		t.Fatalf("expected first ReadNew count=2 (pool size), got counts=%v", counts)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected Run to end with context canceled, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting Run to exit")
+	}
+}
+
+func TestStreamConsumer_ReclaimSkipsWhenPoolFull(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.PoolSize = 1
+	cfg.JobReclaimCount = 4
+
+	redisClient := &mockStreamRedis{}
+	db := &mockStreamDB{poisonOK: true}
+	runner := &mockStreamRunner{response: &pb.TaskResponse{Message: "OK"}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	consumer := newStreamConsumerForTest(cfg, redisClient, db, runner, logger)
+
+	if reserved := consumer.reserveSlots(1); reserved != 1 {
+		t.Fatalf("expected to reserve one slot, got %d", reserved)
+	}
+	defer consumer.releaseSlots(1)
+
+	consumer.reclaimOnce(context.Background())
+
+	if redisClient.autoClaimCalls != 0 {
+		t.Fatalf("expected reclaim to skip XAUTOCLAIM when pool is full, got calls=%d", redisClient.autoClaimCalls)
 	}
 }
 

@@ -264,6 +264,14 @@ var (
 			Help: "Current number of running reclaim batches",
 		},
 	)
+
+	workerStreamBackpressureTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_stream_backpressure_total",
+			Help: "Total number of worker backpressure pauses by source",
+		},
+		[]string{"source"},
+	)
 )
 
 // InitMetrics registers worker metrics
@@ -299,6 +307,7 @@ func InitMetrics() {
 	reg.MustRegister(workerReclaimTotal)
 	reg.MustRegister(workerReclaimLatencyMs)
 	reg.MustRegister(workerReclaimInflight)
+	reg.MustRegister(workerStreamBackpressureTotal)
 
 	// Pre-initialize low-cardinality label sets so required metrics are visible even before first event.
 	execTotal.WithLabelValues("ok")
@@ -310,4 +319,6 @@ func InitMetrics() {
 	xackTotal.WithLabelValues("ok")
 	xackTotal.WithLabelValues("error")
 	xautoclaimErrorsTotal.WithLabelValues("none")
+	workerStreamBackpressureTotal.WithLabelValues("read_new")
+	workerStreamBackpressureTotal.WithLabelValues("reclaim")
 }
