@@ -14,6 +14,7 @@ services:
     build: .
     image: deep-oj:v3
     container_name: oj-worker
+    init: true
     command: /app/oj_worker
     cap_add:
       - SYS_ADMIN

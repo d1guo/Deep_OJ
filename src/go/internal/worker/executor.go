@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -49,6 +50,7 @@ const (
 	defaultStderrLimitBytes int64 = 1024 * 1024
 	envStdoutLimitBytes           = "JUDGE_STDOUT_LIMIT_BYTES"
 	envStderrLimitBytes           = "JUDGE_STDERR_LIMIT_BYTES"
+	envJudgeCmdCgroupRoot         = "JUDGE_CMD_CGROUP_ROOT"
 
 	reasonEmptyStdout       = "empty_stdout"
 	reasonMultilineStdout   = "multiline_stdout"
@@ -65,6 +67,10 @@ const (
 	judgeResultTimeout  = "timeout"
 	judgeVerdictUnknown = "UNKNOWN"
 )
+
+type judgeCommandCgroup struct {
+	path string
+}
 
 type protocolError struct {
 	reason            string
@@ -242,8 +248,14 @@ func runWithContext(ctx context.Context, cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	cmdCgroup := newJudgeCommandCgroup(cmd.Process.Pid)
+	defer func() {
+		if cmdCgroup != nil {
+			cmdCgroup.cleanup()
+		}
+	}()
 
-	return waitWithContext(ctx, cmd)
+	return waitWithContext(ctx, cmd, cmdCgroup)
 }
 
 func runWithDrain(ctx context.Context, cmd *exec.Cmd, stdoutLimit, stderrLimit int64) (drainResult, drainResult, error, error) {
@@ -259,6 +271,12 @@ func runWithDrain(ctx context.Context, cmd *exec.Cmd, stdoutLimit, stderrLimit i
 	if err := cmd.Start(); err != nil {
 		return drainResult{}, drainResult{}, nil, err
 	}
+	cmdCgroup := newJudgeCommandCgroup(cmd.Process.Pid)
+	defer func() {
+		if cmdCgroup != nil {
+			cmdCgroup.cleanup()
+		}
+	}()
 
 	stdoutCh := make(chan drainResult, 1)
 	stderrCh := make(chan drainResult, 1)
@@ -270,13 +288,13 @@ func runWithDrain(ctx context.Context, cmd *exec.Cmd, stdoutLimit, stderrLimit i
 		stderrCh <- DrainWithLimit(stderrPipe, stderrLimit)
 	}()
 
-	waitErr := waitWithContext(ctx, cmd)
+	waitErr := waitWithContext(ctx, cmd, cmdCgroup)
 	stdoutRes := <-stdoutCh
 	stderrRes := <-stderrCh
 	return stdoutRes, stderrRes, waitErr, nil
 }
 
-func waitWithContext(ctx context.Context, cmd *exec.Cmd) error {
+func waitWithContext(ctx context.Context, cmd *exec.Cmd, cmdCgroup *judgeCommandCgroup) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -284,17 +302,174 @@ func waitWithContext(ctx context.Context, cmd *exec.Cmd) error {
 
 	select {
 	case err := <-done:
+		if cmd.Process != nil {
+			killProcessGroup(cmd.Process.Pid)
+		}
+		if cmdCgroup != nil {
+			cmdCgroup.killAndReap()
+		}
 		return err
 	case <-ctx.Done():
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(cmd.Process.Pid)
+		}
+		if cmdCgroup != nil {
+			cmdCgroup.killAndReap()
 		}
 		err := <-done
+		if cmd.Process != nil {
+			killProcessGroup(cmd.Process.Pid)
+		}
+		if cmdCgroup != nil {
+			cmdCgroup.killAndReap()
+		}
 		if err == nil {
 			err = ctx.Err()
 		}
 		return fmt.Errorf("command timed out: %w", err)
 	}
+}
+
+func killProcessGroup(pgid int) {
+	if pgid <= 0 {
+		return
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+func newJudgeCommandCgroup(pid int) *judgeCommandCgroup {
+	if pid <= 0 {
+		return nil
+	}
+	root, ok := judgeCommandCgroupRoot()
+	if !ok || root == "" {
+		return nil
+	}
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return nil
+	}
+	path := filepath.Join(root, fmt.Sprintf("cmd_%d_%d", pid, time.Now().UnixNano()))
+	if err := os.Mkdir(path, 0755); err != nil {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(path, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0644); err != nil {
+		_ = os.Remove(path)
+		return nil
+	}
+	return &judgeCommandCgroup{path: path}
+}
+
+func judgeCommandCgroupRoot() (string, bool) {
+	// Allow forcing a custom cgroup path for tests or non-standard deployments.
+	if value := strings.TrimSpace(os.Getenv(envJudgeCmdCgroupRoot)); value != "" {
+		return value, true
+	}
+
+	// Docker on some hosts mounts cgroup2 at /sys/fs/cgroup/unified (hybrid mode),
+	// while others mount it directly at /sys/fs/cgroup (unified mode).
+	mountRoot := ""
+	if _, err := os.Stat("/sys/fs/cgroup/unified/cgroup.controllers"); err == nil {
+		mountRoot = "/sys/fs/cgroup/unified"
+	} else if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err == nil {
+		mountRoot = "/sys/fs/cgroup"
+	}
+	if mountRoot == "" {
+		return "", false
+	}
+
+	// Keep command cgroups under current cgroup namespace path.
+	rel := ""
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "0::") {
+				rel = strings.TrimSpace(strings.TrimPrefix(line, "0::"))
+				break
+			}
+		}
+	}
+	root := mountRoot
+	if rel != "" && rel != "/" {
+		root = filepath.Join(mountRoot, strings.TrimPrefix(rel, "/"))
+	}
+	return filepath.Join(root, "deep_oj_judge_cmd"), true
+}
+
+func (cg *judgeCommandCgroup) readProcs() []int {
+	if cg == nil || cg.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(cg.path, "cgroup.procs"))
+	if err != nil {
+		return nil
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(fields))
+	for _, field := range fields {
+		pid, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || pid <= 0 {
+			continue
+		}
+		seen[pid] = struct{}{}
+	}
+	pids := make([]int, 0, len(seen))
+	for pid := range seen {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func (cg *judgeCommandCgroup) killAndReap() {
+	if cg == nil || cg.path == "" {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(cg.path, "cgroup.kill"), []byte("1"), 0644)
+
+	pids := cg.readProcs()
+	if len(pids) == 0 {
+		return
+	}
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	pending := make(map[int]struct{}, len(pids))
+	for _, pid := range pids {
+		pending[pid] = struct{}{}
+	}
+	for len(pending) > 0 && time.Now().Before(deadline) {
+		for pid := range pending {
+			var status syscall.WaitStatus
+			wpid, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
+			if err == nil && wpid == pid {
+				delete(pending, pid)
+				continue
+			}
+			if err == syscall.ECHILD || err == syscall.ESRCH {
+				delete(pending, pid)
+				continue
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (cg *judgeCommandCgroup) cleanup() {
+	if cg == nil || cg.path == "" {
+		return
+	}
+	for i := 0; i < 5; i++ {
+		cg.killAndReap()
+		if len(cg.readProcs()) == 0 {
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	_ = os.Remove(cg.path)
 }
 
 func DrainWithLimit(r io.Reader, limit int64) drainResult {

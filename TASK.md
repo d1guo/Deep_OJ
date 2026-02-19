@@ -140,7 +140,45 @@
 - [ ] F5 feature flag：agent 优先，UDS 异常自动降级 exec CLI（可回滚）
 
 ### G. 沙箱可信度与展示材料（最后做“护城河”）
-- [ ] G1 “杀全家”语义：进程组 + kill(-pgid, SIGKILL)，防子孙泄漏（含测试）
+- [x] G1 “杀全家”语义：进程组 + kill(-pgid, SIGKILL)，防子孙泄漏（含测试）  
+  - 验收证据（2026-02-20）：
+    - 前置检查（workspace/seccomp/权限）：`bash scripts/verify_g1_prereq.sh`
+    - 默认 seccomp 编译：
+      ```bash
+      mkdir -p "$(pwd)/data/workspace"
+      cat >/tmp/g1_accept.cpp <<'CPP'
+      #include <iostream>
+      int main() { std::cout << "ok\n"; return 0; }
+      CPP
+      docker run --rm \
+        -v "$(pwd)/data/workspace:/data/workspace" \
+        -v "/tmp/g1_accept.cpp:/tmp/g1_accept.cpp:ro" \
+        --cap-add SYS_ADMIN \
+        --cap-add SYS_RESOURCE \
+        --cap-add SYS_CHROOT \
+        --cap-add SETUID \
+        --cap-add SETGID \
+        deep-oj:v3 \
+        /app/judge_engine --compile -s /tmp/g1_accept.cpp -r "g1_default_$(date +%s)" -C /app/config.yaml
+      ```
+      在 2026-02-20 的验收环境中返回 `编译沙箱系统错误 (退出码: 194, sandbox_error: pivot_root_failed)`，并含 `step=pivot_root errno=1(Operation not permitted)` 上下文日志（若宿主机 Docker 默认 seccomp 已是 unconfined，则此条可能直接 `status=Compiled`）。
+    - 显式放开 seccomp 编译：
+      ```bash
+      docker run --rm \
+        -v "$(pwd)/data/workspace:/data/workspace" \
+        -v "/tmp/g1_accept.cpp:/tmp/g1_accept.cpp:ro" \
+        --security-opt seccomp=unconfined \
+        --cap-add SYS_ADMIN \
+        --cap-add SYS_RESOURCE \
+        --cap-add SYS_CHROOT \
+        --cap-add SETUID \
+        --cap-add SETGID \
+        deep-oj:v3 \
+        /app/judge_engine --compile -s /tmp/g1_accept.cpp -r "g1_unconfined_$(date +%s)" -C /app/config.yaml
+      ```
+      返回 `status=Compiled`。
+    - `bash scripts/verify_g1_kill_all.sh`  
+      输出 `EVIDENCE_G1_PARENT_KILL ... all_gone=1`、`EVIDENCE_G1_KILL_BEFORE_PS`、`EVIDENCE_G1_KILL_AFTER_PS`、`EVIDENCE_G1_KILL_BEFORE_CGROUP`、`EVIDENCE_G1_KILL_AFTER_CGROUP`，最终 `G1 verify passed`。
 - [ ] G2 清理幂等：cgroup/namespace 清理可重复执行（含测试/复现）
 - [ ] G3 6 类对抗测试：fork/线程/内存/FD/磁盘/逃逸 syscall（用例 + 结果）
 - [ ] G4 FS/路径逃逸测试：/etc、/proc、符号链接穿越、超大文件写入（用例 + 结果）

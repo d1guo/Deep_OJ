@@ -374,19 +374,30 @@ namespace deep_oj
             }
             else
             {
-                std::ifstream ifs(log_file);
-                if (ifs)
+                std::string compile_log;
                 {
-                    std::stringstream buffer;
-                    buffer << ifs.rdbuf();
-                    result.error_message = buffer.str();
-                    
-                    if (result.error_message.empty()) {
-                        result.error_message = "g++ 异常退出，状态码: " + std::to_string(exit_code);
+                    std::ifstream ifs(log_file);
+                    if (ifs) {
+                        std::stringstream buffer;
+                        buffer << ifs.rdbuf();
+                        compile_log = buffer.str();
                     }
                 }
-                else
-                {
+
+                if (exit_code >= 120) {
+                    const std::string sandbox_error = ExitCodeToSandboxError(exit_code);
+                    result.error_message =
+                        "编译沙箱系统错误 (退出码: " + std::to_string(exit_code) +
+                        ", sandbox_error: " + sandbox_error + "): " +
+                        GetExitCodeDescription(exit_code);
+                    if (!compile_log.empty()) {
+                        result.error_message += "\n" + compile_log;
+                    } else {
+                        result.error_message += "\n(未读取到 compile_error.log)";
+                    }
+                } else if (!compile_log.empty()) {
+                    result.error_message = compile_log;
+                } else {
                     result.error_message = "编译失败 (g++ 退出码: " + std::to_string(exit_code) + ")，且无法读取错误日志";
                 }
             }

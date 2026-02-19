@@ -21,6 +21,49 @@
 namespace deep_oj {
 
     namespace {
+
+        // 记录 Rootfs 初始化失败上下文，确保父进程可以从 compile_error.log 看到真实原因。
+        [[noreturn]] void ExitSetupError(
+            int code,
+            const char* step,
+            const char* work_dir,
+            const char* src_path = nullptr,
+            const char* target_path = nullptr,
+            const char* extra = nullptr)
+        {
+            int err = errno;
+            char msg[1536];
+            int n = snprintf(
+                msg,
+                sizeof(msg),
+                "[sandbox][setup_rootfs] step=%s code=%d errno=%d(%s) uid=%d gid=%d euid=%d egid=%d work_dir=%s",
+                step ? step : "-",
+                code,
+                err,
+                strerror(err),
+                (int)getuid(),
+                (int)getgid(),
+                (int)geteuid(),
+                (int)getegid(),
+                work_dir ? work_dir : "-");
+            if (n < 0) n = 0;
+            if (src_path && *src_path && n < (int)sizeof(msg)) {
+                n += snprintf(msg + n, sizeof(msg) - (size_t)n, " src=%s", src_path);
+            }
+            if (target_path && *target_path && n < (int)sizeof(msg)) {
+                n += snprintf(msg + n, sizeof(msg) - (size_t)n, " target=%s", target_path);
+            }
+            if (extra && *extra && n < (int)sizeof(msg)) {
+                n += snprintf(msg + n, sizeof(msg) - (size_t)n, " %s", extra);
+            }
+            if (n < 0) n = 0;
+            size_t len = (size_t)n;
+            if (len >= sizeof(msg)) len = sizeof(msg) - 1;
+            msg[len++] = '\n';
+            ssize_t wrote = write(STDERR_FILENO, msg, len);
+            (void)wrote;
+            _exit(code);
+        }
         
         // 确保父目录存在
         static void EnsureParentDir(const char* path, const char* base)
@@ -42,7 +85,9 @@ namespace deep_oj {
                     char dirbuf[512];
                     memcpy(dirbuf, tmp, i);
                     dirbuf[i] = '\0';
-                    if (mkdir(dirbuf, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+                    if (mkdir(dirbuf, 0755) == -1 && errno != EEXIST) {
+                        ExitSetupError(ERR_MKDIR_FAILED, "mkdir_parent", base, nullptr, dirbuf);
+                    }
                 }
             }
         }
@@ -54,13 +99,13 @@ namespace deep_oj {
             // 1. 设置挂载传播为 Private (防止污染宿主机)
             if (mount(nullptr, "/", nullptr, MS_PRIVATE | MS_REC, nullptr) == -1)
             {
-                _exit(ERR_MOUNT_PRIVATE);
+                ExitSetupError(ERR_MOUNT_PRIVATE, "mount_private_root", work_dir, "/", "/");
             }
 
             // 2. 将工作目录 Bind Mount 到自身 (pivot_root 的要求: 不能是 rootfs)
             if (mount(work_dir, work_dir, nullptr, MS_BIND | MS_REC, nullptr) == -1)
             {
-                _exit(ERR_MOUNT_BIND_SELF);
+                ExitSetupError(ERR_MOUNT_BIND_SELF, "mount_bind_self", work_dir, work_dir, work_dir);
             }
 
             // 3. 挂载目录配置 (mount_dirs)
@@ -69,23 +114,31 @@ namespace deep_oj {
             {
                 const char* src = g_runner_config.mount_dirs[i];
                 if (access(src, F_OK) != 0) {
-                    fprintf(stderr, "[Sandbox] Config Error: Mount dir not found: %s\n", src);
-                    _exit(ERR_MOUNT_BIND_LIB);
+                    ExitSetupError(ERR_MOUNT_BIND_LIB, "mount_dir_not_found", work_dir, src, nullptr);
                 }
 
                 int n = snprintf(target, sizeof(target), "%s%s", work_dir, src);
-                if (n >= (int)sizeof(target)) _exit(ERR_MKDIR_FAILED);
+                if (n >= (int)sizeof(target)) {
+                    errno = ENAMETOOLONG;
+                    ExitSetupError(ERR_MKDIR_FAILED, "mount_dir_target_too_long", work_dir, src, target);
+                }
 
                 // 传入 work_dir 作为基准
                 EnsureParentDir(target, work_dir); 
 
                 // A. 创建占位目录
-                if (mkdir(target, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+                if (mkdir(target, 0755) == -1 && errno != EEXIST) {
+                    ExitSetupError(ERR_MKDIR_FAILED, "mkdir_mount_dir", work_dir, src, target);
+                }
 
                 // B. 绑定挂载
-                if (mount(src, target, nullptr, MS_BIND | MS_REC, nullptr) == -1) _exit(ERR_MOUNT_BIND_LIB);
+                if (mount(src, target, nullptr, MS_BIND | MS_REC, nullptr) == -1) {
+                    ExitSetupError(ERR_MOUNT_BIND_LIB, "mount_bind_dir", work_dir, src, target);
+                }
                 // C. 重新挂载为只读
-                if (mount(src, target, nullptr, MS_BIND | MS_REC | MS_RDONLY | MS_REMOUNT, nullptr) == -1) _exit(ERR_REMOUNT_RO);
+                if (mount(src, target, nullptr, MS_BIND | MS_REC | MS_RDONLY | MS_REMOUNT, nullptr) == -1) {
+                    ExitSetupError(ERR_REMOUNT_RO, "mount_remount_dir_ro", work_dir, src, target);
+                }
             }
 
             // 4. 挂载文件配置 (mount_files)
@@ -93,8 +146,7 @@ namespace deep_oj {
             {
                 const char* src = g_runner_config.mount_files[i];
                 if (access(src, F_OK) != 0) {
-                     fprintf(stderr, "[Sandbox] Config Error: Mount file not found: %s\n", src);
-                     _exit(ERR_MOUNT_BIND_LIB);
+                     ExitSetupError(ERR_MOUNT_BIND_LIB, "mount_file_not_found", work_dir, src, nullptr);
                 }
 
                 snprintf(target, sizeof(target), "%s%s", work_dir, src);
@@ -105,22 +157,30 @@ namespace deep_oj {
                 // B. 文件占位: open(O_CREAT) -> touch
                 int fd = open(target, O_CREAT | O_RDWR, 0666);
                 if (fd != -1) close(fd);
-                else if (errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+                else if (errno != EEXIST) ExitSetupError(ERR_MKDIR_FAILED, "touch_mount_file_target", work_dir, src, target);
 
                 // C. Bind Mount (文件通常不需要 MS_REC)
-                if (mount(src, target, nullptr, MS_BIND, nullptr) == -1) _exit(ERR_MOUNT_BIND_LIB);
+                if (mount(src, target, nullptr, MS_BIND, nullptr) == -1) {
+                    ExitSetupError(ERR_MOUNT_BIND_LIB, "mount_bind_file", work_dir, src, target);
+                }
                 // D. Remount RO
-                if (mount(src, target, nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY, nullptr) == -1) _exit(ERR_REMOUNT_RO);
+                if (mount(src, target, nullptr, MS_BIND | MS_REMOUNT | MS_RDONLY, nullptr) == -1) {
+                    ExitSetupError(ERR_REMOUNT_RO, "mount_remount_file_ro", work_dir, src, target);
+                }
             }
 
             // 5. Pivot Root
             char old_root[512];
             snprintf(old_root, sizeof(old_root), "%s/old_root", work_dir);
-            if (mkdir(old_root, 0755) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
+            if (mkdir(old_root, 0755) == -1 && errno != EEXIST) {
+                ExitSetupError(ERR_MKDIR_FAILED, "mkdir_old_root", work_dir, nullptr, old_root);
+            }
 
-            if (syscall(SYS_pivot_root, work_dir, old_root) == -1) _exit(ERR_PIVOT_ROOT);
-            if (chdir("/") == -1) _exit(ERR_CHDIR_NEW_ROOT);
-            if (umount2("/old_root", MNT_DETACH) == -1) _exit(ERR_UMOUNT_OLD);
+            if (syscall(SYS_pivot_root, work_dir, old_root) == -1) {
+                ExitSetupError(ERR_PIVOT_ROOT, "pivot_root", work_dir, work_dir, old_root);
+            }
+            if (chdir("/") == -1) ExitSetupError(ERR_CHDIR_NEW_ROOT, "chdir_new_root", work_dir, "/", "/");
+            if (umount2("/old_root", MNT_DETACH) == -1) ExitSetupError(ERR_UMOUNT_OLD, "umount_old_root", work_dir, "/old_root", nullptr);
             if (rmdir("old_root") == -1 && errno != EEXIST && errno != EBUSY) {}
         }
 
@@ -324,31 +384,25 @@ namespace deep_oj {
         char* p = strrchr(work_dir, '/');
         if (p) *p = '\0';
 
-        // 3. [隔离] Setup Rootfs
+        // 3. 提前绑定 compile_error.log，确保 SetupRootfs 失败也有稳定日志。
+        int early_log_fd = open(config->log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (early_log_fd == -1) _exit(ERR_OPEN_OUTPUT);
+        if (dup2(early_log_fd, STDERR_FILENO) == -1) {
+            close(early_log_fd);
+            _exit(ERR_DUP2);
+        }
+        close(early_log_fd);
+
+        // 4. [隔离] Setup Rootfs
         SetupRootfs(work_dir);
 
-        // 4. [编译器需求] 挂载 /tmp
+        // 5. [编译器需求] 挂载 /tmp
         if (mkdir("/tmp", 01777) == -1 && errno != EEXIST) _exit(ERR_MKDIR_FAILED);
         char compile_tmpfs_opts[64];
         long long compile_tmpfs_mb = g_runner_config.compile_tmpfs_size_mb > 0 ? g_runner_config.compile_tmpfs_size_mb : 128;
         snprintf(compile_tmpfs_opts, sizeof(compile_tmpfs_opts), "size=%lldm,mode=1777", compile_tmpfs_mb);
         if (mount("tmpfs", "/tmp", "tmpfs", 0, compile_tmpfs_opts) == -1) {
             _exit(ERR_MOUNT_TMP);
-        }
-
-        // 5. 重定向 stderr
-        const char* log_filename = strrchr(config->log_path, '/');
-        log_filename = log_filename ? log_filename + 1 : config->log_path;
-
-        char new_log_path[512];
-        snprintf(new_log_path, sizeof(new_log_path), "/%s", log_filename);
-
-        int log_fd = open(new_log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (log_fd != -1) {
-            dup2(log_fd, STDERR_FILENO);
-            close(log_fd);
-        } else {
-            _exit(ERR_OPEN_OUTPUT);
         }
 
         // 6. [资源限制] 使用配置中的值，失败则直接退出
