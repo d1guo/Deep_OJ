@@ -18,8 +18,8 @@ import (
 
 	"github.com/d1guo/deep_oj/pkg/common"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 type JudgeService struct {

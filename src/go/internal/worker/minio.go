@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -44,9 +46,13 @@ type cacheEntry struct {
 }
 
 func NewTestCaseManager(cfg *Config) (*TestCaseManager, error) {
-	client, err := minio.New(cfg.MinIOEndpoint, &minio.Options{
+	minioEndpoint, secure, err := normalizeMinIOEndpoint(cfg.MinIOEndpoint, getEnvBool("MINIO_SECURE", false))
+	if err != nil {
+		return nil, fmt.Errorf("failed to normalize minio endpoint: %w", err)
+	}
+	client, err := minio.New(minioEndpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.MinIOAccess, cfg.MinIOSecret, ""),
-		Secure: false,
+		Secure: secure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to init minio: %w", err)
@@ -66,6 +72,19 @@ func NewTestCaseManager(cfg *Config) (*TestCaseManager, error) {
 		cacheList:       list.New(),
 		cacheMap:        make(map[string]*cacheEntry),
 	}, nil
+}
+
+func normalizeMinIOEndpoint(endpoint string, secure bool) (string, bool, error) {
+	host := strings.TrimSpace(endpoint)
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		parsed, err := url.Parse(host)
+		if err != nil {
+			return "", false, err
+		}
+		host = parsed.Host
+		secure = parsed.Scheme == "https"
+	}
+	return host, secure, nil
 }
 
 // Download returns the local path of the downloaded testcase zip

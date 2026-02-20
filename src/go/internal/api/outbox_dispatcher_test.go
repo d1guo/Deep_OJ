@@ -11,7 +11,7 @@ import (
 
 	"github.com/d1guo/deep_oj/internal/model"
 	"github.com/d1guo/deep_oj/internal/repository"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 type mockSubmitStore struct {

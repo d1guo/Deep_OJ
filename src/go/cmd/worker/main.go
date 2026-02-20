@@ -22,7 +22,7 @@ import (
 	"github.com/d1guo/deep_oj/internal/worker"
 	"github.com/d1guo/deep_oj/pkg/observability"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

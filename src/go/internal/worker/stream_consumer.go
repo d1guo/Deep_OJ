@@ -14,8 +14,8 @@ import (
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -120,10 +120,14 @@ type streamJudgeRunner interface {
 
 type redisStreamClient struct {
 	client *redis.Client
+	logger *slog.Logger
 }
 
 func newRedisStreamClient(client *redis.Client) *redisStreamClient {
-	return &redisStreamClient{client: client}
+	return &redisStreamClient{
+		client: client,
+		logger: slog.With("component", "worker_stream_consumer"),
+	}
 }
 
 func (c *redisStreamClient) EnsureGroup(ctx context.Context, stream, group string) error {
@@ -148,14 +152,35 @@ func (c *redisStreamClient) ReadNew(ctx context.Context, stream, group, consumer
 }
 
 func (c *redisStreamClient) AutoClaim(ctx context.Context, stream, group, consumer string, minIdle time.Duration, start string, count int64) ([]redis.XMessage, string, error) {
-	return c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-		Stream:   stream,
-		Group:    group,
-		Consumer: consumer,
-		MinIdle:  minIdle,
-		Start:    start,
-		Count:    count,
-	}).Result()
+	res, err := c.client.Do(
+		ctx,
+		"XAUTOCLAIM",
+		stream,
+		group,
+		consumer,
+		minIdle.Milliseconds(),
+		start,
+		"COUNT",
+		count,
+	).Result()
+	if err != nil {
+		return nil, "", err
+	}
+	nextID, msgs, deletedIDs, err := parseXAutoClaimReply(res)
+	if err != nil {
+		return nil, "", err
+	}
+	xackDeletedIDsBestEffort(
+		ctx,
+		func(ackCtx context.Context, ids ...string) (int64, error) {
+			return c.client.XAck(ackCtx, stream, group, ids...).Result()
+		},
+		c.logger,
+		stream,
+		group,
+		deletedIDs,
+	)
+	return msgs, nextID, nil
 }
 
 func (c *redisStreamClient) Ack(ctx context.Context, stream, group string, ids ...string) (int64, error) {
@@ -164,6 +189,155 @@ func (c *redisStreamClient) Ack(ctx context.Context, stream, group string, ids .
 
 func (c *redisStreamClient) Get(ctx context.Context, key string) (string, error) {
 	return c.client.Get(ctx, key).Result()
+}
+
+func parseXAutoClaimReply(v interface{}) (string, []redis.XMessage, []string, error) {
+	parts, ok := v.([]interface{})
+	if !ok {
+		return "", nil, nil, fmt.Errorf("xautoclaim unexpected response type: %T", v)
+	}
+	if len(parts) < 2 || len(parts) > 3 {
+		return "", nil, nil, fmt.Errorf("xautoclaim unexpected response length: %d", len(parts))
+	}
+
+	nextID, err := parseRedisBulkString(parts[0])
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("xautoclaim parse next id: %w", err)
+	}
+	msgs, err := parseXAutoClaimMessages(parts[1])
+	if err != nil {
+		return "", nil, nil, err
+	}
+	var deletedIDs []string
+	if len(parts) == 3 {
+		deletedIDs, err = parseXAutoClaimDeletedIDs(parts[2])
+		if err != nil {
+			return "", nil, nil, err
+		}
+	}
+	return nextID, msgs, deletedIDs, nil
+}
+
+func parseXAutoClaimMessages(v interface{}) ([]redis.XMessage, error) {
+	rawMessages, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("xautoclaim unexpected messages type: %T", v)
+	}
+	msgs := make([]redis.XMessage, 0, len(rawMessages))
+	for _, rawMsg := range rawMessages {
+		parts, ok := rawMsg.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("xautoclaim unexpected message type: %T", rawMsg)
+		}
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("xautoclaim unexpected message length: %d", len(parts))
+		}
+		id, err := parseRedisBulkString(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("xautoclaim parse message id: %w", err)
+		}
+		values, err := parseXAutoClaimValues(parts[1])
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, redis.XMessage{
+			ID:     id,
+			Values: values,
+		})
+	}
+	return msgs, nil
+}
+
+func parseXAutoClaimValues(v interface{}) (map[string]interface{}, error) {
+	rawValues, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("xautoclaim unexpected values type: %T", v)
+	}
+	if len(rawValues)%2 != 0 {
+		return nil, fmt.Errorf("xautoclaim values length is not even: %d", len(rawValues))
+	}
+	values := make(map[string]interface{}, len(rawValues)/2)
+	for i := 0; i < len(rawValues); i += 2 {
+		key, err := parseRedisBulkString(rawValues[i])
+		if err != nil {
+			return nil, fmt.Errorf("xautoclaim parse field key: %w", err)
+		}
+		switch value := rawValues[i+1].(type) {
+		case []byte:
+			values[key] = string(value)
+		default:
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+func parseXAutoClaimDeletedIDs(v interface{}) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	rawDeletedIDs, ok := v.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("xautoclaim unexpected deleted ids type: %T", v)
+	}
+	deletedIDs := make([]string, 0, len(rawDeletedIDs))
+	for _, rawDeletedID := range rawDeletedIDs {
+		deletedID, err := parseRedisBulkString(rawDeletedID)
+		if err != nil {
+			return nil, fmt.Errorf("xautoclaim parse deleted id: %w", err)
+		}
+		deletedIDs = append(deletedIDs, deletedID)
+	}
+	return deletedIDs, nil
+}
+
+func parseRedisBulkString(v interface{}) (string, error) {
+	switch value := v.(type) {
+	case string:
+		return value, nil
+	case []byte:
+		return string(value), nil
+	default:
+		return "", fmt.Errorf("unexpected bulk string type: %T", v)
+	}
+}
+
+func xackDeletedIDsBestEffort(
+	ctx context.Context,
+	ackFn func(context.Context, ...string) (int64, error),
+	logger *slog.Logger,
+	stream string,
+	group string,
+	deletedIDs []string,
+) {
+	if len(deletedIDs) == 0 || ackFn == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	acked, err := ackFn(ctx, deletedIDs...)
+	if err != nil {
+		xackTotal.WithLabelValues("error").Inc()
+		logger.Error(
+			"XAUTOCLAIM deleted ids XACK failed",
+			"event", "xautoclaim_deleted_ids_ack",
+			"stream", stream,
+			"group", group,
+			"count", len(deletedIDs),
+			"error", err,
+		)
+		return
+	}
+	xackTotal.WithLabelValues("ok").Inc()
+	logger.Info(
+		"XAUTOCLAIM deleted ids XACK",
+		"event", "xautoclaim_deleted_ids_ack",
+		"stream", stream,
+		"group", group,
+		"count", len(deletedIDs),
+		"acked", acked,
+	)
 }
 
 type StreamConsumer struct {
@@ -388,6 +562,9 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 	for {
 		reserved := c.reserveSlots(int(count))
 		if reserved == 0 {
+			reserved = c.reserveSlotsWithWait(ctx, 1, c.reclaimReserveWait())
+		}
+		if reserved == 0 {
 			workerStreamBackpressureTotal.WithLabelValues(backpressureSourceReclaim).Inc()
 			if c.shouldLog("stream_backpressure_reclaim") {
 				c.logger.Info(
@@ -398,6 +575,9 @@ func (c *StreamConsumer) reclaimOnce(ctx context.Context) {
 				)
 			}
 			return
+		}
+		if reserved < int(count) {
+			reserved += c.reserveSlots(int(count) - reserved)
 		}
 
 		msgs, nextID, err := c.redis.AutoClaim(
@@ -501,6 +681,49 @@ func (c *StreamConsumer) reserveSlots(limit int) int {
 		}
 	}
 	return reserved
+}
+
+func (c *StreamConsumer) reserveSlotsWithWait(ctx context.Context, limit int, wait time.Duration) int {
+	if c == nil || c.slots == nil || limit <= 0 {
+		return 0
+	}
+	reserved := c.reserveSlots(limit)
+	if reserved > 0 {
+		return reserved
+	}
+	if wait <= 0 {
+		return 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return 0
+	case <-timer.C:
+		return 0
+	case <-c.slots:
+		reserved = 1
+	}
+	if reserved < limit {
+		reserved += c.reserveSlots(limit - reserved)
+	}
+	return reserved
+}
+
+func (c *StreamConsumer) reclaimReserveWait() time.Duration {
+	wait := c.backpressureSleep
+	if wait <= 0 {
+		wait = defaultWorkerBackpressureSleepMs * time.Millisecond
+	}
+	blockMs := c.config.JobStreamBlockMs
+	if blockMs <= 0 {
+		blockMs = 2000
+	}
+	wait += time.Duration(blockMs) * time.Millisecond
+	if wait > 3*time.Second {
+		wait = 3 * time.Second
+	}
+	return wait
 }
 
 func (c *StreamConsumer) releaseSlots(count int) {

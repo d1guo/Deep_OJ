@@ -8,7 +8,7 @@ import (
 
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
-	redisv8 "github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -61,7 +61,7 @@ func (w *Watchdog) Start(ctx context.Context) {
 func (w *Watchdog) scanAndReclaim(ctx context.Context) error {
 	// 1. 从 processing ZSET 读取超时任务。
 	cutoff := time.Now().Add(-w.interval).UnixMilli()
-	tasks, err := w.redisClient.ZRangeByScore(ctx, common.TaskProcessingZSet, &redisv8.ZRangeBy{
+	tasks, err := w.redisClient.ZRangeByScore(ctx, common.TaskProcessingZSet, &redis.ZRangeBy{
 		Min: "-inf",
 		Max: fmt.Sprintf("%d", cutoff),
 	})

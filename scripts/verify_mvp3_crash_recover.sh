@@ -24,7 +24,7 @@ POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}"
 JOB_STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
 JOB_STREAM_GROUP="${JOB_STREAM_GROUP:-deepoj:workers}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-oj-redis}"
-REDIS_PASSWORD="${REDIS_PASSWORD:-deepoj_redis_password_change_me}"
+REDIS_PASSWORD="${REDIS_PASSWORD:-deepoj_redis_change_me}"
 
 TMP_DIR="$(mktemp -d)"
 FAILED_STEP="init"
@@ -266,12 +266,12 @@ is_int() {
 
 parse_xpending_count() {
   local raw="$1"
-  local first_line
-  first_line="$(printf '%s\n' "$raw" | sed -n '/[^[:space:]]/ {p; q;}')"
-  if ! printf '%s\n' "$first_line" | grep -Eq '^[0-9]+$'; then
+  local count
+  count="$(printf '%s\n' "$raw" | awk '/^[0-9]+$/ {print; exit}')"
+  if [[ -z "$count" ]]; then
     return 1
   fi
-  printf '%s' "$first_line"
+  printf '%s' "$count"
 }
 
 wait_api_ready() {

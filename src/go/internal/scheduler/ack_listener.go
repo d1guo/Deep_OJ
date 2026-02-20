@@ -13,11 +13,11 @@ import (
 
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
-	redisv8 "github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 // StartAckListener 启动 ACK 监听
-func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *repository.PostgresDB) {
+func StartAckListener(ctx context.Context, redisClient *repository.RedisClient, db *repository.PostgresDB) {
 	slog.Info("启动结果流 ACK 监听器...")
 
 	pendingCount := getEnvInt("ACK_PENDING_COUNT", 20)
@@ -26,7 +26,7 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 	newBlock := time.Duration(getEnvInt("ACK_NEW_BLOCK_MS", 5000)) * time.Millisecond
 
 	// 创建消费组（幂等）
-	if err := redis.XGroupCreateMkStream(ctx, common.ResultStream, common.ResultStreamGroup, "0"); err != nil {
+	if err := redisClient.XGroupCreateMkStream(ctx, common.ResultStream, common.ResultStreamGroup, "0"); err != nil {
 		slog.Error("创建流消费组失败", "error", err)
 	}
 	consumer := os.Getenv("SCHEDULER_ID")
@@ -35,7 +35,7 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 	}
 
 	// 尝试处理遗留的 Pending 消息
-	if streams, err := redis.XReadGroup(ctx, &redisv8.XReadGroupArgs{
+	if streams, err := redisClient.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    common.ResultStreamGroup,
 		Consumer: consumer,
 		Streams:  []string{common.ResultStream, "0"},
@@ -47,11 +47,11 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 				jobID, _ := msg.Values["job_id"].(string)
 				resultJSON, _ := msg.Values["result"].(string)
 				if jobID == "" {
-					_ = redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
+					_ = redisClient.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
 					continue
 				}
-				if handleTaskCompletion(ctx, jobID, resultJSON, redis, db) {
-					_ = redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
+				if handleTaskCompletion(ctx, jobID, resultJSON, redisClient, db) {
+					_ = redisClient.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
 				} else {
 					slog.Warn("结果处理失败，保留在待确认队列", "job_id", jobID, "id", msg.ID)
 				}
@@ -66,7 +66,7 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 		default:
 		}
 
-		streams, err := redis.XReadGroup(ctx, &redisv8.XReadGroupArgs{
+		streams, err := redisClient.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    common.ResultStreamGroup,
 			Consumer: consumer,
 			Streams:  []string{common.ResultStream, ">"},
@@ -87,13 +87,13 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 				resultJSON, _ := msg.Values["result"].(string)
 				if jobID == "" {
 					slog.Warn("流消息缺少 job_id", "id", msg.ID)
-					_ = redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
+					_ = redisClient.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID)
 					continue
 				}
 				slog.Debug("收到任务结果", "job_id", jobID)
 
-				if handleTaskCompletion(ctx, jobID, resultJSON, redis, db) {
-					if err := redis.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID); err != nil {
+				if handleTaskCompletion(ctx, jobID, resultJSON, redisClient, db) {
+					if err := redisClient.XAck(ctx, common.ResultStream, common.ResultStreamGroup, msg.ID); err != nil {
 						slog.Error("XAck 失败", "job_id", jobID, "error", err)
 					}
 				} else {
@@ -104,21 +104,21 @@ func StartAckListener(ctx context.Context, redis *repository.RedisClient, db *re
 	}
 }
 
-func handleTaskCompletion(ctx context.Context, jobID, resultJSON string, redis *repository.RedisClient, db *repository.PostgresDB) bool {
+func handleTaskCompletion(ctx context.Context, jobID, resultJSON string, redisClient *repository.RedisClient, db *repository.PostgresDB) bool {
 	payloadKey := common.TaskPayloadPrefix + jobID
-	rawItem, err := redis.Get(ctx, payloadKey)
+	rawItem, err := redisClient.Get(ctx, payloadKey)
 	if err != nil {
 		rawItem = ""
 	}
 
 	// 1. 处理结果 (同步到 DB + 更新指标)
-	if !processResult(ctx, jobID, resultJSON, redis, db) {
+	if !processResult(ctx, jobID, resultJSON, redisClient, db) {
 		return false
 	}
 
 	// 2. 从队列移除
 	if rawItem != "" {
-		if err := redis.LRem(ctx, common.QueueProcessing, 1, rawItem); err != nil {
+		if err := redisClient.LRem(ctx, common.QueueProcessing, 1, rawItem); err != nil {
 			slog.Error("从 processing 队列移除任务失败", "job_id", jobID, "error", err)
 		} else {
 			slog.Debug("已从 processing 队列移除任务", "job_id", jobID)
@@ -127,24 +127,24 @@ func handleTaskCompletion(ctx context.Context, jobID, resultJSON string, redis *
 
 	// 3. 清理辅助键并回收 inflight
 	assignmentKey := common.TaskAssignmentPrefix + jobID
-	workerID, _ := redis.Get(ctx, assignmentKey)
+	workerID, _ := redisClient.Get(ctx, assignmentKey)
 	if workerID != "" {
-		_, _ = redis.Decr(ctx, common.WorkerInflightPrefix+workerID)
+		_, _ = redisClient.Decr(ctx, common.WorkerInflightPrefix+workerID)
 	}
-	_ = redis.Del(ctx,
+	_ = redisClient.Del(ctx,
 		payloadKey,
 		assignmentKey,
 		common.TaskProcessingStartPrefix+jobID,
 	)
-	_ = redis.ZRem(ctx, common.TaskProcessingZSet, jobID)
+	_ = redisClient.ZRem(ctx, common.TaskProcessingZSet, jobID)
 	return true
 }
 
-func processResult(ctx context.Context, jobID string, resultJSON string, redis *repository.RedisClient, db *repository.PostgresDB) bool {
+func processResult(ctx context.Context, jobID string, resultJSON string, redisClient *repository.RedisClient, db *repository.PostgresDB) bool {
 	// 1. 从 Redis 读取结果（当流中 result 为空时回退）。
 	if resultJSON == "" {
 		resultKey := common.ResultKeyPrefix + jobID
-		val, err := redis.Get(ctx, resultKey)
+		val, err := redisClient.Get(ctx, resultKey)
 		if err != nil || val == "" {
 			slog.Error("在 Redis 中未找到结果", "job_id", jobID, "error", err)
 			return false
@@ -194,7 +194,7 @@ func processResult(ctx context.Context, jobID string, resultJSON string, redis *
 	)
 
 	if cacheKey != "" {
-		_ = redis.Del(ctx, common.InFlightKeyPrefix+cacheKey)
+		_ = redisClient.Del(ctx, common.InFlightKeyPrefix+cacheKey)
 	}
 	return true
 }

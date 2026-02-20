@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -246,7 +246,16 @@ func (r *RedisClient) LRange(ctx context.Context, key string, start, stop int64)
 
 // ZAdd 向有序集合添加成员
 func (r *RedisClient) ZAdd(ctx context.Context, key string, members ...*redis.Z) error {
-	if err := r.client.ZAdd(ctx, key, members...).Err(); err != nil {
+	items := make([]redis.Z, 0, len(members))
+	for _, member := range members {
+		if member != nil {
+			items = append(items, *member)
+		}
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	if err := r.client.ZAdd(ctx, key, items...).Err(); err != nil {
 		return fmt.Errorf("Redis ZADD %s 失败: %w", key, err)
 	}
 	return nil

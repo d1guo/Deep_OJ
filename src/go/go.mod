@@ -4,12 +4,12 @@ go 1.24.0
 
 require (
 	github.com/gin-gonic/gin v1.9.1
-	github.com/go-redis/redis/v8 v8.11.5
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/minio/minio-go/v7 v7.0.98
 	github.com/prometheus/client_golang v1.23.2
+	github.com/redis/go-redis/v9 v9.18.0
 	go.etcd.io/etcd/client/v3 v3.5.10
 	golang.org/x/crypto v0.48.0
 	golang.org/x/oauth2 v0.35.0
@@ -65,7 +65,7 @@ require (
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.10 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.10 // indirect
-	go.uber.org/atomic v1.7.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go.uber.org/zap v1.17.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect

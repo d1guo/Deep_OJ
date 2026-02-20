@@ -14,7 +14,7 @@ import (
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/pkg/common"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 type mockAutoClaimBatch struct {
@@ -1083,6 +1083,45 @@ func TestStreamConsumer_ReclaimSkipsWhenPoolFull(t *testing.T) {
 	}
 }
 
+func TestStreamConsumer_ReclaimWaitsForSlotRelease(t *testing.T) {
+	cfg := newTestStreamConfig()
+	cfg.PoolSize = 1
+	cfg.JobReclaimCount = 1
+	cfg.JobStreamBlockMs = 20
+
+	redisClient := &mockStreamRedis{
+		autoClaimBatches: []mockAutoClaimBatch{{messages: nil, nextID: "0-0"}},
+	}
+	db := &mockStreamDB{poisonOK: true}
+	runner := &mockStreamRunner{response: &pb.TaskResponse{Message: "OK"}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	consumer := newStreamConsumerForTest(cfg, redisClient, db, runner, logger)
+	consumer.backpressureSleep = 10 * time.Millisecond
+
+	if reserved := consumer.reserveSlots(1); reserved != 1 {
+		t.Fatalf("expected to reserve one slot, got %d", reserved)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		consumer.reclaimOnce(context.Background())
+		close(done)
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	consumer.releaseSlots(1)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting reclaimOnce to finish")
+	}
+
+	if redisClient.autoClaimCalls != 1 {
+		t.Fatalf("expected reclaim to call XAUTOCLAIM once after slot release, got calls=%d", redisClient.autoClaimCalls)
+	}
+}
+
 func TestDecodeStreamTaskPayload_DefaultsLegacyEnvelopeFields(t *testing.T) {
 	taskJSON, err := json.Marshal(&pb.TaskRequest{
 		JobId:   "job-legacy",
@@ -1129,4 +1168,128 @@ func mustBuildPayloadEnvelopeFromTask(t *testing.T, task *pb.TaskRequest) string
 		t.Fatalf("marshal envelope: %v", err)
 	}
 	return string(raw)
+}
+
+func TestParseXAutoClaimReply_ThreePartResponse(t *testing.T) {
+	raw := []interface{}{
+		"1700000002000-0",
+		[]interface{}{
+			[]interface{}{
+				"1700000001000-0",
+				[]interface{}{"job_id", "job-1", "priority", "0"},
+			},
+		},
+		[]interface{}{"1700000000999-0", "1700000000998-0"},
+	}
+
+	nextID, msgs, deletedIDs, err := parseXAutoClaimReply(raw)
+	if err != nil {
+		t.Fatalf("parseXAutoClaimReply failed: %v", err)
+	}
+	if nextID != "1700000002000-0" {
+		t.Fatalf("unexpected nextID: %s", nextID)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("unexpected message count: %d", len(msgs))
+	}
+	if msgs[0].ID != "1700000001000-0" {
+		t.Fatalf("unexpected message id: %s", msgs[0].ID)
+	}
+	if got, ok := msgs[0].Values["job_id"]; !ok || got != "job-1" {
+		t.Fatalf("unexpected job_id value: %v", got)
+	}
+	if got, ok := msgs[0].Values["priority"]; !ok || got != "0" {
+		t.Fatalf("unexpected priority value: %v", got)
+	}
+	if len(deletedIDs) != 2 {
+		t.Fatalf("unexpected deleted id count: %d", len(deletedIDs))
+	}
+	if deletedIDs[0] != "1700000000999-0" || deletedIDs[1] != "1700000000998-0" {
+		t.Fatalf("unexpected deleted ids: %v", deletedIDs)
+	}
+}
+
+func TestParseXAutoClaimReply_TwoPartResponse(t *testing.T) {
+	raw := []interface{}{
+		[]byte("1700000003000-0"),
+		[]interface{}{
+			[]interface{}{
+				[]byte("1700000001500-0"),
+				[]interface{}{[]byte("job_id"), []byte("job-2")},
+			},
+		},
+	}
+
+	nextID, msgs, deletedIDs, err := parseXAutoClaimReply(raw)
+	if err != nil {
+		t.Fatalf("parseXAutoClaimReply failed: %v", err)
+	}
+	if nextID != "1700000003000-0" {
+		t.Fatalf("unexpected nextID: %s", nextID)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("unexpected message count: %d", len(msgs))
+	}
+	if msgs[0].ID != "1700000001500-0" {
+		t.Fatalf("unexpected message id: %s", msgs[0].ID)
+	}
+	if got, ok := msgs[0].Values["job_id"]; !ok || got != "job-2" {
+		t.Fatalf("unexpected job_id value: %v", got)
+	}
+	if len(deletedIDs) != 0 {
+		t.Fatalf("expected no deleted ids, got %v", deletedIDs)
+	}
+}
+
+func TestParseXAutoClaimReply_InvalidLength(t *testing.T) {
+	_, _, _, err := parseXAutoClaimReply([]interface{}{"0-0"})
+	if err == nil {
+		t.Fatalf("expected parseXAutoClaimReply to fail on invalid length")
+	}
+}
+
+func TestXAckDeletedIDsBestEffort_CallsAck(t *testing.T) {
+	called := 0
+	var gotIDs []string
+	xackDeletedIDsBestEffort(
+		context.Background(),
+		func(ctx context.Context, ids ...string) (int64, error) {
+			called++
+			gotIDs = append([]string(nil), ids...)
+			return int64(len(ids)), nil
+		},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"deepoj:jobs",
+		"deepoj:workers",
+		[]string{"1700000000999-0", "1700000000998-0"},
+	)
+
+	if called != 1 {
+		t.Fatalf("expected ack to be called once, got %d", called)
+	}
+	if len(gotIDs) != 2 {
+		t.Fatalf("expected 2 ids passed to ack, got %d", len(gotIDs))
+	}
+	if gotIDs[0] != "1700000000999-0" || gotIDs[1] != "1700000000998-0" {
+		t.Fatalf("unexpected ids passed to ack: %v", gotIDs)
+	}
+}
+
+func TestXAckDeletedIDsBestEffort_AckErrorDoesNotPanic(t *testing.T) {
+	called := 0
+	xackDeletedIDsBestEffort(
+		context.Background(),
+		func(ctx context.Context, ids ...string) (int64, error) {
+			called++
+			return 0, errors.New("xack failed")
+		},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"deepoj:jobs",
+		"deepoj:workers",
+		[]string{"1700000000999-0"},
+	)
+
+	if called != 1 {
+		t.Fatalf("expected ack to be called once, got %d", called)
+	}
 }

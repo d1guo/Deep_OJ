@@ -126,7 +126,10 @@
 - [x] D3 API 背压：按 backlog/oldest_age 分级限流；重压返回 429 + Retry-After  
   - 验收：`bash scripts/verify_d3_backpressure.sh`（出现 429 + Retry-After，恢复 worker 后 2xx）
 - [x] D3.1 升级 go-redis 到 v9 以兼容 Redis 7+/8 的 XAUTOCLAIM 返回结构，修复 reclaim loop 解析错误  
-  - 验收：`docker logs oj-worker --tail 200 | rg -n "got 3, wanted 2|xautoclaim_error" || true` => 0 行
+  - 验收证据（2026-02-19）：
+    - `cd src/go && go list -m github.com/redis/go-redis/v9` => `github.com/redis/go-redis/v9 v9.18.0`
+    - `docker compose up -d --build worker`
+    - `docker logs oj-worker --tail 200 | rg -n "got 3, wanted 2|xautoclaim_error"` => 无匹配（退出码 1）
 
 ### E. 架构收敛（避免双系统语义打架）
 - [x] E1 固化 Streams 与 Scheduler/gRPC 决策（已选 A：Streams-only 数据面）  

@@ -49,7 +49,7 @@ import (
 	"github.com/d1guo/deep_oj/pkg/common"
 	"github.com/d1guo/deep_oj/pkg/observability"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/protobuf/proto"
 )
 
