@@ -1,73 +1,77 @@
 # Deep-OJ
 
-Deep-OJ 是一个面向在线评测场景的分布式判题系统，采用 Go + C++ 混合实现。
+Deep-OJ 是一个面向在线判题场景的分布式系统，采用 Go + C++ 实现。
 
-当前代码状态（以仓库现状为准，2026-02-21）为 Streams-only 数据面。
+当前仓库架构已收敛为 **Streams-only**：
 
-## 架构变化概览
+- 唯一数据面链路：`API(outbox) -> Redis Stream -> Worker(XREADGROUP) -> DB finalize -> XACK -> reclaim(XAUTOCLAIM)`
+- `scheduler` 保留为独立进程/容器，但只承担控制面职责
+- 已移除 `etcd` 运行时依赖
+- 已移除 legacy 数据面（Redis List + scheduler gRPC push 派单）
 
-当前主执行链路已切换为 Streams-first（由 Worker 直接消费）。
-
-| 维度 | 旧链路（历史） | 新链路（当前主线） |
-| --- | --- | --- |
-| 入队 | API 直接写 Redis List | API 写 DB（`submissions + outbox_events`），由 outbox dispatcher 投递 Redis Stream |
-| 消费 | Scheduler 拉取队列后推送给 Worker | Worker 自己 `XREADGROUP` 消费 `deepoj:jobs` |
-| 重试/回收 | Scheduler + 队列回推 | Worker `XAUTOCLAIM` reclaim + DB reclaim CAS |
-| 最终落库 | Scheduler ACK Listener 回写 DB | Worker 侧按 attempt fencing 写 DB，成功后才 `XACK` |
-| 真相源 | Redis + DB 混合语义 | DB 状态机为唯一真相源 |
-
-## Scheduler 现在的作用
-
-Scheduler 已收敛为控制面：
-
-1. 维护 Worker 发现视图与基础指标（活跃 worker 数等）。
-2. 暴露调度器 metrics 端点，供观测系统抓取。
-3. 不再执行任何派单/回写/重试/慢路径数据面循环。
-
-## 当前主链路架构
+## 当前架构图
 
 ```mermaid
-flowchart LR
-    Client[Client] --> API[API Server]
-    API -->|db_tx| PG[(PostgreSQL)]
-    API -->|xadd_jobs| JOBS[(Redis Stream deepoj_jobs)]
+flowchart TD
+    C[Client] --> API[API]
 
-    JOBS -->|XREADGROUP| Worker[Worker Stream Consumer]
-    Worker -->|claim_and_fenced_finalize| PG
-    Worker -->|run_judge| Judge[Cpp Sandbox]
-    Worker -->|cache_result| Redis[(Redis)]
-    Scheduler[Scheduler] -->|metrics_only| Monitor[Observability]
+    API -->|事务写入 submissions + outbox_events| PG[(PostgreSQL)]
+    API --> OB[Outbox Dispatcher]
+    OB -->|XADD deepoj:jobs| RS[(Redis Stream)]
+
+    W[Worker] -->|XREADGROUP / XAUTOCLAIM| RS
+    W -->|claim/heartbeat/finalize| PG
+    W --> J[Judge Engine]
+    W -->|DB 成功后 XACK| RS
+
+    S[Scheduler 控制面] -->|repair 扫描候选| PG
+    S -->|repair XADD / GC XTRIM| RS
+    S --> M[Metrics / Logs]
 ```
 
-## 核心不变量
+## 与旧架构对比（gRPC + etcd）
 
-1. DB 是唯一状态机真相源，Streams 只负责驱动执行。
-2. `claim -> DB CAS(RUNNING)` 成功后才能执行判题。
-3. 只有 DB finalize 成功后才允许 `XACK`（禁止先 ACK 后落库）。
-4. reclaim 使用 `XAUTOCLAIM`，并按业务失败/系统失败分流处理。
-5. finalize 使用 attempt fencing，旧 attempt 不允许覆盖新 attempt 结果。
+| 维度 | 旧架构（历史） | 当前架构（主线） |
+| --- | --- | --- |
+| 服务发现 | `etcd` 注册与续租 | `WORKER_ADDR/WORKER_ADDRS` 静态配置，无 etcd |
+| 派单方式 | scheduler 通过 gRPC push 给 worker | worker 自主 `XREADGROUP` 拉取 |
+| 队列介质 | Redis List | Redis Stream（`deepoj:jobs`） |
+| 回收机制 | scheduler watchdog/retry/slow_path | worker `XAUTOCLAIM` + DB reclaim CAS |
+| 数据面归属 | scheduler + worker 混合 | worker 独占数据面，scheduler 仅控制面 |
+| 启动依赖 | etcd 不可用会影响启动 | 无 etcd 依赖，compose 不含 etcd |
 
-## 组件职责
+## Scheduler（B3）控制面职责
 
-| 组件 | 主要职责 |
-| --- | --- |
-| API (`src/go/cmd/api`) | 鉴权、限流、参数校验、写提交、写 outbox |
-| Outbox Dispatcher (`src/go/internal/api/outbox_dispatcher.go`) | 扫描 outbox，投递 `deepoj:jobs` |
-| Worker (`src/go/cmd/worker`) | 消费 Streams、执行判题、租约心跳、reclaim、fenced finalize |
-| Judge Engine (`src/core/worker`) | 编译/运行/资源隔离/结果输出 |
-| Scheduler (`src/go/cmd/scheduler`) | 控制面能力（发现与指标） |
-| PostgreSQL | 提交状态机、attempt/lease/fencing、outbox 记录 |
-| Redis | Streams、payload 缓存、结果缓存 |
+`scheduler` 只启动控制面 loop，不触碰数据面派单与 ACK：
+
+1. `RepairLoop`：从 DB 扫描需要重投递的任务，执行 `XADD` 回 `deepoj:jobs`
+2. `GcLoop`：执行 Stream `XTRIM`；DB 清理默认 dry-run（默认不删除）
+3. 观测：输出控制面指标与结构化日志
+
+启动日志固定字段：
+
+- `dispatch_mode=streams_only`
+- `control_plane_only=true`
+- `legacy_loops_started=0`
+- `control_plane_loops_started=repair,gc`
+
+## 核心约束
+
+1. DB 是唯一状态机真相源，Redis Stream 仅负责驱动执行。
+2. 仅当 `claim -> DB CAS(RUNNING)` 成功后才允许执行判题。
+3. 仅当 DB finalize 成功后才允许 `XACK`。
+4. reclaim 通过 `XAUTOCLAIM`，并按业务失败/系统失败分流。
+5. scheduler 不启动 legacy loop（dispatch/ack_listener/watchdog/retry/slow_path）。
 
 ## 快速开始
 
-### 1. 依赖
+### 依赖
 
-- Linux（推荐 Ubuntu 22.04+）
 - Docker + Docker Compose
-- Python 3（运行集成脚本）
+- Linux（建议 cgroup v2）
+- Python 3（集成脚本使用）
 
-### 2. 启动
+### 启动
 
 ```bash
 cd /home/diguo/Deep_OJ
@@ -83,48 +87,61 @@ docker compose up -d --build
 docker compose ps
 ```
 
-### 3. 端到端验证
+## 验收脚本
+
+### 架构收敛验证
 
 ```bash
-python3 tests/integration/test_e2e.py
+bash scripts/verify_b1_no_etcd.sh
+bash scripts/verify_b2_no_legacy_dataplane.sh
+bash scripts/verify_b3_control_plane.sh
 ```
 
-或使用仓库脚本：
+### 功能与稳定性验证
 
 ```bash
 bash scripts/verify_mvp2_e2e.sh
+bash scripts/verify_mvp3_crash_recover.sh
+bash scripts/verify_mvp4_observability.sh
+bash scripts/verify_ci.sh
+bash scripts/verify_g1_kill_all.sh
 ```
 
-## 常用接口
+## Scheduler 控制面配置
 
-| 方法 | 路径 | 说明 |
+可在 `config.yaml` 的 `scheduler.control_plane` 中配置，默认值如下：
+
+| 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
-| POST | `/api/v1/auth/register` | 注册 |
-| POST | `/api/v1/auth/login` | 登录 |
-| POST | `/api/v1/problems` | 创建题目（管理员） |
-| DELETE | `/api/v1/problems/:id` | 删除题目（管理员） |
-| POST | `/api/v1/submit` | 提交代码 |
-| GET | `/api/v1/status/:job_id` | 查询状态/结果 |
-| GET | `/api/v1/health` | 健康检查 |
-| GET | `/metrics` | 指标 |
+| `repair_enabled` | `false` | 是否开启 repair |
+| `repair_interval_ms` | `30000` | repair 周期 |
+| `repair_batch_size` | `200` | repair 批大小 |
+| `repair_min_age_sec` | `60` | 候选任务最小年龄 |
+| `gc_enabled` | `false` | 是否开启 GC |
+| `gc_interval_ms` | `600000` | GC 周期 |
+| `stream_trim_maxlen` | `200000` | Stream 裁剪上限 |
+| `db_retention_days` | `14` | DB 保留天数 |
+| `db_delete_enabled` | `false` | 是否执行真实删除 |
+| `db_delete_batch_size` | `500` | DB 删除批大小 |
 
-## 关键配置项
+说明：默认配置下 repair/gc 处于关闭状态，避免误操作。
 
-| 配置 | 默认值 | 说明 |
-| --- | --- | --- |
-| `OUTBOX_ENABLED` | `true` | 是否启用事务 outbox |
-| `JOB_STREAM_KEY` | `deepoj:jobs` | 主任务 Stream |
-| `JOB_STREAM_GROUP` | `deepoj:workers` | Worker consumer group |
-| `JOB_LEASE_SEC` | `60` | 任务租约秒数 |
-| `JOB_HEARTBEAT_SEC` | `10` | 租约续期心跳间隔 |
-| `JOB_RECLAIM_INTERVAL_SEC` | `5` | reclaim 扫描周期 |
-| `JOB_STREAM_MAXLEN` | `200000` | Stream 近似长度上限 |
+## 目录说明（核心）
+
+- `src/go/cmd/api`：API 入口
+- `src/go/cmd/worker`：worker 入口
+- `src/go/cmd/scheduler`：scheduler 控制面入口
+- `src/go/internal/api`：提交、outbox、限流与观测
+- `src/go/internal/worker`：Streams 消费、reclaim、fencing finalize
+- `src/go/internal/scheduler`：repair/gc/控制面指标
+- `src/core`：C++ 判题与沙箱执行核心
+- `scripts`：验收与运维脚本
 
 ## 相关文档
 
-- 设计约束与时序：`DESIGN.md`
-- 运行排障：`RUNBOOK.md`
-- 能力演进与验收证据：`TASK.md`
+- 设计与不变量：`DESIGN.md`
+- 启动与排障：`RUNBOOK.md`
+- 任务与验收证据：`TASK.md`
 
 ## License
 
