@@ -142,9 +142,9 @@ if [ $EXIT_CODE -eq 0 ]; then
     curl -s http://localhost:8080/metrics | grep "http_requests_total" | head -n 5
     
     echo -e "\n--- 调度器指标 (:9091) ---"
-    curl -s http://localhost:9091/metrics | grep "scheduler_queue_depth"
-    curl -s http://localhost:9091/metrics | grep "submission_result_total"
     curl -s http://localhost:9091/metrics | grep "scheduler_active_workers"
+    curl -s http://localhost:9091/metrics | grep "control_plane_only"
+    curl -s http://localhost:9091/metrics | grep "legacy_loops_started"
 else
     echo -e "${RED}集成测试验证失败! 请检查日志: api.log, scheduler.log, worker.log${NC}"
 fi

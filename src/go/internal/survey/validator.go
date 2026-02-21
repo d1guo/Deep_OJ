@@ -16,13 +16,16 @@ var RequiredRepoSurveySections = []string{
 
 // RequiredRepoSurveyTokens ensures the survey keeps concrete keys, commands and code paths.
 var RequiredRepoSurveyTokens = []string{
-	"queue:pending",
-	"queue:processing",
-	"stream:results",
+	"deepoj:jobs",
+	"outbox_events",
 	"sql/migrations/001_init.sql",
+	"sql/migrations/007_add_outbox_events.sql",
 	"src/go/internal/repository/postgres.go",
+	"src/go/internal/repository/postgres_outbox.go",
 	"src/go/cmd/scheduler/main.go",
-	"src/go/internal/scheduler/ack_listener.go",
+	"src/go/internal/scheduler/metrics.go",
+	"src/go/internal/api/outbox_dispatcher.go",
+	"src/go/internal/worker/stream_consumer.go",
 	"src/go/internal/worker/judge.go",
 	"src/go/internal/api/metrics.go",
 	"scripts/repo_survey_probe.sh",

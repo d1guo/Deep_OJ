@@ -23,7 +23,6 @@ import (
 )
 
 type JudgeService struct {
-	pb.UnimplementedJudgeServiceServer
 	config   *Config
 	executor *Executor
 	tcMgr    *TestCaseManager
@@ -262,61 +261,14 @@ func (s *JudgeService) reportResult(ctx context.Context, jobID string, result ma
 	jsonBytes, _ := json.Marshal(result)
 
 	resultKey := common.ResultKeyPrefix + jobID
-	setOK := false
-	if ok, err := s.redis.SetNX(ctx, resultKey, string(jsonBytes), getResultTTL()).Result(); err != nil {
+	if _, err := s.redis.SetNX(ctx, resultKey, string(jsonBytes), getResultTTL()).Result(); err != nil {
 		slog.Error("Redis SetNX 失败", "job_id", jobID, "error", err)
 		return err
-	} else {
-		setOK = ok
-		if !setOK {
-			slog.Warn("检测到重复结果，仍写入流", "job_id", jobID)
-		}
-	}
-
-	maxRetries := getEnvInt("RESULT_STREAM_MAX_RETRIES", 3)
-	if maxRetries <= 0 {
-		maxRetries = 3
-	}
-	backoffBaseMs := getEnvInt("RESULT_STREAM_BACKOFF_MS", 100)
-	if backoffBaseMs <= 0 {
-		backoffBaseMs = 100
-	}
-	var lastErr error
-	for i := 0; i < maxRetries; i++ {
-		if err := s.redis.XAdd(ctx, &redis.XAddArgs{
-			Stream: common.ResultStream,
-			Values: map[string]interface{}{
-				"job_id": jobID,
-				"result": string(jsonBytes),
-			},
-		}).Err(); err != nil {
-			lastErr = err
-			time.Sleep(time.Duration(backoffBaseMs*(1<<i)) * time.Millisecond)
-			continue
-		}
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
-		slog.Error("Redis Stream 写入失败", "job_id", jobID, "error", lastErr)
-		if setOK {
-			_ = s.redis.Del(ctx, resultKey).Err()
-		}
-		return lastErr
-	}
-
-	// Optional: keep PubSub for debugging/legacy
-	if err := s.redis.Publish(ctx, "job_done", jobID).Err(); err != nil {
-		slog.Error("Redis 发布失败", "job_id", jobID, "error", err)
 	}
 
 	traceID, _ := result["trace_id"].(string)
-	slog.Info("已上报结果", "job_id", jobID, "trace_id", traceID, "app_status", result["status"])
+	slog.Info("已写入判题结果缓存", "job_id", jobID, "trace_id", traceID, "app_status", result["status"])
 	return nil
-}
-
-func (s *JudgeService) UpdateStatus(ctx context.Context, req *pb.TaskResult) (*pb.Ack, error) {
-	return &pb.Ack{}, nil
 }
 
 // 辅助函数

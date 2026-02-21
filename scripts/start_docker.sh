@@ -49,7 +49,6 @@ docker rm -f oj-worker || true
 docker run -d --name oj-worker \
     --network deep-oj-net \
     --privileged \
-    -p 50051:50051 \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     -v $(pwd)/data/workspace:/data/workspace:rw \
     -e REDIS_URL=oj-redis:6379 \
@@ -67,7 +66,6 @@ echo "Starting Scheduler..."
 docker rm -f oj-scheduler || true
 docker run -d --name oj-scheduler \
     --network deep-oj-net \
-    -p 50052:50052 \
     -e REDIS_URL=oj-redis:6379 \
     -e WORKER_ADDR=oj-worker:50051 \
     -e PGPASSWORD=secret \
@@ -82,7 +80,6 @@ docker run -d --name oj-api \
     -p 18080:18080 \
     -e PORT=18080 \
     -e REDIS_URL=oj-redis:6379 \
-    -e SCHEDULER_ADDR=oj-scheduler:50052 \
     -e PGPASSWORD=secret \
     -e DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable \
     -e MINIO_ENDPOINT=oj-minio:9000 \

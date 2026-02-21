@@ -2,22 +2,7 @@ syntax = "proto3";
 
 package deep_oj;
 
-// 定义判题服务
 option go_package = "github.com/d1guo/deep_oj/pkg/proto";
-
-service JudgeService {
-    // -----------------------------------------------------------
-    // 动作 1: Scheduler -> Worker
-    // 调度器把任务派发给 Worker。Worker 收到后只回个 "收到"，然后异步去跑。
-    // -----------------------------------------------------------
-    rpc ExecuteTask (TaskRequest) returns (TaskResponse);
-
-    // -----------------------------------------------------------
-    // 动作 2: Worker -> API
-    // Worker 跑完后，主动调用 API 的这个接口汇报结果。
-    // -----------------------------------------------------------
-    rpc UpdateStatus (TaskResult) returns (Ack);
-}
 
 // -------------------- 枚举定义 --------------------
 
@@ -42,7 +27,7 @@ enum JudgeStatus {
 
 // -------------------- 消息体定义 --------------------
 
-// 任务请求 (对应 Redis 里的 queue:pending 内容)
+// 任务请求（由 Worker Stream 消费链路反序列化）
 message TaskRequest {
     // 必须匹配 ^[A-Za-z0-9_-]{1,64}$，禁止路径分隔符。
     string job_id = 1;
@@ -62,20 +47,7 @@ message TaskRequest {
     string trace_id = 9;   // [New] Full-link Trace ID
 }
 
-// 判题结果 (Worker 汇报给 API 的)
-message TaskResult {
-    string job_id = 1;
-    JudgeStatus status = 2;
-    string error_message = 3;  // CE 的报错信息
-    int32 time_used = 4;       // ms
-    int64 memory_used = 5;     // KB
-    string trace_id = 6;       // [New] Return for logging
-    Language language = 7;     // [New] For metrics
-}
-
 // 空响应 (占位符)
 message TaskResponse {
     string message = 1; // [Fix] Add message field
 }
-
-message Ack {}

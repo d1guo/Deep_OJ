@@ -1,45 +1,45 @@
-# Deep-OJ Failure Modes（Baseline）
+# Deep-OJ Failure Modes（Streams-only）
 
-本文件先记录 A1 阶段已确认的关键故障模式，后续按任务队列持续扩展。
+本文件记录当前 Streams-only 数据面（API outbox -> Redis Stream -> Worker -> DB finalize -> XACK -> reclaim）的关键故障模式。
 
-## 1. Redis 不可用（提交路径）
+## 1. Redis 不可用（提交或出队阶段）
 
-- 触发点：`src/go/internal/api/handler.go` 提交阶段 `LPush queue:pending` 失败
-- 现象：`/submit` 返回 `QUEUE_ERROR`
-- 定位：API 日志关键字 `Redis 推送错误`
-- 恢复：恢复 Redis 后重提；后续建议 Outbox（D1）避免丢单
+- 触发点：API 写 outbox/入流或 Worker `XREADGROUP` 失败
+- 现象：提交后状态长期 pending，或 worker 日志持续报 Redis 错误
+- 定位：`docker compose logs --tail=200 api worker | rg -i "redis|xreadgroup|xadd"`
+- 恢复：恢复 Redis 连通后重试；outbox 会继续补投未投递事件
 
-## 2. Scheduler 无可用 Worker
+## 2. Worker 无法 claim 任务
 
-- 触发点：`src/go/cmd/scheduler/main.go` `selectWorker` 失败
-- 现象：任务被 `RequeueTask(queue:processing -> queue:pending)` 循环重试
-- 定位：日志关键字 `No workers available`
-- 恢复：恢复 worker 可达（`WORKER_ADDR/WORKER_ADDRS`），观察 pending 回落
+- 触发点：`ClaimSubmissionForRun` 返回拒绝或 DB 异常
+- 现象：消息被读到但无法进入执行，状态不推进
+- 定位：worker 日志关键字 `DB claim`、`db_claim_reject`
+- 恢复：检查 DB 可用性与 submissions 行状态，恢复后由后续消费/reclaim 继续推进
 
-## 3. Worker 执行完成但结果未入 Stream
+## 3. Worker 执行完成但 finalize 失败
 
-- 触发点：`src/go/internal/worker/judge.go` `XADD stream:results` 连续失败
-- 现象：状态卡在 processing
-- 定位：日志关键字 `Redis stream add failed`
-- 恢复：修复 Redis 后重试；当前会删除 `result:{job_id}` 以避免脏缓存
+- 触发点：`FinalizeSubmissionWithFence` 失败
+- 现象：日志出现 `db_finalize_error`，消息未成功收敛
+- 定位：`docker compose logs --tail=300 worker | rg -i "db_finalize"`
+- 恢复：优先修复 DB 问题；消息仍在流中，后续可由 reclaim 继续处理
 
-## 4. ACK 消费失败
+## 4. XACK 失败导致 PEL 堆积
 
-- 触发点：`src/go/internal/scheduler/ack_listener.go` `processResult` 失败
-- 现象：消息留在 pending entries list，不 `XACK`
-- 定位：日志关键字 `Result processing failed, keep pending`
-- 恢复：修复 DB/JSON 解析问题后，listener 重启可继续消费 pending
+- 触发点：执行或拒绝分支中 `XACK` 失败
+- 现象：`XPENDING` 持续增长，lag 上升
+- 定位：`redis-cli XPENDING deepoj:jobs deepoj:workers` 与 worker 日志 `xack_error`
+- 恢复：恢复 Redis 后，worker reclaim loop 会继续回收并确认
 
-## 5. Worker 崩溃导致 processing 残留
+## 5. Worker 崩溃或租约丢失
 
-- 触发点：任务在 `queue:processing`，worker 心跳丢失
-- 现象：任务长期不完成
-- 定位：`task:processing:zset` 超时项、Watchdog 日志 `Worker dead, requeuing task`
-- 恢复：Watchdog/SlowPath 会回收并重试；需检查是否触发重复执行风险
+- 触发点：worker 进程崩溃、心跳中断、lease owner 变化
+- 现象：任务进入 pending entries list，原执行中断
+- 定位：日志关键字 `lease_lost`、`reclaim_claimed`，以及 `XAUTOCLAIM` 相关指标
+- 恢复：重启 worker；reclaim 机制按 `min-idle-ms` 规则重新接管
 
-## 6. DB 已 done，重复结果回写
+## 6. 重复执行与陈旧结果
 
-- 触发点：旧结果重复投递
-- 现象：当前 SQL 条件 `state != 'done'` 下被忽略
-- 定位：日志关键字 `Duplicate result ignored (already done)`
-- 恢复：无需人工处理；后续需升级到 attempt_id fencing（C5）
+- 触发点：网络抖动或重启导致同一 job 被多次尝试
+- 现象：旧 attempt finalize 被拒绝（stale/already_finished）
+- 定位：日志关键字 `db_finalize_rejected`、`db_finalize_stale`
+- 恢复：无需人工干预；fencing 机制保证最终态单写入

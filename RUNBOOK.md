@@ -13,7 +13,6 @@ export REDIS_PASSWORD='deepoj_redis_change_me'
 export POSTGRES_PASSWORD='deepoj_pg_password_change_me'
 export MINIO_ROOT_USER='deepoj_minio_user'
 export MINIO_ROOT_PASSWORD='deepoj_minio_password_change_me'
-export WORKER_AUTH_TOKEN='deepoj_worker_token_change_me'
 
 docker compose down -v --remove-orphans
 docker compose up -d --build
@@ -33,6 +32,18 @@ python3 tests/integration/test_e2e.py
 
 ```bash
 bash scripts/verify_b1_no_etcd.sh
+```
+
+### 0.2 无 legacy 数据面验证（B2）
+
+系统已移除 legacy 数据面（Redis List + scheduler gRPC push + 旧回写链路），仅保留 Streams-only：
+
+`API(outbox) -> Redis Stream -> Worker(XREADGROUP) -> DB finalize -> XACK -> XAUTOCLAIM reclaim`
+
+验证命令：
+
+```bash
+bash scripts/verify_b2_no_legacy_dataplane.sh
 ```
 
 ## 1. 环境与依赖
@@ -82,8 +93,8 @@ cd /home/diguo/Deep_OJ/src/go && go test ./internal/worker -run TestJudgeSelfTes
 | 组件 | 容器名 | 容器内端口 | 宿主机端口 | 健康检查方式 |
 | --- | --- | --- | --- | --- |
 | API | `oj-api` | `18080` | `18080` | `curl -fsS http://127.0.0.1:18080/api/v1/health` |
-| Scheduler | `oj-scheduler` | `9091`(metrics), `50052`(预留) | `50052` | `docker compose logs --tail=100 scheduler`（应看到 `Scheduler started`）；metrics 见第 5 节 |
-| Worker | `oj-worker` | `50051`(gRPC), `9092`(metrics) | 无映射 | `docker compose logs --tail=100 worker`（应看到 `gRPC server listening`） |
+| Scheduler | `oj-scheduler` | `9091`(metrics) | 无映射 | `docker compose logs --tail=100 scheduler`（应看到 `控制面模式` 相关日志）；metrics 见第 5 节 |
+| Worker | `oj-worker` | `9092`(metrics) | 无映射 | `docker compose logs --tail=100 worker`（应看到 `工作节点流消费器` 已启动） |
 | Redis | `oj-redis` | `6379` | 无映射 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" PING` |
 | PostgreSQL | `oj-postgres` | `5432` | 无映射 | `docker exec -it oj-postgres pg_isready -U deep_oj -d deep_oj` |
 | MinIO | `oj-minio` | `9000`,`9001` | 无映射 | `docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -fsS http://oj-minio:9000/minio/health/live` |
@@ -109,7 +120,6 @@ export REDIS_PASSWORD='deepoj_redis_change_me'
 export POSTGRES_PASSWORD='deepoj_pg_password_change_me'
 export MINIO_ROOT_USER='deepoj_minio_user'
 export MINIO_ROOT_PASSWORD='deepoj_minio_password_change_me'
-export WORKER_AUTH_TOKEN='deepoj_worker_token_change_me'
 
 docker compose up -d --build
 curl -fsS "$API_BASE/api/v1/health"
@@ -193,8 +203,8 @@ done
 | --- | --- | --- | --- |
 | Redis 不可达，API 报 `QUEUE_ERROR` | `REDIS_PASSWORD` 不一致、Redis 容器未启动、网络不可达 | `docker compose ps redis`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" PING`; `docker compose logs --tail=200 api` | 统一 `REDIS_PASSWORD`，重启 `redis/api/scheduler/worker`，必要时 `docker compose up -d` |
 | DB 连接池耗尽，接口变慢/5xx | `PG_MAX_CONNS` 太小、长事务、慢 SQL | `docker compose logs --tail=300 api | rg -i "database|timeout|too many"`; `docker exec -it oj-postgres psql -U deep_oj -d deep_oj -c "select * from pg_stat_activity;"` | 增大 `PG_MAX_CONNS`，排查慢查询，缩短事务并重启 API |
-| 队列堆积（`queue:pending` 持续增长） | Worker 不可用、Scheduler 调度失败、下游执行慢 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" LLEN queue:pending`; `docker compose logs --tail=200 scheduler worker` | 先恢复 worker 可用性，再根据 CPU/内存扩容 worker 或降低提交速率 |
-| Worker 不消费任务 | gRPC 不可达、worker 启动失败、`WORKER_ADDR` 配置错误 | `docker compose logs --tail=200 worker`; `docker compose logs --tail=200 scheduler | rg -i "No workers|dispatch"` | 修复 `WORKER_ADDR/WORKER_ADDRS`，确认 worker 可达，重启 worker/scheduler |
+| Stream backlog 持续增长（`deepoj:jobs`） | Worker 消费异常、下游执行慢、Redis 压力高 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XLEN deepoj:jobs`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING deepoj:jobs deepoj:workers`; `docker compose logs --tail=200 worker` | 优先恢复 worker 消费能力，再按资源瓶颈扩容 worker 或限流 |
+| Worker 不消费任务 | Worker 启动失败、流消费组配置错误、DB/Redis 依赖异常 | `docker compose logs --tail=200 worker`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS deepoj:jobs` | 修复 `JOB_STREAM_*` 与依赖配置，确认消费组存在并可读写，重启 worker |
 | Judge 出现超时/TLE 异常增多 | 用户代码死循环、时间限制过低、机器负载过高 | `docker compose logs --tail=300 worker | rg -i "Time Limit|timed out|command timed out"` | 调整题目时限、检查资源压力、必要时横向扩容 worker |
 | Judge 出现 OOM/MLE 异常增多 | 代码内存占用过大、内存限制过低、容器内存紧张 | `docker compose logs --tail=300 worker | rg -i "Memory Limit|OOM|killed"` | 调整内存上限，检查宿主机内存，限制异常任务并重试 |
 | 出现僵尸进程或残留判题进程 | kill/cleanup 未完整执行、worker 异常中断 | `docker exec -it oj-worker ps -eo pid,ppid,stat,cmd | rg "judge_engine| Z "` | 重启 worker 清理现场；后续按任务 G1/G2 加强进程组 kill 与幂等清理 |
@@ -425,7 +435,7 @@ bash scripts/repo_survey_probe.sh
 
 ### 6.2 输出解释
 
-- `[1/3]`：输出 `queue:pending` / `queue:processing` / `stream:results` 长度
+- `[1/3]`：输出 `deepoj:jobs` 的 `XLEN`
 - `[2/3]`：输出 PG 表列表与 `submissions` 字段定义
 - `[3/3]`：输出核心 metrics 名称匹配结果
 

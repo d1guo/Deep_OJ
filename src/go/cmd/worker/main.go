@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/signal"
 	"runtime"
@@ -20,13 +18,7 @@ import (
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/internal/worker"
 	"github.com/d1guo/deep_oj/pkg/observability"
-	pb "github.com/d1guo/deep_oj/pkg/proto"
 	"github.com/redis/go-redis/v9"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 func getEnvInt(key string, fallback int) int {
@@ -50,20 +42,6 @@ func getEnvBool(key string, fallback bool) bool {
 		return false
 	default:
 		return fallback
-	}
-}
-
-func workerAuthUnaryInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return nil, status.Error(codes.Unauthenticated, "missing metadata")
-		}
-		values := md.Get("x-worker-auth-token")
-		if len(values) == 0 || strings.TrimSpace(values[0]) != expectedToken {
-			return nil, status.Error(codes.Unauthenticated, "invalid worker auth token")
-		}
-		return handler(ctx, req)
 	}
 }
 
@@ -93,7 +71,7 @@ func main() {
 		slog.Info("已加载配置", "path", cfgPath)
 	}
 	if cfgFile != nil {
-		// Apply config file values as in-process defaults. Runtime reads from env via LoadConfig().
+		// 将配置文件值写入环境默认值，运行时仍由 LoadConfig() 读取。
 		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfgFile.Redis.PoolSize)
 		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfgFile.Redis.MinIdleConns)
 		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfgFile.Redis.DialTimeoutMs)
@@ -101,7 +79,6 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("REDIS_WRITE_TIMEOUT_MS", cfgFile.Redis.WriteTimeoutMs)
 
 		wcfg := cfgFile.Worker
-		// Backward-compatible fallback to server/path sections
 		if wcfg.Port == 0 && cfgFile.Server.Port > 0 {
 			wcfg.Port = cfgFile.Server.Port
 		}
@@ -138,13 +115,8 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("RESULT_TTL_SEC", wcfg.ResultTTLSec)
 		appconfig.SetEnvIfEmptyInt("CHECKER_TIMEOUT_MS", wcfg.CheckerTimeoutMs)
 		appconfig.SetEnvIfEmptyInt("CLEANUP_TIMEOUT_SEC", wcfg.CleanupTimeoutSec)
-		appconfig.SetEnvIfEmptyInt("RESULT_STREAM_MAX_RETRIES", wcfg.ResultStreamMaxRetries)
-		appconfig.SetEnvIfEmptyInt("RESULT_STREAM_BACKOFF_MS", wcfg.ResultStreamBackoffMs)
 		appconfig.SetEnvIfEmptyBool("ALLOW_HOST_CHECKER", wcfg.AllowHostChecker)
 		appconfig.SetEnvIfEmptyBool("REQUIRE_CGROUPS_V2", wcfg.RequireCgroupsV2)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_CERT", wcfg.GRPCTLS.Cert)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_KEY", wcfg.GRPCTLS.Key)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_CA", wcfg.GRPCTLS.CA)
 		appconfig.SetEnvIfEmpty("SERVICE_NAME", wcfg.Metrics.ServiceName)
 		appconfig.SetEnvIfEmpty("INSTANCE_ID", wcfg.Metrics.InstanceID)
 		appconfig.SetEnvIfEmptyInt("WORKER_METRICS_PORT", wcfg.MetricsPort)
@@ -160,9 +132,8 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_GRACE_SEC", wcfg.Stream.ReclaimGraceSec)
 	}
 
-	// 1. 配置
 	cfg := worker.LoadConfig()
-	slog.Info("工作节点启动中", "id", cfg.WorkerID, "addr", cfg.WorkerAddr, "bin", cfg.JudgerBin)
+	slog.Info("工作节点启动中", "id", cfg.WorkerID, "bin", cfg.JudgerBin)
 	slog.Info("工作节点并发配置", "max_concurrency", cfg.PoolSize, "num_cpu", runtime.NumCPU())
 
 	if getEnvBool("REQUIRE_CGROUPS_V2", false) {
@@ -172,12 +143,10 @@ func main() {
 		}
 	}
 
-	// 1.5 启动指标服务（Worker 默认使用 9092）
 	worker.InitMetrics()
 	metricsPort := getEnvInt("WORKER_METRICS_PORT", 9092)
 	observability.StartMetricsServer(fmt.Sprintf(":%d", metricsPort))
 
-	// 2. 依赖初始化
 	exec := worker.NewExecutor(cfg.JudgerBin)
 	slog.Info("初始化测试用例管理器...")
 	tcMgr, err := worker.NewTestCaseManager(cfg)
@@ -207,39 +176,11 @@ func main() {
 	defer db.Close()
 	slog.Info("已连接 PostgreSQL")
 
-	// 3. gRPC 服务
-	lis, err := net.Listen("tcp", cfg.WorkerAddr)
-	if err != nil {
-		slog.Error("监听端口失败", "error", err)
-		os.Exit(1)
-	}
-
-	serverOpts := make([]grpc.ServerOption, 0, 4)
-	serverOpts = append(serverOpts, grpc.MaxRecvMsgSize(getEnvInt("WORKER_GRPC_MAX_RECV_BYTES", 1<<20)))
-	serverOpts = append(serverOpts, grpc.MaxSendMsgSize(getEnvInt("WORKER_GRPC_MAX_SEND_BYTES", 1<<20)))
-
-	workerAuthToken := strings.TrimSpace(os.Getenv("WORKER_AUTH_TOKEN"))
-	if workerAuthToken == "" && !getEnvBool("ALLOW_INSECURE_WORKER_GRPC", false) {
-		slog.Error("除非 ALLOW_INSECURE_WORKER_GRPC=true，否则必须设置 WORKER_AUTH_TOKEN")
-		os.Exit(1)
-	}
-	if workerAuthToken != "" {
-		serverOpts = append(serverOpts, grpc.UnaryInterceptor(workerAuthUnaryInterceptor(workerAuthToken)))
-	}
-
-	if opt, err := loadServerTLS(); err != nil {
-		slog.Error("加载 TLS 失败", "error", err)
-		os.Exit(1)
-	} else if opt != nil {
-		serverOpts = append(serverOpts, opt)
-	}
-	grpcServer := grpc.NewServer(serverOpts...)
-	svc := worker.NewJudgeService(cfg, exec, tcMgr, rdb)
-	pb.RegisterJudgeServiceServer(grpcServer, svc)
-
-	streamConsumer := worker.NewStreamConsumer(cfg, rdb, db, svc)
+	runner := worker.NewJudgeService(cfg, exec, tcMgr, rdb)
+	streamConsumer := worker.NewStreamConsumer(cfg, rdb, db, runner)
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	defer cancelStream()
+
 	var streamWG sync.WaitGroup
 	streamWG.Add(1)
 	go func() {
@@ -249,16 +190,6 @@ func main() {
 		}
 	}()
 
-	// 4. 启动服务
-	go func() {
-		slog.Info("gRPC 服务监听中", "addr", lis.Addr())
-		if err := grpcServer.Serve(lis); err != nil {
-			slog.Error("服务运行失败", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	// 优雅关闭
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -266,33 +197,5 @@ func main() {
 	slog.Info("正在关闭...")
 	cancelStream()
 	streamWG.Wait()
-	grpcServer.GracefulStop()
 	slog.Info("工作节点已退出")
-}
-
-func loadServerTLS() (grpc.ServerOption, error) {
-	certFile := os.Getenv("GRPC_TLS_CERT")
-	keyFile := os.Getenv("GRPC_TLS_KEY")
-	caFile := os.Getenv("GRPC_TLS_CA")
-	if certFile == "" || keyFile == "" || caFile == "" {
-		return nil, nil
-	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, err
-	}
-	caData, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, err
-	}
-	certPool := x509.NewCertPool()
-	certPool.AppendCertsFromPEM(caData)
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    certPool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS12,
-	}
-	return grpc.Creds(credentials.NewTLS(tlsConfig)), nil
 }

@@ -12,7 +12,7 @@ usage() {
 Usage: scripts/repo_survey_probe.sh
 
 Read-only probe for A1 repo survey:
-1) Redis queue/stream depth
+1) Redis Stream 深度
 2) PostgreSQL schema snapshot
 3) Metrics endpoint smoke check
 
@@ -47,11 +47,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-echo "[1/3] Redis queue/stream depth"
+echo "[1/3] Redis Stream depth"
 if command -v redis-cli >/dev/null 2>&1; then
-  redis-cli -u "${REDIS_URL}" LLEN queue:pending || true
-  redis-cli -u "${REDIS_URL}" LLEN queue:processing || true
-  redis-cli -u "${REDIS_URL}" XLEN stream:results || true
+  redis-cli -u "${REDIS_URL}" XLEN deepoj:jobs || true
 else
   echo "redis-cli not found; skip Redis probes."
 fi
@@ -67,7 +65,7 @@ fi
 echo "[3/3] Metrics endpoint smoke check"
 if command -v curl >/dev/null 2>&1; then
   curl -fsS "${API_METRICS_URL}" | filter_stream "http_requests_total|submission_total" || true
-  curl -fsS "${SCHEDULER_METRICS_URL}" | filter_stream "scheduler_queue_depth|job_latency_seconds" || true
+  curl -fsS "${SCHEDULER_METRICS_URL}" | filter_stream "scheduler_active_workers|control_plane_only" || true
   curl -fsS "${WORKER_METRICS_URL}" | filter_stream "worker_task_total|worker_task_duration_seconds" || true
 else
   echo "curl not found; skip metrics probes."

@@ -2,7 +2,7 @@
 
 Deep-OJ 是一个面向在线评测场景的分布式判题系统，采用 Go + C++ 混合实现。
 
-当前代码状态（以仓库现状为准，2026-02-18）已经从“Scheduler 主导数据面”演进到“Worker 直连 Streams 数据面”。
+当前代码状态（以仓库现状为准，2026-02-21）为 Streams-only 数据面。
 
 ## 架构变化概览
 
@@ -11,21 +11,18 @@ Deep-OJ 是一个面向在线评测场景的分布式判题系统，采用 Go + 
 | 维度 | 旧链路（历史） | 新链路（当前主线） |
 | --- | --- | --- |
 | 入队 | API 直接写 Redis List | API 写 DB（`submissions + outbox_events`），由 outbox dispatcher 投递 Redis Stream |
-| 消费 | Scheduler `BRPopLPush` 后 gRPC 推给 Worker | Worker 自己 `XREADGROUP` 消费 `deepoj:jobs` |
+| 消费 | Scheduler 拉取队列后推送给 Worker | Worker 自己 `XREADGROUP` 消费 `deepoj:jobs` |
 | 重试/回收 | Scheduler + 队列回推 | Worker `XAUTOCLAIM` reclaim + DB reclaim CAS |
 | 最终落库 | Scheduler ACK Listener 回写 DB | Worker 侧按 attempt fencing 写 DB，成功后才 `XACK` |
 | 真相源 | Redis + DB 混合语义 | DB 状态机为唯一真相源 |
 
 ## Scheduler 现在的作用
 
-Scheduler 目前不再是主数据面的唯一入口，更接近控制面和兼容层：
+Scheduler 已收敛为控制面：
 
-1. 继续做 Worker 发现相关能力（Etcd watch、活性视角、指标）。
-2. 保留 legacy 分发链路（`queue:pending -> queue:processing -> gRPC Dispatch`），用于兼容旧路径或回退。
-3. 保留 ACK Listener / Watchdog / Slow Path 等守护逻辑，主要服务于 legacy 语义和运维兜底。
-4. 提供 Scheduler 侧 metrics（队列深度、活跃 worker 等）。
-
-结论：主链路已经不再依赖 Scheduler 来“拉任务并分发”，但仓库里仍保留了可运行的 legacy 逻辑，属于过渡期双轨并存。
+1. 维护 Worker 发现视图与基础指标（活跃 worker 数等）。
+2. 暴露调度器 metrics 端点，供观测系统抓取。
+3. 不再执行任何派单/回写/重试/慢路径数据面循环。
 
 ## 当前主链路架构
 
@@ -39,10 +36,7 @@ flowchart LR
     Worker -->|claim_and_fenced_finalize| PG
     Worker -->|run_judge| Judge[Cpp Sandbox]
     Worker -->|cache_result| Redis[(Redis)]
-
-    Worker -->|xadd_results_legacy| Results[(Redis Stream stream_results)]
-    Scheduler[Scheduler] -->|xreadgroup_legacy| Results
-    Scheduler -->|watch_and_metrics| Etcd[(Etcd)]
+    Scheduler[Scheduler] -->|metrics_only| Monitor[Observability]
 ```
 
 ## 核心不变量
@@ -61,10 +55,9 @@ flowchart LR
 | Outbox Dispatcher (`src/go/internal/api/outbox_dispatcher.go`) | 扫描 outbox，投递 `deepoj:jobs` |
 | Worker (`src/go/cmd/worker`) | 消费 Streams、执行判题、租约心跳、reclaim、fenced finalize |
 | Judge Engine (`src/core/worker`) | 编译/运行/资源隔离/结果输出 |
-| Scheduler (`src/go/cmd/scheduler`) | 控制面能力 + legacy 兼容逻辑 |
+| Scheduler (`src/go/cmd/scheduler`) | 控制面能力（发现与指标） |
 | PostgreSQL | 提交状态机、attempt/lease/fencing、outbox 记录 |
 | Redis | Streams、payload 缓存、结果缓存 |
-| Etcd | Worker 注册发现 |
 
 ## 快速开始
 
@@ -85,7 +78,6 @@ export REDIS_PASSWORD='deepoj_redis_change_me'
 export POSTGRES_PASSWORD='deepoj_pg_password_change_me'
 export MINIO_ROOT_USER='deepoj_minio_user'
 export MINIO_ROOT_PASSWORD='deepoj_minio_password_change_me'
-export WORKER_AUTH_TOKEN='deepoj_worker_token_change_me'
 
 docker compose up -d --build
 docker compose ps

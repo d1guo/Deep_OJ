@@ -142,63 +142,6 @@ func (r *RedisClient) Expire(ctx context.Context, key string, expiration time.Du
 	return val, nil
 }
 
-// List 操作 (任务队列)
-
-// LPush 左侧入队
-func (r *RedisClient) LPush(ctx context.Context, key string, values ...interface{}) error {
-	if err := r.client.LPush(ctx, key, values...).Err(); err != nil {
-		return fmt.Errorf("Redis LPUSH %s 失败: %w", key, err)
-	}
-	return nil
-}
-
-// RPop 右侧出队
-func (r *RedisClient) RPop(ctx context.Context, key string) (string, error) {
-	val, err := r.client.RPop(ctx, key).Result()
-	if err != nil && err != redis.Nil {
-		return "", fmt.Errorf("Redis RPOP %s 失败: %w", key, err)
-	}
-	return val, err
-}
-
-// BRPop 阻塞右侧出队
-func (r *RedisClient) BRPop(ctx context.Context, timeout time.Duration, keys ...string) ([]string, error) {
-	result, err := r.client.BRPop(ctx, timeout, keys...).Result()
-	if err == redis.Nil {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("Redis BRPOP 失败: %w", err)
-	}
-	return result, nil
-}
-
-// BRPopLPush 阻塞弹出并推入另一队列 (可靠投递)
-func (r *RedisClient) BRPopLPush(ctx context.Context, source, destination string, timeout time.Duration) (string, error) {
-	val, err := r.client.BRPopLPush(ctx, source, destination, timeout).Result()
-	if err != nil && err != redis.Nil {
-		return "", fmt.Errorf("Redis BRPOPLPUSH 失败: %w", err)
-	}
-	return val, err
-}
-
-// LRem 移除队列中的元素
-func (r *RedisClient) LRem(ctx context.Context, key string, count int64, value interface{}) error {
-	if err := r.client.LRem(ctx, key, count, value).Err(); err != nil {
-		return fmt.Errorf("Redis LREM %s 失败: %w", key, err)
-	}
-	return nil
-}
-
-// LLen 获取队列长度
-func (r *RedisClient) LLen(ctx context.Context, key string) (int64, error) {
-	val, err := r.client.LLen(ctx, key).Result()
-	if err != nil {
-		return 0, fmt.Errorf("Redis LLEN %s 失败: %w", key, err)
-	}
-	return val, nil
-}
-
 // Hash 操作 (Worker 状态)
 
 // HSet 设置 Hash 字段
@@ -235,15 +178,6 @@ func (r *RedisClient) HDel(ctx context.Context, key string, fields ...string) er
 	return nil
 }
 
-// LRange 获取列表范围
-func (r *RedisClient) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
-	val, err := r.client.LRange(ctx, key, start, stop).Result()
-	if err != nil {
-		return nil, fmt.Errorf("Redis LRANGE %s 失败: %w", key, err)
-	}
-	return val, nil
-}
-
 // ZAdd 向有序集合添加成员
 func (r *RedisClient) ZAdd(ctx context.Context, key string, members ...*redis.Z) error {
 	items := make([]redis.Z, 0, len(members))
@@ -276,20 +210,6 @@ func (r *RedisClient) ZRangeByScore(ctx context.Context, key string, opt *redis.
 		return nil, fmt.Errorf("Redis ZRANGEBYSCORE %s 失败: %w", key, err)
 	}
 	return val, nil
-}
-
-// RequeueTask 原子地将任务从 processing 移动到 pending (通过事务)
-func (r *RedisClient) RequeueTask(ctx context.Context, src, dst, value string) error {
-	pipe := r.client.TxPipeline()
-	// LREM count=1
-	pipe.LRem(ctx, src, 1, value)
-	// LPUSH
-	pipe.LPush(ctx, dst, value)
-	_, err := pipe.Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("Redis 任务重新入队失败: %w", err)
-	}
-	return nil
 }
 
 // Eval 执行 Lua 脚本

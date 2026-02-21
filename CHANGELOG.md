@@ -12,9 +12,9 @@
 - 默认禁用宿主机 checker，需显式开启。
 
 ### 可靠性
-- 结果流写入加入可配置重试与退避，保证 SetNX+XAdd 一致性。
-- ACK 仅在 DB 同步成功后确认，失败消息保持 pending 可重放。
-- Scheduler 无可用 Worker 时立即回滚任务到 pending。
+- Worker 执行结果使用 DB fencing finalize + XACK，保证“先落库后确认”。
+- reclaim 链路基于 `XAUTOCLAIM` 与 DB 租约 CAS，支持崩溃恢复。
+- API outbox 投递支持退避重试，降低短暂故障下的丢单风险。
 - 缓存反序列化失败时回退到 DB。
 
 ### API 行为
@@ -24,9 +24,9 @@
 - 题目包上传限制大小，采用流式 hash 避免 OOM。
 
 ### Worker & Scheduler
-- `ETCD_ENDPOINTS` 支持逗号分隔；新增 dial 超时与 lease TTL 配置。
+- Scheduler 收敛为控制面（发现与指标），不再承担派单数据面。
+- Worker 仅保留 Streams 消费执行链路。
 - 指标端口与采样频率可配置。
-- 队列超时、watchdog、slow-path 周期、重试 TTL 可配置。
 - checker/cleanup 超时可配置。
 
 ### Sandbox/Core

@@ -98,6 +98,6 @@ RUN mkdir -p /data/testcases && \
     chown root:root /app/config.yaml && \
     chmod 644 /app/config.yaml
 
-EXPOSE 8080 18080 50051 50052
+EXPOSE 8080 18080
 
 CMD ["/bin/bash"]

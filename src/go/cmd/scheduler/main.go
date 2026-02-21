@@ -1,26 +1,19 @@
-// 调度器入口：不依赖 etcd，使用 WORKER_ADDR/WORKER_ADDRS 进行工作节点发现。
+// 调度器入口：B2 后仅保留控制面能力，不执行任何 legacy 数据面动作。
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
-	"sync"
 	"syscall"
-	"time"
 
 	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/internal/scheduler"
-	"github.com/d1guo/deep_oj/pkg/common"
 	"github.com/d1guo/deep_oj/pkg/observability"
-	pb "github.com/d1guo/deep_oj/pkg/proto"
-	"github.com/redis/go-redis/v9"
-	"google.golang.org/protobuf/proto"
 )
 
 func getEnvInt(key string, fallback int) int {
@@ -54,55 +47,25 @@ func main() {
 
 		appconfig.SetEnvIfEmpty("REDIS_URL", cfg.Scheduler.RedisURL)
 		appconfig.SetEnvIfEmpty("DATABASE_URL", cfg.Scheduler.DatabaseURL)
-		appconfig.SetEnvIfEmptyInt("WORKER_CAPACITY", cfg.Scheduler.WorkerCapacity)
-		appconfig.SetEnvIfEmptyInt("MAX_RETRY", cfg.Scheduler.MaxRetry)
-		appconfig.SetEnvIfEmptyInt("RETRY_TTL_SEC", cfg.Scheduler.RetryTTLSec)
-		appconfig.SetEnvIfEmpty("SCHEDULER_ID", cfg.Scheduler.SchedulerID)
 		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_PORT", cfg.Scheduler.MetricsPort)
 		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_POLL_INTERVAL_MS", cfg.Scheduler.MetricsPollMs)
-		appconfig.SetEnvIfEmptyInt("QUEUE_BRPOP_TIMEOUT_SEC", cfg.Scheduler.Queue.BRPopTimeoutSec)
-		appconfig.SetEnvIfEmptyInt("NO_WORKER_SLEEP_MS", cfg.Scheduler.Queue.NoWorkerSleepMs)
-		appconfig.SetEnvIfEmptyInt("ASSIGNMENT_TTL_SEC", cfg.Scheduler.Queue.AssignmentTTLSec)
-		appconfig.SetEnvIfEmptyInt("PAYLOAD_TTL_SEC", cfg.Scheduler.Queue.PayloadTTLSec)
-		appconfig.SetEnvIfEmptyInt("PROCESSING_START_TTL_SEC", cfg.Scheduler.Queue.ProcessingStartTTLSec)
-		appconfig.SetEnvIfEmptyInt("INFLIGHT_TTL_SEC", cfg.Scheduler.Queue.InflightTTLSec)
-		appconfig.SetEnvIfEmptyInt("ACK_PENDING_COUNT", cfg.Scheduler.AckListener.PendingCount)
-		appconfig.SetEnvIfEmptyInt("ACK_PENDING_BLOCK_MS", cfg.Scheduler.AckListener.PendingBlockMs)
-		appconfig.SetEnvIfEmptyInt("ACK_NEW_COUNT", cfg.Scheduler.AckListener.NewCount)
-		appconfig.SetEnvIfEmptyInt("ACK_NEW_BLOCK_MS", cfg.Scheduler.AckListener.NewBlockMs)
-		appconfig.SetEnvIfEmptyInt("SLOW_PATH_TICK_SEC", cfg.Scheduler.SlowPath.TickSec)
-		appconfig.SetEnvIfEmptyInt("SLOW_PATH_PROCESSING_CUTOFF_SEC", cfg.Scheduler.SlowPath.ProcessingCutoffSec)
-		appconfig.SetEnvIfEmptyInt("PENDING_STALE_SEC", cfg.Scheduler.SlowPath.PendingStaleSec)
-		appconfig.SetEnvIfEmptyInt("SLOW_PATH_DB_SCAN_LIMIT", cfg.Scheduler.SlowPath.DBScanLimit)
-		appconfig.SetEnvIfEmptyInt("WATCHDOG_INTERVAL_SEC", cfg.Scheduler.Watchdog.IntervalSec)
-		appconfig.SetEnvIfEmptyInt("DISPATCH_CONN_TIMEOUT_MS", cfg.Scheduler.Dispatch.ConnTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("DISPATCH_RPC_TIMEOUT_MS", cfg.Scheduler.Dispatch.RPCTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("DISPATCH_MAX_RETRIES", cfg.Scheduler.Dispatch.MaxRetries)
-		appconfig.SetEnvIfEmptyInt("DISPATCH_BACKOFF_BASE_MS", cfg.Scheduler.Dispatch.BackoffBaseMs)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_CERT", cfg.Scheduler.GRPCTLS.Cert)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_KEY", cfg.Scheduler.GRPCTLS.Key)
-		appconfig.SetEnvIfEmpty("GRPC_TLS_CA", cfg.Scheduler.GRPCTLS.CA)
 		appconfig.SetEnvIfEmpty("SERVICE_NAME", cfg.Scheduler.Metrics.ServiceName)
 		appconfig.SetEnvIfEmpty("INSTANCE_ID", cfg.Scheduler.Metrics.InstanceID)
 	}
 
-	// 1. 读取配置
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "localhost:6379"
 	}
-	workerCapacity := 4
-	if v := os.Getenv("WORKER_CAPACITY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			workerCapacity = n
-		}
+	postgresURL := os.Getenv("DATABASE_URL")
+	if postgresURL == "" {
+		slog.Error("必须设置 DATABASE_URL")
+		os.Exit(1)
 	}
 
-	// 2. 初始化 Context (支持优雅关闭)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 监听中断信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -111,201 +74,37 @@ func main() {
 		cancel()
 	}()
 
-	// 3. 初始化工作节点发现（无 etcd 依赖）
 	discovery, err := scheduler.NewWorkerDiscovery()
 	if err != nil {
 		slog.Error("初始化工作节点发现失败", "error", err)
 		os.Exit(1)
 	}
 	defer discovery.Close()
-	slog.Info("工作节点发现已就绪", "worker_count", discovery.GetWorkerCount())
-
-	// 保留调用路径，当前实现会等待 ctx 退出。
 	go discovery.WatchWorkers(ctx)
 
-	// 4. 初始化 Redis 客户端
 	redisClient := repository.NewRedisClient(redisURL)
 	if err := redisClient.Ping(ctx); err != nil {
 		slog.Error("连接 Redis 失败", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("已连接 Redis")
+	defer redisClient.Close()
 
-	// 4.5 初始化 PostgreSQL (用于 ACK 回调更新状态)
-	postgresURL := os.Getenv("DATABASE_URL")
-	if postgresURL == "" {
-		slog.Error("必须设置 DATABASE_URL")
-		os.Exit(1)
-	}
 	db, err := repository.NewPostgresDB(ctx, postgresURL)
 	if err != nil {
 		slog.Error("连接 PostgreSQL 失败", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	slog.Info("已连接 PostgreSQL")
 
-	// 启动 ACK 监听器
-	go scheduler.StartAckListener(ctx, redisClient, db)
+	scheduler.SetControlPlaneOnly(true)
+	scheduler.SetLegacyLoopsStarted(0)
+	go scheduler.StartMetricsPoller(ctx, discovery)
 
-	// 6. 启动监控（探针与指标）
-
-	// 6.1 启动指标轮询（Redis/Worker 状态）
-	go scheduler.StartMetricsPoller(ctx, redisClient, discovery)
-
-	// 6.2 暴露 Prometheus 指标端点
 	metricsPort := getEnvInt("SCHEDULER_METRICS_PORT", 9091)
 	observability.StartMetricsServer(fmt.Sprintf(":%d", metricsPort))
 
-	// 启动慢路径兜底
-	go scheduler.StartSlowPath(ctx, redisClient, db)
+	slog.Info("调度器已进入控制面模式（legacy 数据面已移除）", "worker_count", discovery.GetWorkerCount())
 
-	// 启动看门狗（防止工作节点宕机导致任务泄漏）
-	watchdogInterval := time.Duration(getEnvInt("WATCHDOG_INTERVAL_SEC", 5)) * time.Second
-	watchdog := scheduler.NewWatchdog(redisClient, discovery, db, watchdogInterval)
-	go watchdog.Start(ctx)
-
-	// 5. 启动任务分发循环
-	slog.Info("调度器已启动，等待任务")
-
-	var wg sync.WaitGroup
-
-	for {
-		select {
-		case <-ctx.Done():
-			slog.Info("调度器停止中，等待活跃任务结束")
-			wg.Wait()
-			slog.Info("调度器已退出")
-			return
-		default:
-		}
-
-		// 阻塞等待任务 (5 秒超时)
-		brpopTimeout := time.Duration(getEnvInt("QUEUE_BRPOP_TIMEOUT_SEC", 5)) * time.Second
-		result, err := redisClient.BRPopLPush(ctx, common.QueuePending, common.QueueProcessing, brpopTimeout)
-		if err != nil || result == "" {
-			continue
-		}
-
-		// 解析任务 (Protobuf)
-		task := &pb.TaskRequest{}
-		if err := proto.Unmarshal([]byte(result), task); err != nil {
-			slog.Warn("任务解析失败", "error", err)
-			_ = redisClient.LRem(ctx, common.QueueProcessing, 1, result)
-			_ = redisClient.LPush(ctx, common.QueueDead, result)
-			continue
-		}
-
-		jobID := task.JobId
-		slog.Info("收到任务", "job_id", jobID)
-		processingStart := time.Now().UnixMilli()
-
-		// 获取可用 Worker
-		workerID, workerAddr, ok := selectWorker(ctx, redisClient, discovery, workerCapacity)
-		if !ok {
-			slog.Warn("暂无可用工作节点，任务稍后重试", "job_id", jobID)
-			if err := redisClient.RequeueTask(ctx, common.QueueProcessing, common.QueuePending, result); err != nil {
-				slog.Error("任务重新入队失败", "job_id", jobID, "error", err)
-			}
-			noWorkerSleep := time.Duration(getEnvInt("NO_WORKER_SLEEP_MS", 1000)) * time.Millisecond
-			time.Sleep(noWorkerSleep)
-			continue
-		}
-
-		// 【关键】记录任务分配关系 (Job -> Worker)
-		// TTL 设置为 10 分钟 (假设判题不会超过 10 分钟)
-		assignmentKey := common.TaskAssignmentPrefix + jobID
-		assignmentTTL := time.Duration(getEnvInt("ASSIGNMENT_TTL_SEC", 600)) * time.Second
-		if err := redisClient.Set(ctx, assignmentKey, workerID, assignmentTTL); err != nil {
-			slog.Error("写入任务分配关系失败", "job_id", jobID, "error", err)
-			// 即使失败也尝试继续，或者选择回滚
-		}
-
-		// 记录任务 payload 便于 O(1) 清理
-		payloadKey := common.TaskPayloadPrefix + jobID
-		payloadTTL := time.Duration(getEnvInt("PAYLOAD_TTL_SEC", 1800)) * time.Second
-		if err := redisClient.Set(ctx, payloadKey, result, payloadTTL); err != nil {
-			slog.Error("写入任务负载失败", "job_id", jobID, "error", err)
-		}
-
-		// 记录 processing_start 与 ZSET
-		startKey := common.TaskProcessingStartPrefix + jobID
-		processingTTL := time.Duration(getEnvInt("PROCESSING_START_TTL_SEC", 1800)) * time.Second
-		if err := redisClient.Set(ctx, startKey, fmt.Sprintf("%d", processingStart), processingTTL); err != nil {
-			slog.Error("写入 processing_start 失败", "job_id", jobID, "error", err)
-		}
-		if err := redisClient.ZAdd(ctx, common.TaskProcessingZSet, &redis.Z{Score: float64(processingStart), Member: jobID}); err != nil {
-			slog.Error("写入 processing zset 失败", "job_id", jobID, "error", err)
-		}
-
-		// 更新 DB 状态为 processing
-		if err := db.UpdateSubmissionState(ctx, jobID, "processing"); err != nil {
-			slog.Error("更新提交状态失败", "job_id", jobID, "error", err)
-		}
-
-		// 增加 inflight 计数
-		inflightKey := common.WorkerInflightPrefix + workerID
-		_, _ = redisClient.Incr(ctx, inflightKey)
-		inflightTTL := time.Duration(getEnvInt("INFLIGHT_TTL_SEC", 1800)) * time.Second
-		_, _ = redisClient.Expire(ctx, inflightKey, inflightTTL)
-
-		// 异步分发任务
-		wg.Add(1)
-		go func(addr string, taskData []byte) {
-			defer wg.Done()
-			if err := scheduler.DispatchTask(ctx, addr, taskData, redisClient); err != nil {
-				slog.Error("任务分发失败", "job_id", jobID, "error", err)
-
-				if errors.Is(err, common.ErrNonRetryable) {
-					slog.Error("丢弃不可重试任务", "job_id", jobID)
-					// Poison Pill: 进入死信队列并标记失败
-					_ = redisClient.LPush(ctx, common.QueueDead, string(taskData))
-					_ = db.UpdateSubmissionState(ctx, jobID, "failed")
-					_, _, _ = db.UpdateSubmissionResultIfNotDone(ctx, jobID, "System Error", map[string]any{
-						"status":        "System Error",
-						"error_message": "non-retryable dispatch error",
-					})
-				} else {
-					if err := scheduler.HandleRetry(ctx, redisClient, db, jobID, string(taskData), "dispatch retry exceeded"); err != nil {
-						slog.Error("重试处理失败", "job_id", jobID, "error", err)
-					}
-				}
-
-				redisClient.Del(ctx, assignmentKey)
-				redisClient.Del(ctx, payloadKey, startKey)
-				_ = redisClient.ZRem(ctx, common.TaskProcessingZSet, jobID)
-				// 回滚 inflight
-				_, _ = redisClient.Decr(ctx, inflightKey)
-			} else {
-				// 成功时不移除！等待 ACK Listener 移除
-				slog.Debug("任务分发成功", "job_id", jobID)
-			}
-		}(workerAddr, []byte(result))
-	}
-}
-
-func selectWorker(ctx context.Context, redisClient *repository.RedisClient, discovery *scheduler.WorkerDiscovery, capacity int) (string, string, bool) {
-	total := discovery.GetWorkerCount()
-	if total == 0 {
-		return "", "", false
-	}
-	for i := 0; i < total; i++ {
-		workerID, workerAddr, ok := discovery.GetNextWorker()
-		if !ok {
-			return "", "", false
-		}
-		inflightKey := common.WorkerInflightPrefix + workerID
-		inflightStr, err := redisClient.Get(ctx, inflightKey)
-		if err != nil || inflightStr == "" {
-			return workerID, workerAddr, true
-		}
-		n, err := strconv.Atoi(inflightStr)
-		if err != nil {
-			return workerID, workerAddr, true
-		}
-		if n < capacity {
-			return workerID, workerAddr, true
-		}
-	}
-	return "", "", false
+	<-ctx.Done()
+	slog.Info("调度器已退出")
 }

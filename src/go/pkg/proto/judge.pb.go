@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v3.21.12
-// source: proto/judge.proto
+// source: judge.proto
 
 package proto
 
@@ -60,11 +60,11 @@ func (x Language) String() string {
 }
 
 func (Language) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_judge_proto_enumTypes[0].Descriptor()
+	return file_judge_proto_enumTypes[0].Descriptor()
 }
 
 func (Language) Type() protoreflect.EnumType {
-	return &file_proto_judge_proto_enumTypes[0]
+	return &file_judge_proto_enumTypes[0]
 }
 
 func (x Language) Number() protoreflect.EnumNumber {
@@ -73,7 +73,7 @@ func (x Language) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Language.Descriptor instead.
 func (Language) EnumDescriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{0}
+	return file_judge_proto_rawDescGZIP(), []int{0}
 }
 
 type JudgeStatus int32
@@ -124,11 +124,11 @@ func (x JudgeStatus) String() string {
 }
 
 func (JudgeStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_judge_proto_enumTypes[1].Descriptor()
+	return file_judge_proto_enumTypes[1].Descriptor()
 }
 
 func (JudgeStatus) Type() protoreflect.EnumType {
-	return &file_proto_judge_proto_enumTypes[1]
+	return &file_judge_proto_enumTypes[1]
 }
 
 func (x JudgeStatus) Number() protoreflect.EnumNumber {
@@ -137,13 +137,14 @@ func (x JudgeStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use JudgeStatus.Descriptor instead.
 func (JudgeStatus) EnumDescriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{1}
+	return file_judge_proto_rawDescGZIP(), []int{1}
 }
 
-// 任务请求 (对应 Redis 里的 queue:pending 内容)
+// 任务请求（由 Worker Stream 消费链路反序列化）
 type TaskRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	JobId string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	// 必须匹配 ^[A-Za-z0-9_-]{1,64}$，禁止路径分隔符。
+	JobId string `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// 【关键修改】这里改成 bytes！
 	// 避免 string 导致的自动转义 (backslash bug)
 	// 接收端收到后：std::string code(req.code().begin(), req.code().end());
@@ -161,7 +162,7 @@ type TaskRequest struct {
 
 func (x *TaskRequest) Reset() {
 	*x = TaskRequest{}
-	mi := &file_proto_judge_proto_msgTypes[0]
+	mi := &file_judge_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -173,7 +174,7 @@ func (x *TaskRequest) String() string {
 func (*TaskRequest) ProtoMessage() {}
 
 func (x *TaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_judge_proto_msgTypes[0]
+	mi := &file_judge_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -186,7 +187,7 @@ func (x *TaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskRequest.ProtoReflect.Descriptor instead.
 func (*TaskRequest) Descriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{0}
+	return file_judge_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *TaskRequest) GetJobId() string {
@@ -252,99 +253,6 @@ func (x *TaskRequest) GetTraceId() string {
 	return ""
 }
 
-// 判题结果 (Worker 汇报给 API 的)
-type TaskResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
-	Status        JudgeStatus            `protobuf:"varint,2,opt,name=status,proto3,enum=deep_oj.JudgeStatus" json:"status,omitempty"`
-	ErrorMessage  string                 `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // CE 的报错信息
-	TimeUsed      int32                  `protobuf:"varint,4,opt,name=time_used,json=timeUsed,proto3" json:"time_used,omitempty"`            // ms
-	MemoryUsed    int64                  `protobuf:"varint,5,opt,name=memory_used,json=memoryUsed,proto3" json:"memory_used,omitempty"`      // KB
-	TraceId       string                 `protobuf:"bytes,6,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"`                // [New] Return for logging
-	Language      Language               `protobuf:"varint,7,opt,name=language,proto3,enum=deep_oj.Language" json:"language,omitempty"`      // [New] For metrics
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TaskResult) Reset() {
-	*x = TaskResult{}
-	mi := &file_proto_judge_proto_msgTypes[1]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TaskResult) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TaskResult) ProtoMessage() {}
-
-func (x *TaskResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_judge_proto_msgTypes[1]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TaskResult.ProtoReflect.Descriptor instead.
-func (*TaskResult) Descriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *TaskResult) GetJobId() string {
-	if x != nil {
-		return x.JobId
-	}
-	return ""
-}
-
-func (x *TaskResult) GetStatus() JudgeStatus {
-	if x != nil {
-		return x.Status
-	}
-	return JudgeStatus_STATUS_UNSPECIFIED
-}
-
-func (x *TaskResult) GetErrorMessage() string {
-	if x != nil {
-		return x.ErrorMessage
-	}
-	return ""
-}
-
-func (x *TaskResult) GetTimeUsed() int32 {
-	if x != nil {
-		return x.TimeUsed
-	}
-	return 0
-}
-
-func (x *TaskResult) GetMemoryUsed() int64 {
-	if x != nil {
-		return x.MemoryUsed
-	}
-	return 0
-}
-
-func (x *TaskResult) GetTraceId() string {
-	if x != nil {
-		return x.TraceId
-	}
-	return ""
-}
-
-func (x *TaskResult) GetLanguage() Language {
-	if x != nil {
-		return x.Language
-	}
-	return Language_LANGUAGE_UNSPECIFIED
-}
-
 // 空响应 (占位符)
 type TaskResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -355,7 +263,7 @@ type TaskResponse struct {
 
 func (x *TaskResponse) Reset() {
 	*x = TaskResponse{}
-	mi := &file_proto_judge_proto_msgTypes[2]
+	mi := &file_judge_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -367,7 +275,7 @@ func (x *TaskResponse) String() string {
 func (*TaskResponse) ProtoMessage() {}
 
 func (x *TaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_judge_proto_msgTypes[2]
+	mi := &file_judge_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -380,7 +288,7 @@ func (x *TaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskResponse.ProtoReflect.Descriptor instead.
 func (*TaskResponse) Descriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{2}
+	return file_judge_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *TaskResponse) GetMessage() string {
@@ -390,47 +298,11 @@ func (x *TaskResponse) GetMessage() string {
 	return ""
 }
 
-type Ack struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
+var File_judge_proto protoreflect.FileDescriptor
 
-func (x *Ack) Reset() {
-	*x = Ack{}
-	mi := &file_proto_judge_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Ack) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Ack) ProtoMessage() {}
-
-func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_judge_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Ack.ProtoReflect.Descriptor instead.
-func (*Ack) Descriptor() ([]byte, []int) {
-	return file_proto_judge_proto_rawDescGZIP(), []int{3}
-}
-
-var File_proto_judge_proto protoreflect.FileDescriptor
-
-const file_proto_judge_proto_rawDesc = "" +
+const file_judge_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/judge.proto\x12\adeep_oj\"\xa1\x02\n" +
+	"\vjudge.proto\x12\adeep_oj\"\xa1\x02\n" +
 	"\vTaskRequest\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x12\n" +
 	"\x04code\x18\x02 \x01(\fR\x04code\x12-\n" +
@@ -443,20 +315,9 @@ const file_proto_judge_proto_rawDesc = "" +
 	"submitTime\x12\x1d\n" +
 	"\n" +
 	"problem_id\x18\b \x01(\rR\tproblemId\x12\x19\n" +
-	"\btrace_id\x18\t \x01(\tR\atraceId\"\xfe\x01\n" +
-	"\n" +
-	"TaskResult\x12\x15\n" +
-	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12,\n" +
-	"\x06status\x18\x02 \x01(\x0e2\x14.deep_oj.JudgeStatusR\x06status\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\x12\x1b\n" +
-	"\ttime_used\x18\x04 \x01(\x05R\btimeUsed\x12\x1f\n" +
-	"\vmemory_used\x18\x05 \x01(\x03R\n" +
-	"memoryUsed\x12\x19\n" +
-	"\btrace_id\x18\x06 \x01(\tR\atraceId\x12-\n" +
-	"\blanguage\x18\a \x01(\x0e2\x11.deep_oj.LanguageR\blanguage\"(\n" +
+	"\btrace_id\x18\t \x01(\tR\atraceId\"(\n" +
 	"\fTaskResponse\x12\x18\n" +
-	"\amessage\x18\x01 \x01(\tR\amessage\"\x05\n" +
-	"\x03Ack*K\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage*K\n" +
 	"\bLanguage\x12\x18\n" +
 	"\x14LANGUAGE_UNSPECIFIED\x10\x00\x12\a\n" +
 	"\x03CPP\x10\x01\x12\b\n" +
@@ -472,69 +333,58 @@ const file_proto_judge_proto_rawDesc = "" +
 	"\x13TIME_LIMIT_EXCEEDED\x10\x04\x12\x19\n" +
 	"\x15MEMORY_LIMIT_EXCEEDED\x10\x05\x12\x11\n" +
 	"\rRUNTIME_ERROR\x10\x06\x12\x10\n" +
-	"\fSYSTEM_ERROR\x10\a2}\n" +
-	"\fJudgeService\x12:\n" +
-	"\vExecuteTask\x12\x14.deep_oj.TaskRequest\x1a\x15.deep_oj.TaskResponse\x121\n" +
-	"\fUpdateStatus\x12\x13.deep_oj.TaskResult\x1a\f.deep_oj.AckB$Z\"github.com/d1guo/deep_oj/pkg/protob\x06proto3"
+	"\fSYSTEM_ERROR\x10\aB$Z\"github.com/d1guo/deep_oj/pkg/protob\x06proto3"
 
 var (
-	file_proto_judge_proto_rawDescOnce sync.Once
-	file_proto_judge_proto_rawDescData []byte
+	file_judge_proto_rawDescOnce sync.Once
+	file_judge_proto_rawDescData []byte
 )
 
-func file_proto_judge_proto_rawDescGZIP() []byte {
-	file_proto_judge_proto_rawDescOnce.Do(func() {
-		file_proto_judge_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_judge_proto_rawDesc), len(file_proto_judge_proto_rawDesc)))
+func file_judge_proto_rawDescGZIP() []byte {
+	file_judge_proto_rawDescOnce.Do(func() {
+		file_judge_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_judge_proto_rawDesc), len(file_judge_proto_rawDesc)))
 	})
-	return file_proto_judge_proto_rawDescData
+	return file_judge_proto_rawDescData
 }
 
-var file_proto_judge_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_judge_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_proto_judge_proto_goTypes = []any{
+var file_judge_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_judge_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_judge_proto_goTypes = []any{
 	(Language)(0),        // 0: deep_oj.Language
 	(JudgeStatus)(0),     // 1: deep_oj.JudgeStatus
 	(*TaskRequest)(nil),  // 2: deep_oj.TaskRequest
-	(*TaskResult)(nil),   // 3: deep_oj.TaskResult
-	(*TaskResponse)(nil), // 4: deep_oj.TaskResponse
-	(*Ack)(nil),          // 5: deep_oj.Ack
+	(*TaskResponse)(nil), // 3: deep_oj.TaskResponse
 }
-var file_proto_judge_proto_depIdxs = []int32{
+var file_judge_proto_depIdxs = []int32{
 	0, // 0: deep_oj.TaskRequest.language:type_name -> deep_oj.Language
-	1, // 1: deep_oj.TaskResult.status:type_name -> deep_oj.JudgeStatus
-	0, // 2: deep_oj.TaskResult.language:type_name -> deep_oj.Language
-	2, // 3: deep_oj.JudgeService.ExecuteTask:input_type -> deep_oj.TaskRequest
-	3, // 4: deep_oj.JudgeService.UpdateStatus:input_type -> deep_oj.TaskResult
-	4, // 5: deep_oj.JudgeService.ExecuteTask:output_type -> deep_oj.TaskResponse
-	5, // 6: deep_oj.JudgeService.UpdateStatus:output_type -> deep_oj.Ack
-	5, // [5:7] is the sub-list for method output_type
-	3, // [3:5] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_judge_proto_init() }
-func file_proto_judge_proto_init() {
-	if File_proto_judge_proto != nil {
+func init() { file_judge_proto_init() }
+func file_judge_proto_init() {
+	if File_judge_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_judge_proto_rawDesc), len(file_proto_judge_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_judge_proto_rawDesc), len(file_judge_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   4,
+			NumMessages:   2,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   0,
 		},
-		GoTypes:           file_proto_judge_proto_goTypes,
-		DependencyIndexes: file_proto_judge_proto_depIdxs,
-		EnumInfos:         file_proto_judge_proto_enumTypes,
-		MessageInfos:      file_proto_judge_proto_msgTypes,
+		GoTypes:           file_judge_proto_goTypes,
+		DependencyIndexes: file_judge_proto_depIdxs,
+		EnumInfos:         file_judge_proto_enumTypes,
+		MessageInfos:      file_judge_proto_msgTypes,
 	}.Build()
-	File_proto_judge_proto = out.File
-	file_proto_judge_proto_goTypes = nil
-	file_proto_judge_proto_depIdxs = nil
+	File_judge_proto = out.File
+	file_judge_proto_goTypes = nil
+	file_judge_proto_depIdxs = nil
 }

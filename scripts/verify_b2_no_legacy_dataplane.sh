@@ -27,7 +27,7 @@ compose_service_exists() {
 
 emit_diagnostics() {
   echo >&2
-  echo "========== diagnostics ==========" >&2
+  echo "========== 诊断信息 ==========" >&2
   echo "[docker compose ps]" >&2
   docker compose ps >&2 || true
 
@@ -37,7 +37,7 @@ emit_diagnostics() {
       docker compose logs --tail=200 "$service" >&2 || true
     fi
   done
-  echo "=================================" >&2
+  echo "================================" >&2
 }
 
 fatal() {
@@ -54,19 +54,57 @@ require_cmd() {
   fi
 }
 
-assert_no_etcd_service_defined() {
-  if docker compose config --services 2>/dev/null | grep -qx 'etcd'; then
-    fatal "compose 配置中仍存在 etcd 服务"
-  fi
+assert_no_legacy_scheduler_files() {
+  local removed_files=(
+    "src/go/internal/scheduler/dispatch.go"
+    "src/go/internal/scheduler/ack_listener.go"
+    "src/go/internal/scheduler/retry.go"
+    "src/go/internal/scheduler/slow_path.go"
+    "src/go/internal/scheduler/watchdog.go"
+    "src/go/pkg/proto/judge_grpc.pb.go"
+  )
+  local f
+  for f in "${removed_files[@]}"; do
+    if [[ -e "$f" ]]; then
+      fatal "仍存在 legacy 文件: $f"
+    fi
+  done
 }
 
-assert_no_etcd_service_running() {
-  if docker compose ps --services 2>/dev/null | grep -qx 'etcd'; then
-    fatal "compose 运行列表中存在 etcd 服务"
-  fi
-  if docker compose ps 2>/dev/null | grep -Eiq '(^|[[:space:]])(etcd|oj-etcd)([[:space:]]|$)'; then
-    fatal "compose ps 输出中检测到 etcd/oj-etcd"
-  fi
+assert_no_legacy_keywords() {
+  local keywords=(
+    "QueuePending"
+    "QueueProcessing"
+    "TaskProcessingZSet"
+    "BRPopLPush"
+    "BRPOPLPUSH"
+    "SubmitJob"
+    "DispatchTask"
+    "legacy_grpc_push"
+    "dispatch_enabled"
+    "queue:pending"
+    "queue:processing"
+    "stream:results"
+    "results-group"
+    "WORKER_AUTH_TOKEN"
+    "ALLOW_INSECURE_WORKER_GRPC"
+    "50052"
+  )
+
+  local kw
+  for kw in "${keywords[@]}"; do
+    if rg -n --fixed-strings \
+      --glob '!scripts/verify_b2_no_legacy_dataplane.sh' \
+      --glob '!*.diff' \
+      -- "$kw" . >/dev/null; then
+      echo "命中 legacy 关键字: $kw" >&2
+      rg -n --fixed-strings \
+        --glob '!scripts/verify_b2_no_legacy_dataplane.sh' \
+        --glob '!*.diff' \
+        -- "$kw" . >&2 || true
+      fatal "存在 legacy 数据面关键字残留"
+    fi
+  done
 }
 
 run_script_step() {
@@ -105,6 +143,7 @@ run_optional_g1() {
 
 require_cmd docker
 require_cmd bash
+require_cmd rg
 
 export JWT_SECRET="${JWT_SECRET:-dev_jwt_secret_change_me}"
 export ADMIN_USERS="${ADMIN_USERS:-admin}"
@@ -114,14 +153,13 @@ export MINIO_ROOT_USER="${MINIO_ROOT_USER:-deepoj_minio_user}"
 export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}"
 
 echo "[1/8] docker compose up -d --build"
-assert_no_etcd_service_defined
 if ! docker compose up -d --build; then
   fatal "docker compose up 失败"
 fi
 
-echo "[2/8] docker compose ps 断言不存在 etcd"
-assert_no_etcd_service_defined
-assert_no_etcd_service_running
+echo "[2/8] 断言无 legacy 数据面残留"
+assert_no_legacy_scheduler_files
+assert_no_legacy_keywords
 
 run_script_step "[3/8] 执行 scripts/verify_mvp2_e2e.sh" "scripts/verify_mvp2_e2e.sh"
 run_script_step "[4/8] 执行 scripts/verify_mvp3_crash_recover.sh" "scripts/verify_mvp3_crash_recover.sh"
@@ -129,4 +167,4 @@ run_script_step "[5/8] 执行 scripts/verify_mvp4_observability.sh" "scripts/ver
 run_script_step "[6/8] 执行 scripts/verify_ci.sh" "scripts/verify_ci.sh"
 run_optional_g1
 
-echo "[8/8] 无 etcd 启动验证通过"
+echo "[8/8] 无 legacy 数据面验证通过"

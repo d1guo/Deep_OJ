@@ -14,7 +14,7 @@ import (
 
 type Config struct {
 	WorkerID              string
-	WorkerAddr            string // gRPC listen addr
+	WorkerAddr            string
 	RedisURL              string
 	DatabaseURL           string
 	MinIOEndpoint         string

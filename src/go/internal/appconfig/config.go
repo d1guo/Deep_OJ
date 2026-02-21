@@ -105,83 +105,37 @@ type ProblemDefaults struct {
 }
 
 type SchedulerConfig struct {
-	RedisURL       string            `yaml:"redis_url"`
-	DatabaseURL    string            `yaml:"database_url"`
-	WorkerCapacity int               `yaml:"worker_capacity"`
-	MaxRetry       int               `yaml:"max_retry"`
-	RetryTTLSec    int               `yaml:"retry_ttl_sec"`
-	SchedulerID    string            `yaml:"scheduler_id"`
-	GRPCTLS        TLSConfig         `yaml:"grpc_tls"`
-	Metrics        Metrics           `yaml:"metrics"`
-	MetricsPort    int               `yaml:"metrics_port"`
-	MetricsPollMs  int               `yaml:"metrics_poll_ms"`
-	Queue          SchedulerQueue    `yaml:"queue"`
-	AckListener    AckListenerConfig `yaml:"ack_listener"`
-	SlowPath       SlowPathConfig    `yaml:"slow_path"`
-	Watchdog       WatchdogConfig    `yaml:"watchdog"`
-	Dispatch       DispatchConfig    `yaml:"dispatch"`
-}
-
-type SchedulerQueue struct {
-	BRPopTimeoutSec       int `yaml:"brpop_timeout_sec"`
-	NoWorkerSleepMs       int `yaml:"no_worker_sleep_ms"`
-	AssignmentTTLSec      int `yaml:"assignment_ttl_sec"`
-	PayloadTTLSec         int `yaml:"payload_ttl_sec"`
-	ProcessingStartTTLSec int `yaml:"processing_start_ttl_sec"`
-	InflightTTLSec        int `yaml:"inflight_ttl_sec"`
-}
-
-type AckListenerConfig struct {
-	PendingCount   int `yaml:"pending_count"`
-	PendingBlockMs int `yaml:"pending_block_ms"`
-	NewCount       int `yaml:"new_count"`
-	NewBlockMs     int `yaml:"new_block_ms"`
-}
-
-type SlowPathConfig struct {
-	TickSec             int `yaml:"tick_sec"`
-	ProcessingCutoffSec int `yaml:"processing_cutoff_sec"`
-	PendingStaleSec     int `yaml:"pending_stale_sec"`
-	DBScanLimit         int `yaml:"db_scan_limit"`
-}
-
-type WatchdogConfig struct {
-	IntervalSec int `yaml:"interval_sec"`
-}
-
-type DispatchConfig struct {
-	ConnTimeoutMs int `yaml:"conn_timeout_ms"`
-	RPCTimeoutMs  int `yaml:"rpc_timeout_ms"`
-	MaxRetries    int `yaml:"max_retries"`
-	BackoffBaseMs int `yaml:"backoff_base_ms"`
+	RedisURL      string  `yaml:"redis_url"`
+	DatabaseURL   string  `yaml:"database_url"`
+	SchedulerID   string  `yaml:"scheduler_id"`
+	Metrics       Metrics `yaml:"metrics"`
+	MetricsPort   int     `yaml:"metrics_port"`
+	MetricsPollMs int     `yaml:"metrics_poll_ms"`
 }
 
 type WorkerConfig struct {
-	ID                     string             `yaml:"id"`
-	Addr                   string             `yaml:"addr"`
-	Port                   int                `yaml:"port"`
-	RedisURL               string             `yaml:"redis_url"`
-	DatabaseURL            string             `yaml:"database_url"`
-	Stream                 WorkerStreamConfig `yaml:"stream"`
-	MinIO                  MinIOConfig        `yaml:"minio"`
-	Workspace              string             `yaml:"workspace"`
-	JudgerBin              string             `yaml:"judger_bin"`
-	JudgerConfig           string             `yaml:"judger_config"`
-	PoolSize               int                `yaml:"pool_size"`
-	KeepWorkdir            *bool              `yaml:"keep_workdir"`
-	Timeouts               WorkerTimeouts     `yaml:"timeouts"`
-	TestcaseCache          WorkerCache        `yaml:"testcase_cache"`
-	UnzipLimits            UnzipLimits        `yaml:"unzip_limits"`
-	ResultTTLSec           int                `yaml:"result_ttl_sec"`
-	CheckerTimeoutMs       int                `yaml:"checker_timeout_ms"`
-	CleanupTimeoutSec      int                `yaml:"cleanup_timeout_sec"`
-	ResultStreamMaxRetries int                `yaml:"result_stream_max_retries"`
-	ResultStreamBackoffMs  int                `yaml:"result_stream_backoff_ms"`
-	AllowHostChecker       *bool              `yaml:"allow_host_checker"`
-	RequireCgroupsV2       *bool              `yaml:"require_cgroups_v2"`
-	GRPCTLS                TLSConfig          `yaml:"grpc_tls"`
-	Metrics                Metrics            `yaml:"metrics"`
-	MetricsPort            int                `yaml:"metrics_port"`
+	ID                string             `yaml:"id"`
+	Addr              string             `yaml:"addr"`
+	Port              int                `yaml:"port"`
+	RedisURL          string             `yaml:"redis_url"`
+	DatabaseURL       string             `yaml:"database_url"`
+	Stream            WorkerStreamConfig `yaml:"stream"`
+	MinIO             MinIOConfig        `yaml:"minio"`
+	Workspace         string             `yaml:"workspace"`
+	JudgerBin         string             `yaml:"judger_bin"`
+	JudgerConfig      string             `yaml:"judger_config"`
+	PoolSize          int                `yaml:"pool_size"`
+	KeepWorkdir       *bool              `yaml:"keep_workdir"`
+	Timeouts          WorkerTimeouts     `yaml:"timeouts"`
+	TestcaseCache     WorkerCache        `yaml:"testcase_cache"`
+	UnzipLimits       UnzipLimits        `yaml:"unzip_limits"`
+	ResultTTLSec      int                `yaml:"result_ttl_sec"`
+	CheckerTimeoutMs  int                `yaml:"checker_timeout_ms"`
+	CleanupTimeoutSec int                `yaml:"cleanup_timeout_sec"`
+	AllowHostChecker  *bool              `yaml:"allow_host_checker"`
+	RequireCgroupsV2  *bool              `yaml:"require_cgroups_v2"`
+	Metrics           Metrics            `yaml:"metrics"`
+	MetricsPort       int                `yaml:"metrics_port"`
 }
 
 type WorkerStreamConfig struct {

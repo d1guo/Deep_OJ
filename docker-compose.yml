@@ -24,8 +24,6 @@ services:
       - SETGID
     security_opt:
       - no-new-privileges:true
-    expose:
-      - "50051"
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./data/workspace:/data/workspace:rw
@@ -47,8 +45,6 @@ services:
       - JOB_RECLAIM_GRACE_SEC=15
       - JUDGER_BIN=/app/judge_engine
       - WORKSPACE=/data/workspace
-      - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}
-      - ALLOW_INSECURE_WORKER_GRPC=true
     networks:
       - deep-oj-net
     depends_on:
@@ -63,16 +59,12 @@ services:
     restart: on-failure
     user: deep_oj
     command: /app/oj_scheduler
-    ports:
-      - "50052:50052"
     environment:
       - REDIS_URL=oj-redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
       - WORKER_ADDR=oj-worker:50051
       - PGPASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
       - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
-      - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}
-      - ALLOW_INSECURE_WORKER_GRPC=true
     networks:
       - deep-oj-net
     depends_on:
@@ -94,7 +86,6 @@ services:
       - PORT=18080
       - REDIS_URL=oj-redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
-      - SCHEDULER_ADDR=oj-scheduler:50052
       - PGPASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
       - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
       - MINIO_ENDPOINT=http://oj-minio:9000

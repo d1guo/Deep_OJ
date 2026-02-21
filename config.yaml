@@ -98,42 +98,9 @@ api:
 scheduler:
   redis_url: "localhost:6379"
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
-  worker_capacity: 4
-  max_retry: 3
-  retry_ttl_sec: 86400
   scheduler_id: "scheduler-1"
-  dispatch_mode: "streams_only" # streams_only | legacy_grpc_push
-  dispatch_enabled: false       # legacy_grpc_push requires true
   metrics_port: 9091
   metrics_poll_ms: 1000
-  queue:
-    brpop_timeout_sec: 5
-    no_worker_sleep_ms: 1000
-    assignment_ttl_sec: 600
-    payload_ttl_sec: 1800
-    processing_start_ttl_sec: 1800
-    inflight_ttl_sec: 1800
-  ack_listener:
-    pending_count: 20
-    pending_block_ms: 1000
-    new_count: 10
-    new_block_ms: 5000
-  slow_path:
-    tick_sec: 60
-    processing_cutoff_sec: 30
-    pending_stale_sec: 60
-    db_scan_limit: 100
-  watchdog:
-    interval_sec: 5
-  dispatch:
-    conn_timeout_ms: 3000
-    rpc_timeout_ms: 5000
-    max_retries: 3
-    backoff_base_ms: 100
-  grpc_tls:
-    cert: ""
-    key: ""
-    ca: ""
   metrics:
     service_name: "deep-oj-scheduler"
     instance_id: ""
@@ -168,8 +135,6 @@ worker:
   result_ttl_sec: 600
   checker_timeout_ms: 2000
   cleanup_timeout_sec: 5
-  result_stream_max_retries: 3
-  result_stream_backoff_ms: 100
   timeouts:
     compile_ms: 10000
     exec_buffer_ms: 500
@@ -184,10 +149,6 @@ worker:
     max_file_bytes: 67108864 # 64MB
   allow_host_checker: false
   require_cgroups_v2: false
-  grpc_tls:
-    cert: ""
-    key: ""
-    ca: ""
   metrics:
     service_name: "deep-oj-worker"
     instance_id: ""
