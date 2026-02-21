@@ -19,16 +19,7 @@ if [ ! "$(docker ps -q -f name=oj-minio)" ]; then
         minio/minio:RELEASE.2024-01-18T22-51-28Z server /data --console-address ":9001"
 fi
 
-# 2. Etcd
-echo "Starting Etcd..."
-docker rm -f oj-etcd || true
-docker run -d --name oj-etcd \
-    --network deep-oj-net \
-    -p 2381:2379 \
-    registry.cn-hangzhou.aliyuncs.com/google_containers/etcd:3.5.0-0 \
-    /usr/local/bin/etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://oj-etcd:2379
-
-# 3. Redis
+# 2. Redis
 echo "Starting Redis..."
 docker rm -f oj-redis || true
 docker run -d --name oj-redis \
@@ -36,7 +27,7 @@ docker run -d --name oj-redis \
     -p 6380:6379 \
     redis:alpine
 
-# 4. Postgres
+# 3. Postgres
 echo "Starting Postgres..."
 docker rm -f oj-postgres || true
 docker run -d --name oj-postgres \
@@ -52,7 +43,7 @@ docker run -d --name oj-postgres \
 echo "Waiting for Postgres..."
 sleep 5
 
-# 5. Worker
+# 4. Worker
 echo "Starting Worker..."
 docker rm -f oj-worker || true
 docker run -d --name oj-worker \
@@ -66,13 +57,12 @@ docker run -d --name oj-worker \
     -e MINIO_ACCESS_KEY=minioadmin \
     -e MINIO_SECRET_KEY=minioadmin \
     -e MINIO_BUCKET=deep-oj-problems \
-    -e ETCD_ENDPOINTS=oj-etcd:2379 \
     -e WORKER_ADDR=oj-worker:50051 \
     -e JUDGER_BIN=/app/judge_engine \
     -e WORKSPACE=/data/workspace \
     deep-oj:v3 /app/oj_worker
 
-# 6. Scheduler
+# 5. Scheduler
 echo "Starting Scheduler..."
 docker rm -f oj-scheduler || true
 docker run -d --name oj-scheduler \
@@ -80,12 +70,11 @@ docker run -d --name oj-scheduler \
     -p 50052:50052 \
     -e REDIS_URL=oj-redis:6379 \
     -e WORKER_ADDR=oj-worker:50051 \
-    -e ETCD_ENDPOINTS=oj-etcd:2379 \
     -e PGPASSWORD=secret \
     -e DATABASE_URL=postgres://deep_oj:secret@oj-postgres:5432/deep_oj?sslmode=disable \
     deep-oj:v3 /app/oj_scheduler
 
-# 7. API
+# 6. API
 echo "Starting API..."
 docker rm -f oj-api || true
 docker run -d --name oj-api \

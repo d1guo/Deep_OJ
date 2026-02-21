@@ -1,33 +1,4 @@
-/**
- * @file main.go
- * @brief Go Scheduler 入口
- *
- * 架构定位: 任务调度层
- * 技术选型: Etcd (服务发现) + gRPC (Worker 通信) + Redis (任务队列)
- *
- *
- * 1. Etcd 服务发现 vs 传统配置:
- *    - 传统: 硬编码 Worker 地址，重启才能更新
- *    - Etcd: Worker 动态注册，实时感知变化
- *    - Lease 机制: Worker 定期续约，超时自动注销
- *
- * 2. 负载均衡策略:
- *    - Round-Robin: 简单轮询，适合同构服务
- *    - Weighted: 加权轮询，根据 Worker 能力分配
- *    - Least-Connections: 最少连接优先
- *    - Consistent-Hashing: 一致性哈希，适合缓存场景
- *
- * 3. gRPC 优势:
- *    - HTTP/2: 多路复用，头部压缩
- *    - Protobuf: 紧凑的二进制序列化
- *    - 流式传输: 双向流支持
- *    - 代码生成: 强类型接口
- *
- * 4. 可靠性设计:
- *    - ACK 机制: 任务确认后才从队列移除
- *    - 超时检测: 处理中任务超时后重新入队
- *    - 重试策略: 指数退避 (Exponential Backoff)
- */
+// 调度器入口：不依赖 etcd，使用 WORKER_ADDR/WORKER_ADDRS 进行工作节点发现。
 package main
 
 import (
@@ -38,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -82,7 +52,6 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_LIFETIME_MIN", cfg.Postgres.MaxConnLifetimeMin)
 		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_IDLE_MIN", cfg.Postgres.MaxConnIdleMin)
 
-		appconfig.SetEnvIfEmptySlice("ETCD_ENDPOINTS", cfg.Scheduler.EtcdEndpoints)
 		appconfig.SetEnvIfEmpty("REDIS_URL", cfg.Scheduler.RedisURL)
 		appconfig.SetEnvIfEmpty("DATABASE_URL", cfg.Scheduler.DatabaseURL)
 		appconfig.SetEnvIfEmptyInt("WORKER_CAPACITY", cfg.Scheduler.WorkerCapacity)
@@ -91,7 +60,6 @@ func main() {
 		appconfig.SetEnvIfEmpty("SCHEDULER_ID", cfg.Scheduler.SchedulerID)
 		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_PORT", cfg.Scheduler.MetricsPort)
 		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_POLL_INTERVAL_MS", cfg.Scheduler.MetricsPollMs)
-		appconfig.SetEnvIfEmptyInt("ETCD_DIAL_TIMEOUT_MS", cfg.Scheduler.EtcdDialTimeoutMs)
 		appconfig.SetEnvIfEmptyInt("QUEUE_BRPOP_TIMEOUT_SEC", cfg.Scheduler.Queue.BRPopTimeoutSec)
 		appconfig.SetEnvIfEmptyInt("NO_WORKER_SLEEP_MS", cfg.Scheduler.Queue.NoWorkerSleepMs)
 		appconfig.SetEnvIfEmptyInt("ASSIGNMENT_TTL_SEC", cfg.Scheduler.Queue.AssignmentTTLSec)
@@ -119,11 +87,6 @@ func main() {
 	}
 
 	// 1. 读取配置
-	etcdEndpoints := os.Getenv("ETCD_ENDPOINTS")
-	if etcdEndpoints == "" {
-		etcdEndpoints = "localhost:2379"
-	}
-
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "localhost:6379"
@@ -148,17 +111,16 @@ func main() {
 		cancel()
 	}()
 
-	// 3. 初始化 Etcd 服务发现
-	endpoints := strings.Split(etcdEndpoints, ",")
-	discovery, err := scheduler.NewEtcdDiscovery(endpoints)
+	// 3. 初始化工作节点发现（无 etcd 依赖）
+	discovery, err := scheduler.NewWorkerDiscovery()
 	if err != nil {
-		slog.Error("连接 Etcd 失败", "error", err)
+		slog.Error("初始化工作节点发现失败", "error", err)
 		os.Exit(1)
 	}
 	defer discovery.Close()
-	slog.Info("已连接 Etcd")
+	slog.Info("工作节点发现已就绪", "worker_count", discovery.GetWorkerCount())
 
-	// 启动 Worker 监听
+	// 保留调用路径，当前实现会等待 ctx 退出。
 	go discovery.WatchWorkers(ctx)
 
 	// 4. 初始化 Redis 客户端
@@ -188,7 +150,7 @@ func main() {
 
 	// 6. 启动监控（探针与指标）
 
-	// 6.1 启动指标轮询（Redis/Etcd 状态）
+	// 6.1 启动指标轮询（Redis/Worker 状态）
 	go scheduler.StartMetricsPoller(ctx, redisClient, discovery)
 
 	// 6.2 暴露 Prometheus 指标端点
@@ -322,7 +284,7 @@ func main() {
 	}
 }
 
-func selectWorker(ctx context.Context, redisClient *repository.RedisClient, discovery *scheduler.EtcdDiscovery, capacity int) (string, string, bool) {
+func selectWorker(ctx context.Context, redisClient *repository.RedisClient, discovery *scheduler.WorkerDiscovery, capacity int) (string, string, bool) {
 	total := discovery.GetWorkerCount()
 	if total == 0 {
 		return "", "", false

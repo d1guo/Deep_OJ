@@ -37,7 +37,6 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-deepoj_minio_user}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
       - MINIO_BUCKET=deep-oj-problems
-      - ETCD_ENDPOINTS=oj-etcd:2379
       - WORKER_ADDR=oj-worker:50051
       - JOB_STREAM_KEY=deepoj:jobs
       - JOB_STREAM_GROUP=deepoj:workers
@@ -70,7 +69,6 @@ services:
       - REDIS_URL=oj-redis:6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-deepoj_redis_change_me}
       - WORKER_ADDR=oj-worker:50051
-      - ETCD_ENDPOINTS=oj-etcd:2379 # Need Etcd service
       - PGPASSWORD=${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}
       - DATABASE_URL=postgres://deep_oj:${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}@oj-postgres:5432/deep_oj?sslmode=disable
       - WORKER_AUTH_TOKEN=${WORKER_AUTH_TOKEN:-deepoj_worker_token_change_me}
@@ -103,6 +101,8 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-deepoj_minio_user}
       - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}
       - MINIO_BUCKET=deep-oj-problems
+      - JWT_SECRET=${JWT_SECRET:-dev_jwt_secret_change_me}
+      - ADMIN_USERS=${ADMIN_USERS:-admin}
       - METRICS_TOKEN=${METRICS_TOKEN:-}
     networks:
       - deep-oj-net
@@ -140,16 +140,6 @@ services:
     expose:
       - "9000"
       - "9001"
-    networks:
-      - deep-oj-net
-
-  # 7. Etcd (Service Discovery)
-  etcd:
-    image: registry.cn-hangzhou.aliyuncs.com/google_containers/etcd:3.5.0-0
-    container_name: oj-etcd
-    command: /usr/local/bin/etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://oj-etcd:2379
-    expose:
-      - "2379"
     networks:
       - deep-oj-net
 

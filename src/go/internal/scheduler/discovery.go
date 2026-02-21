@@ -2,125 +2,150 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"sync"
+	"net"
+	"net/url"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
-
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-const (
-	// WorkerPrefix Etcd 中 Worker 注册的前缀
-	WorkerPrefix = "/deep-oj/workers/"
-)
-
-// EtcdDiscovery Etcd 服务发现
-type EtcdDiscovery struct {
-	client  *clientv3.Client
-	workers sync.Map // map[workerID]workerAddress
-	rrIndex uint64   // Round-Robin 计数器
+type workerEndpoint struct {
+	id   string
+	addr string
 }
 
-// NewEtcdDiscovery 创建 Etcd 服务发现实例
-func NewEtcdDiscovery(endpoints []string) (*EtcdDiscovery, error) {
-	dialMs := getEnvInt("ETCD_DIAL_TIMEOUT_MS", 5000)
-	client, err := clientv3.New(clientv3.Config{
-		Endpoints:   endpoints,
-		DialTimeout: time.Duration(dialMs) * time.Millisecond,
-	})
-	if err != nil {
-		return nil, err
-	}
+// WorkerDiscovery 提供无 etcd 的工作节点发现。
+// 支持两种环境变量：
+// - WORKER_ADDR=host:port
+// - WORKER_ADDRS=id1=host1:port1,id2=host2:port2 或 host1:port1,host2:port2
+type WorkerDiscovery struct {
+	workers      []workerEndpoint
+	rrIndex      uint64
+	probeTimeout time.Duration
+}
 
-	return &EtcdDiscovery{
-		client: client,
+func NewWorkerDiscovery() (*WorkerDiscovery, error) {
+	rawWorkers := strings.TrimSpace(os.Getenv("WORKER_ADDRS"))
+	if rawWorkers == "" {
+		rawWorkers = strings.TrimSpace(os.Getenv("WORKER_ADDR"))
+	}
+	workers := parseWorkerEndpoints(rawWorkers)
+	if len(workers) == 0 {
+		slog.Warn("未配置可用工作节点，调度器将等待 worker 上线", "env", "WORKER_ADDR/WORKER_ADDRS")
+	}
+	probeMs := getEnvInt("WORKER_PROBE_TIMEOUT_MS", 1000)
+	if probeMs <= 0 {
+		probeMs = 1000
+	}
+	return &WorkerDiscovery{
+		workers:      workers,
+		probeTimeout: time.Duration(probeMs) * time.Millisecond,
 	}, nil
 }
 
-// Close 关闭 Etcd 连接
-func (d *EtcdDiscovery) Close() error {
-	return d.client.Close()
-}
-
-// WatchWorkers 监听 Worker 注册/注销事件
-func (d *EtcdDiscovery) WatchWorkers(ctx context.Context) {
-	slog.Info("正在监听工作节点", "prefix", WorkerPrefix)
-
-	// 1. 首先获取现有的 Workers
-	resp, err := d.client.Get(ctx, WorkerPrefix, clientv3.WithPrefix())
-	if err != nil {
-		slog.Error("获取初始工作节点失败", "error", err)
-	} else {
-		for _, kv := range resp.Kvs {
-			workerID := string(kv.Key)[len(WorkerPrefix):]
-			workerAddr := string(kv.Value)
-			d.workers.Store(workerID, workerAddr)
-			slog.Info("发现工作节点", "worker_id", workerID, "addr", workerAddr)
+func parseWorkerEndpoints(raw string) []workerEndpoint {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	workers := make([]workerEndpoint, 0, len(parts))
+	seenIDs := make(map[string]struct{}, len(parts))
+	for idx, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
-	}
-
-	// 2. 开始监听变化
-	watchChan := d.client.Watch(ctx, WorkerPrefix, clientv3.WithPrefix())
-
-	for resp := range watchChan {
-		for _, ev := range resp.Events {
-			workerID := string(ev.Kv.Key)[len(WorkerPrefix):]
-
-			switch ev.Type {
-			case clientv3.EventTypePut:
-				// Worker 注册或更新
-				workerAddr := string(ev.Kv.Value)
-				d.workers.Store(workerID, workerAddr)
-				slog.Info("工作节点已注册", "worker_id", workerID, "addr", workerAddr)
-
-			case clientv3.EventTypeDelete:
-				// Worker 注销 (Lease 过期或主动注销)
-				d.workers.Delete(workerID)
-				slog.Info("工作节点已注销", "worker_id", workerID)
-			}
+		id := ""
+		addr := part
+		if strings.Contains(part, "=") {
+			pair := strings.SplitN(part, "=", 2)
+			id = strings.TrimSpace(pair[0])
+			addr = strings.TrimSpace(pair[1])
 		}
-	}
-}
-
-// GetNextWorker 使用 Round-Robin 获取下一个 Worker
-func (d *EtcdDiscovery) GetNextWorker() (string, string, bool) {
-	// 收集所有 Worker 信息
-	type workerInfo struct {
-		id   string
-		addr string
-	}
-	var workers []workerInfo
-	d.workers.Range(func(key, value interface{}) bool {
-		workers = append(workers, workerInfo{
-			id:   key.(string),
-			addr: value.(string),
+		if addr == "" {
+			continue
+		}
+		if id == "" {
+			id = fmt.Sprintf("worker-%d", idx+1)
+		}
+		if _, exists := seenIDs[id]; exists {
+			id = fmt.Sprintf("%s-%d", id, idx+1)
+		}
+		seenIDs[id] = struct{}{}
+		workers = append(workers, workerEndpoint{
+			id:   id,
+			addr: addr,
 		})
-		return true
-	})
+	}
+	return workers
+}
 
-	if len(workers) == 0 {
+// Close 为接口兼容保留，当前无外部连接需要关闭。
+func (d *WorkerDiscovery) Close() error {
+	return nil
+}
+
+// WatchWorkers 在无 etcd 模式下仅阻塞等待退出信号，避免调用方改动。
+func (d *WorkerDiscovery) WatchWorkers(ctx context.Context) {
+	<-ctx.Done()
+}
+
+// GetNextWorker 使用 Round-Robin 获取下一个 worker。
+func (d *WorkerDiscovery) GetNextWorker() (string, string, bool) {
+	if len(d.workers) == 0 {
 		return "", "", false
 	}
-
-	// 原子递增计数器，取模得到索引
 	idx := atomic.AddUint64(&d.rrIndex, 1)
-	w := workers[idx%uint64(len(workers))]
+	w := d.workers[(idx-1)%uint64(len(d.workers))]
 	return w.id, w.addr, true
 }
 
-// GetWorkerCount 获取当前 Worker 数量
-func (d *EtcdDiscovery) GetWorkerCount() int {
-	count := 0
-	d.workers.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	return count
+func (d *WorkerDiscovery) GetWorkerCount() int {
+	return len(d.workers)
 }
 
-// IsWorkerActive 检查 Worker 是否在线
-func (d *EtcdDiscovery) IsWorkerActive(workerID string) bool {
-	_, ok := d.workers.Load(workerID)
-	return ok
+// IsWorkerActive 通过 TCP 探活判断 worker 是否在线。
+func (d *WorkerDiscovery) IsWorkerActive(workerID string) bool {
+	for _, w := range d.workers {
+		if w.id == workerID {
+			return probeTCPAddress(w.addr, d.probeTimeout)
+		}
+	}
+	return false
+}
+
+func probeTCPAddress(rawAddr string, timeout time.Duration) bool {
+	addr := normalizeDialAddress(rawAddr)
+	if addr == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	if err := conn.Close(); err != nil {
+		slog.Debug("关闭探活连接失败", "addr", addr, "error", err)
+	}
+	return true
+}
+
+func normalizeDialAddress(raw string) string {
+	addr := strings.TrimSpace(raw)
+	if addr == "" {
+		return ""
+	}
+	if strings.Contains(addr, "://") {
+		u, err := url.Parse(addr)
+		if err != nil {
+			return ""
+		}
+		if u.Host != "" {
+			return strings.TrimSpace(u.Host)
+		}
+		return ""
+	}
+	return addr
 }

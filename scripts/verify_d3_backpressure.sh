@@ -111,7 +111,7 @@ emit_diagnostics() {
 
 cleanup_conflicting_containers() {
   local name
-  for name in oj-api oj-worker oj-scheduler oj-redis oj-postgres oj-minio oj-etcd; do
+  for name in oj-api oj-worker oj-scheduler oj-redis oj-postgres oj-minio; do
     if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
       docker rm -f "$name" >/dev/null 2>&1 || true
     fi
@@ -242,9 +242,9 @@ ensure_stream_group() {
 
 export JWT_SECRET ADMIN_USERS REDIS_PASSWORD STREAM_KEY STREAM_GROUP
 
-echo "[1/8] start core services (api/scheduler/redis/postgres/minio/etcd)"
+echo "[1/8] start core services (api/scheduler/redis/postgres/minio)"
 cleanup_conflicting_containers
-if ! docker compose up -d --build api scheduler redis postgres minio etcd; then
+if ! docker compose up -d --build api scheduler redis postgres minio; then
   fatal "docker compose up failed"
 fi
 

@@ -14,7 +14,7 @@
 - 触发点：`src/go/cmd/scheduler/main.go` `selectWorker` 失败
 - 现象：任务被 `RequeueTask(queue:processing -> queue:pending)` 循环重试
 - 定位：日志关键字 `No workers available`
-- 恢复：恢复 worker/etcd 注册，观察 pending 回落
+- 恢复：恢复 worker 可达（`WORKER_ADDR/WORKER_ADDRS`），观察 pending 回落
 
 ## 3. Worker 执行完成但结果未入 Stream
 
@@ -43,4 +43,3 @@
 - 现象：当前 SQL 条件 `state != 'done'` 下被忽略
 - 定位：日志关键字 `Duplicate result ignored (already done)`
 - 恢复：无需人工处理；后续需升级到 attempt_id fencing（C5）
-

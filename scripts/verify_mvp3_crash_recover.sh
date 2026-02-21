@@ -34,6 +34,13 @@ READINESS_HEALTH_STATUS="<none>"
 READINESS_HEALTH_BODY_FILE=""
 READINESS_LAST_SOURCE="<none>"
 HAS_RG=0
+COMPOSE_FILES=(-f docker-compose.yml)
+if [[ -f docker-compose.verify-g1.yml ]]; then
+  COMPOSE_FILES+=(-f docker-compose.verify-g1.yml)
+fi
+if [[ -f docker-compose.override.yml ]]; then
+  COMPOSE_FILES+=(-f docker-compose.override.yml)
+fi
 
 cleanup() {
   if [[ "$KEEP_TMP" == "1" ]]; then
@@ -81,12 +88,16 @@ rg_or_grep() {
   fi
 }
 
+compose_cmd() {
+  docker compose "${COMPOSE_FILES[@]}" "$@"
+}
+
 compose_service_exists() {
   local service="$1"
   local svc
   while IFS= read -r svc; do
     [[ "$svc" == "$service" ]] && return 0
-  done < <(docker compose config --services 2>/dev/null || true)
+  done < <(compose_cmd config --services 2>/dev/null || true)
   return 1
 }
 
@@ -95,7 +106,7 @@ service_running() {
   local svc
   while IFS= read -r svc; do
     [[ "$svc" == "$service" ]] && return 0
-  done < <(docker compose ps --status running --services 2>/dev/null || true)
+  done < <(compose_cmd ps --status running --services 2>/dev/null || true)
   return 1
 }
 
@@ -124,7 +135,7 @@ emit_diagnostics() {
   echo
   echo "========== diagnostics ==========" >&2
   echo "[docker compose ps]" >&2
-  docker compose ps >&2 || true
+  compose_cmd ps >&2 || true
   echo "[api readiness snapshot]" >&2
   echo "  source=${READINESS_LAST_SOURCE}" >&2
   echo "  health_status=${READINESS_HEALTH_STATUS}" >&2
@@ -134,14 +145,14 @@ emit_diagnostics() {
   fi
 
   local services
-  services="$(docker compose config --services 2>/dev/null || true)"
+  services="$(compose_cmd config --services 2>/dev/null || true)"
   if [[ -z "$services" ]]; then
     echo "[docker compose config --services] <none>" >&2
   else
     while IFS= read -r service; do
       [[ -z "$service" ]] && continue
       echo "[docker compose logs --tail=200 ${service}]" >&2
-      docker compose logs --tail=200 "$service" >&2 || true
+      compose_cmd logs --tail=200 "$service" >&2 || true
     done <<< "$services"
   fi
   echo "=================================" >&2
@@ -291,7 +302,7 @@ wait_api_ready() {
     fi
 
     if compose_service_exists "api"; then
-      if docker compose logs --tail=200 api 2>&1 | rg_or_grep "API Server starting" >/dev/null 2>&1; then
+      if compose_cmd logs --tail=200 api 2>&1 | rg_or_grep "API Server starting" >/dev/null 2>&1; then
         READINESS_LAST_SOURCE="compose_log"
         return 0
       fi
@@ -388,11 +399,11 @@ fi
 echo "[1/10] start services"
 FAILED_STEP="start services"
 if [[ "$COMPOSE_BUILD" == "1" ]]; then
-  if ! docker compose up -d --build; then
+  if ! compose_cmd up -d --build; then
     fail_verify "$FAILED_STEP" "<none>" "" "docker compose up -d --build failed"
   fi
 else
-  if ! docker compose up -d; then
+  if ! compose_cmd up -d; then
     fail_verify "$FAILED_STEP" "<none>" "" "docker compose up -d failed"
   fi
 fi
@@ -579,7 +590,7 @@ if ! is_int "$XPENDING_BEFORE"; then
 fi
 
 FAILED_STEP="kill worker"
-if ! docker compose kill -s SIGKILL "$WORKER_SERVICE" >/dev/null 2>&1; then
+if ! compose_cmd kill -s SIGKILL "$WORKER_SERVICE" >/dev/null 2>&1; then
   worker_container="$(find_container_by_service "$WORKER_SERVICE")"
   if [[ -z "$worker_container" ]]; then
     fail_verify "$FAILED_STEP" "N/A" "" "failed to find worker container for SIGKILL"
@@ -619,7 +630,7 @@ fi
 
 sleep "$CRASH_WAIT_SEC"
 FAILED_STEP="restart worker"
-if ! docker compose up -d "$WORKER_SERVICE" >/dev/null 2>&1; then
+if ! compose_cmd up -d "$WORKER_SERVICE" >/dev/null 2>&1; then
   fail_verify "$FAILED_STEP" "N/A" "" "docker compose up -d worker failed"
 fi
 if ! wait_service_running "$WORKER_SERVICE" 90; then
@@ -676,7 +687,7 @@ fi
 echo "[8/10] reclaim evidence"
 FAILED_STEP="collect reclaim evidence"
 WORKER_LOGS_SINCE_FILE="$TMP_DIR/worker_logs_since_crash.log"
-docker compose logs --since "$CRASH_TS" --tail=800 "$WORKER_SERVICE" > "$WORKER_LOGS_SINCE_FILE" 2>&1 || true
+compose_cmd logs --since "$CRASH_TS" --tail=800 "$WORKER_SERVICE" > "$WORKER_LOGS_SINCE_FILE" 2>&1 || true
 RECLAIM_MATCHES="$(rg_or_grep "DB reclaim success|reclaim_claimed|XAUTOCLAIM|reclaim" "$WORKER_LOGS_SINCE_FILE" || true)"
 RECLAIM_MATCH_COUNT="$(printf '%s\n' "$RECLAIM_MATCHES" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
 

@@ -24,8 +24,16 @@ python3 tests/integration/test_e2e.py
 
 预期：
 
-- `docker compose ps` 中 `api/scheduler/worker/redis/postgres/minio/etcd` 为 `Up`
+- `docker compose ps` 中 `api/scheduler/worker/redis/postgres/minio` 为 `Up`
 - `test_e2e.py` 输出 `Submitted, Job ID:`，并在轮询后出现 `Result: Accepted`（或可预期判题状态）
+
+### 0.1 无 etcd 启动验证（B1）
+
+系统已移除 etcd 运行时依赖。请使用以下脚本执行完整验收：
+
+```bash
+bash scripts/verify_b1_no_etcd.sh
+```
 
 ## 1. 环境与依赖
 
@@ -46,7 +54,6 @@ python3 tests/integration/test_e2e.py
 - Redis（兼容 compose 中 `redis:alpine`）
 - PostgreSQL 15（compose 使用 `postgres:15-alpine`）
 - MinIO（项目使用对象存储下载测试数据；非可选于完整判题链路）
-- Etcd 3.5（Worker 服务发现）
 
 ### 1.1 本地运行 judge 并查看 JSON 输出
 
@@ -187,7 +194,7 @@ done
 | Redis 不可达，API 报 `QUEUE_ERROR` | `REDIS_PASSWORD` 不一致、Redis 容器未启动、网络不可达 | `docker compose ps redis`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" PING`; `docker compose logs --tail=200 api` | 统一 `REDIS_PASSWORD`，重启 `redis/api/scheduler/worker`，必要时 `docker compose up -d` |
 | DB 连接池耗尽，接口变慢/5xx | `PG_MAX_CONNS` 太小、长事务、慢 SQL | `docker compose logs --tail=300 api | rg -i "database|timeout|too many"`; `docker exec -it oj-postgres psql -U deep_oj -d deep_oj -c "select * from pg_stat_activity;"` | 增大 `PG_MAX_CONNS`，排查慢查询，缩短事务并重启 API |
 | 队列堆积（`queue:pending` 持续增长） | Worker 不可用、Scheduler 调度失败、下游执行慢 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" LLEN queue:pending`; `docker compose logs --tail=200 scheduler worker` | 先恢复 worker 可用性，再根据 CPU/内存扩容 worker 或降低提交速率 |
-| Worker 不消费任务 | Etcd 注册失败、gRPC 不可达、worker 启动失败 | `docker compose logs --tail=200 worker`; `docker compose logs --tail=200 scheduler | rg -i "No workers|dispatch"` | 修复 `ETCD_ENDPOINTS/WORKER_ADDR`，确认 `oj-etcd` 可达，重启 worker/scheduler |
+| Worker 不消费任务 | gRPC 不可达、worker 启动失败、`WORKER_ADDR` 配置错误 | `docker compose logs --tail=200 worker`; `docker compose logs --tail=200 scheduler | rg -i "No workers|dispatch"` | 修复 `WORKER_ADDR/WORKER_ADDRS`，确认 worker 可达，重启 worker/scheduler |
 | Judge 出现超时/TLE 异常增多 | 用户代码死循环、时间限制过低、机器负载过高 | `docker compose logs --tail=300 worker | rg -i "Time Limit|timed out|command timed out"` | 调整题目时限、检查资源压力、必要时横向扩容 worker |
 | Judge 出现 OOM/MLE 异常增多 | 代码内存占用过大、内存限制过低、容器内存紧张 | `docker compose logs --tail=300 worker | rg -i "Memory Limit|OOM|killed"` | 调整内存上限，检查宿主机内存，限制异常任务并重试 |
 | 出现僵尸进程或残留判题进程 | kill/cleanup 未完整执行、worker 异常中断 | `docker exec -it oj-worker ps -eo pid,ppid,stat,cmd | rg "judge_engine| Z "` | 重启 worker 清理现场；后续按任务 G1/G2 加强进程组 kill 与幂等清理 |

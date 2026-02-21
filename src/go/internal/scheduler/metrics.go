@@ -38,7 +38,7 @@ var (
 	schedulerActiveWorkers = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "scheduler_active_workers",
-			Help: "Etcd 中活跃的工作节点数",
+			Help: "当前发现到的活跃工作节点数",
 		},
 	)
 
@@ -99,7 +99,7 @@ func SetLegacyLoopsStarted(count int) {
 }
 
 // StartMetricsPoller starts a background loop to update Gauge metrics
-func StartMetricsPoller(ctx context.Context, redis *repository.RedisClient, discovery *EtcdDiscovery) {
+func StartMetricsPoller(ctx context.Context, redis *repository.RedisClient, discovery *WorkerDiscovery) {
 	pollMs := getEnvInt("SCHEDULER_METRICS_POLL_INTERVAL_MS", 1000)
 	ticker := time.NewTicker(time.Duration(pollMs) * time.Millisecond)
 	defer ticker.Stop()
@@ -133,7 +133,7 @@ func updateQueueMetrics(ctx context.Context, redis *repository.RedisClient) {
 	}
 }
 
-func updateWorkerMetrics(ctx context.Context, discovery *EtcdDiscovery) {
+func updateWorkerMetrics(ctx context.Context, discovery *WorkerDiscovery) {
 	count := discovery.GetWorkerCount()
 	schedulerActiveWorkers.Set(float64(count))
 }

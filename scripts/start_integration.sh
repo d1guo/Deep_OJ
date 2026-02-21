@@ -8,7 +8,6 @@ NC='\033[0m'
 
 cleanup() {
     echo -e "\n${RED}停止服务中...${NC}"
-    pkill -f "etcd"
     pkill -f "bin/api"
     pkill -f "bin/scheduler"
     echo "qsrlys67" | sudo -S pkill -f "oj_worker"
@@ -18,7 +17,7 @@ trap cleanup EXIT
 # 1. 检查依赖
 echo -e "${GREEN}检查依赖项...${NC}"
 MISSING=0
-for cmd in etcd psql python3 go; do
+for cmd in psql python3 go; do
     if ! command -v $cmd &> /dev/null; then
         echo -e "${RED}缺失依赖: $cmd${NC}"
         MISSING=1
@@ -32,12 +31,6 @@ fi
 
 # 2. 启动基础设施
 echo -e "${GREEN}启动基础设施...${NC}"
-
-# 启动 Etcd
-if ! pgrep etcd > /dev/null; then
-    nohup etcd > /dev/null 2>&1 &
-    sleep 2
-fi
 
 # 检查 Redis
 if ! redis-cli ping > /dev/null 2>&1; then
@@ -121,8 +114,7 @@ cd ..
 
 # 启动 C++ Worker (需要 root 权限配置 Cgroup)
 # 使用 sudo -b 后台运行，并且把日志重定向
-# 必须设置 ETCD_ENDPOINTS 才能进行服务注册
-echo "qsrlys67" | sudo -S -E -b ETCD_ENDPOINTS=localhost:2379 WORKER_ADDR=localhost:50051 ./build/oj_worker > worker.log 2>&1
+echo "qsrlys67" | sudo -S -E -b WORKER_ADDR=localhost:50051 ./build/oj_worker > worker.log 2>&1
 echo "Worker 已启动 (sudo)"
 
 # 等待服务就绪

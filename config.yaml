@@ -96,8 +96,6 @@ api:
     job_payload_ttl_sec: 86400
 
 scheduler:
-  etcd_endpoints:
-    - "localhost:2379"
   redis_url: "localhost:6379"
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
   worker_capacity: 4
@@ -108,7 +106,6 @@ scheduler:
   dispatch_enabled: false       # legacy_grpc_push requires true
   metrics_port: 9091
   metrics_poll_ms: 1000
-  etcd_dial_timeout_ms: 5000
   queue:
     brpop_timeout_sec: 5
     no_worker_sleep_ms: 1000
@@ -145,10 +142,6 @@ worker:
   id: ""
   addr: ""
   port: 50051
-  etcd_endpoints:
-    - "localhost:2379"
-  etcd_dial_timeout_ms: 5000
-  etcd_lease_ttl_sec: 10
   redis_url: "localhost:6379"
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
   stream:

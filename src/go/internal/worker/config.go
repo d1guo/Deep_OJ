@@ -15,7 +15,6 @@ import (
 type Config struct {
 	WorkerID              string
 	WorkerAddr            string // gRPC listen addr
-	EtcdEndpoints         []string
 	RedisURL              string
 	DatabaseURL           string
 	MinIOEndpoint         string
@@ -162,20 +161,6 @@ func LoadConfig() *Config {
 	cfg.UnzipMaxFiles = getEnvInt("UNZIP_MAX_FILES", 2000)
 	cfg.UnzipMaxFileBytes = getEnvInt64("UNZIP_MAX_FILE_BYTES", 64*1024*1024)
 	cfg.AllowHostChecker = getEnvBool("ALLOW_HOST_CHECKER", false)
-
-	if endpoints := getEnv("ETCD_ENDPOINTS", "localhost:2379"); endpoints != "" {
-		parts := strings.Split(endpoints, ",")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" {
-				continue
-			}
-			cfg.EtcdEndpoints = append(cfg.EtcdEndpoints, p)
-		}
-		if len(cfg.EtcdEndpoints) == 0 {
-			cfg.EtcdEndpoints = []string{"localhost:2379"}
-		}
-	}
 
 	return cfg
 }

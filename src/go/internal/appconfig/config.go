@@ -105,23 +105,21 @@ type ProblemDefaults struct {
 }
 
 type SchedulerConfig struct {
-	EtcdEndpoints     []string          `yaml:"etcd_endpoints"`
-	RedisURL          string            `yaml:"redis_url"`
-	DatabaseURL       string            `yaml:"database_url"`
-	WorkerCapacity    int               `yaml:"worker_capacity"`
-	MaxRetry          int               `yaml:"max_retry"`
-	RetryTTLSec       int               `yaml:"retry_ttl_sec"`
-	SchedulerID       string            `yaml:"scheduler_id"`
-	GRPCTLS           TLSConfig         `yaml:"grpc_tls"`
-	Metrics           Metrics           `yaml:"metrics"`
-	MetricsPort       int               `yaml:"metrics_port"`
-	MetricsPollMs     int               `yaml:"metrics_poll_ms"`
-	EtcdDialTimeoutMs int               `yaml:"etcd_dial_timeout_ms"`
-	Queue             SchedulerQueue    `yaml:"queue"`
-	AckListener       AckListenerConfig `yaml:"ack_listener"`
-	SlowPath          SlowPathConfig    `yaml:"slow_path"`
-	Watchdog          WatchdogConfig    `yaml:"watchdog"`
-	Dispatch          DispatchConfig    `yaml:"dispatch"`
+	RedisURL       string            `yaml:"redis_url"`
+	DatabaseURL    string            `yaml:"database_url"`
+	WorkerCapacity int               `yaml:"worker_capacity"`
+	MaxRetry       int               `yaml:"max_retry"`
+	RetryTTLSec    int               `yaml:"retry_ttl_sec"`
+	SchedulerID    string            `yaml:"scheduler_id"`
+	GRPCTLS        TLSConfig         `yaml:"grpc_tls"`
+	Metrics        Metrics           `yaml:"metrics"`
+	MetricsPort    int               `yaml:"metrics_port"`
+	MetricsPollMs  int               `yaml:"metrics_poll_ms"`
+	Queue          SchedulerQueue    `yaml:"queue"`
+	AckListener    AckListenerConfig `yaml:"ack_listener"`
+	SlowPath       SlowPathConfig    `yaml:"slow_path"`
+	Watchdog       WatchdogConfig    `yaml:"watchdog"`
+	Dispatch       DispatchConfig    `yaml:"dispatch"`
 }
 
 type SchedulerQueue struct {
@@ -162,9 +160,6 @@ type WorkerConfig struct {
 	ID                     string             `yaml:"id"`
 	Addr                   string             `yaml:"addr"`
 	Port                   int                `yaml:"port"`
-	EtcdEndpoints          []string           `yaml:"etcd_endpoints"`
-	EtcdDialTimeoutMs      int                `yaml:"etcd_dial_timeout_ms"`
-	EtcdLeaseTTLSec        int                `yaml:"etcd_lease_ttl_sec"`
 	RedisURL               string             `yaml:"redis_url"`
 	DatabaseURL            string             `yaml:"database_url"`
 	Stream                 WorkerStreamConfig `yaml:"stream"`

@@ -23,13 +23,13 @@ const (
 // Watchdog 负责扫描处理中队列，回收僵尸任务。
 type Watchdog struct {
 	redisClient *repository.RedisClient
-	discovery   *EtcdDiscovery
+	discovery   *WorkerDiscovery
 	db          *repository.PostgresDB
 	interval    time.Duration
 }
 
 // NewWatchdog 创建看门狗实例。
-func NewWatchdog(redisClient *repository.RedisClient, discovery *EtcdDiscovery, db *repository.PostgresDB, interval time.Duration) *Watchdog {
+func NewWatchdog(redisClient *repository.RedisClient, discovery *WorkerDiscovery, db *repository.PostgresDB, interval time.Duration) *Watchdog {
 	return &Watchdog{
 		redisClient: redisClient,
 		discovery:   discovery,

@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/repository"
@@ -23,7 +22,6 @@ import (
 	"github.com/d1guo/deep_oj/pkg/observability"
 	pb "github.com/d1guo/deep_oj/pkg/proto"
 	"github.com/redis/go-redis/v9"
-	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -117,7 +115,6 @@ func main() {
 		appconfig.SetEnvIfEmpty("WORKER_ID", wcfg.ID)
 		appconfig.SetEnvIfEmpty("WORKER_ADDR", wcfg.Addr)
 		appconfig.SetEnvIfEmptyInt("WORKER_PORT", wcfg.Port)
-		appconfig.SetEnvIfEmptySlice("ETCD_ENDPOINTS", wcfg.EtcdEndpoints)
 		appconfig.SetEnvIfEmpty("REDIS_URL", wcfg.RedisURL)
 		appconfig.SetEnvIfEmpty("DATABASE_URL", wcfg.DatabaseURL)
 		appconfig.SetEnvIfEmpty("MINIO_ENDPOINT", wcfg.MinIO.Endpoint)
@@ -143,8 +140,6 @@ func main() {
 		appconfig.SetEnvIfEmptyInt("CLEANUP_TIMEOUT_SEC", wcfg.CleanupTimeoutSec)
 		appconfig.SetEnvIfEmptyInt("RESULT_STREAM_MAX_RETRIES", wcfg.ResultStreamMaxRetries)
 		appconfig.SetEnvIfEmptyInt("RESULT_STREAM_BACKOFF_MS", wcfg.ResultStreamBackoffMs)
-		appconfig.SetEnvIfEmptyInt("ETCD_DIAL_TIMEOUT_MS", wcfg.EtcdDialTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("ETCD_LEASE_TTL_SEC", wcfg.EtcdLeaseTTLSec)
 		appconfig.SetEnvIfEmptyBool("ALLOW_HOST_CHECKER", wcfg.AllowHostChecker)
 		appconfig.SetEnvIfEmptyBool("REQUIRE_CGROUPS_V2", wcfg.RequireCgroupsV2)
 		appconfig.SetEnvIfEmpty("GRPC_TLS_CERT", wcfg.GRPCTLS.Cert)
@@ -254,34 +249,7 @@ func main() {
 		}
 	}()
 
-	// 4. Etcd 注册
-	dialMs := getEnvInt("ETCD_DIAL_TIMEOUT_MS", 5000)
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   cfg.EtcdEndpoints,
-		DialTimeout: time.Duration(dialMs) * time.Millisecond,
-	})
-	if err != nil {
-		slog.Error("连接 etcd 失败", "error", err)
-		os.Exit(1)
-	}
-	defer cli.Close()
-
-	leaseTTL := int64(getEnvInt("ETCD_LEASE_TTL_SEC", 10))
-	key := fmt.Sprintf("/deep-oj/workers/%s", cfg.WorkerID)
-	val := cfg.WorkerAddr
-
-	regCtx, cancelReg := context.WithCancel(context.Background())
-	defer cancelReg()
-	leaseID, keepAliveCh, err := registerWorkerWithLease(regCtx, cli, key, val, leaseTTL)
-	if err != nil {
-		slog.Error("首次注册工作节点失败", "error", err)
-		os.Exit(1)
-	}
-	go maintainWorkerRegistration(regCtx, cli, key, val, leaseTTL, leaseID, keepAliveCh)
-
-	slog.Info("工作节点已注册", "key", key, "lease_id", leaseID)
-
-	// 5. 启动服务
+	// 4. 启动服务
 	go func() {
 		slog.Info("gRPC 服务监听中", "addr", lis.Addr())
 		if err := grpcServer.Serve(lis); err != nil {
@@ -296,11 +264,9 @@ func main() {
 	<-quit
 
 	slog.Info("正在关闭...")
-	cancelReg()
 	cancelStream()
 	streamWG.Wait()
 	grpcServer.GracefulStop()
-	_, _ = cli.Delete(context.Background(), key)
 	slog.Info("工作节点已退出")
 }
 
@@ -329,65 +295,4 @@ func loadServerTLS() (grpc.ServerOption, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 	return grpc.Creds(credentials.NewTLS(tlsConfig)), nil
-}
-
-func registerWorkerWithLease(
-	ctx context.Context,
-	cli *clientv3.Client,
-	key, val string,
-	leaseTTL int64,
-) (clientv3.LeaseID, <-chan *clientv3.LeaseKeepAliveResponse, error) {
-	lease, err := cli.Grant(ctx, leaseTTL)
-	if err != nil {
-		return 0, nil, err
-	}
-	if _, err := cli.Put(ctx, key, val, clientv3.WithLease(lease.ID)); err != nil {
-		return 0, nil, err
-	}
-	ch, err := cli.KeepAlive(ctx, lease.ID)
-	if err != nil {
-		return 0, nil, err
-	}
-	return lease.ID, ch, nil
-}
-
-func maintainWorkerRegistration(
-	ctx context.Context,
-	cli *clientv3.Client,
-	key, val string,
-	leaseTTL int64,
-	leaseID clientv3.LeaseID,
-	ch <-chan *clientv3.LeaseKeepAliveResponse,
-) {
-	currentLeaseID := leaseID
-	currentCh := ch
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case _, ok := <-currentCh:
-			if ok {
-				continue
-			}
-			slog.Warn("Etcd 保活通道已关闭，尝试重新注册", "lease_id", currentLeaseID)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				newLeaseID, newCh, err := registerWorkerWithLease(ctx, cli, key, val, leaseTTL)
-				if err != nil {
-					slog.Error("工作节点重新注册失败", "error", err)
-					time.Sleep(time.Second)
-					continue
-				}
-				currentLeaseID = newLeaseID
-				currentCh = newCh
-				slog.Info("工作节点已重新注册到 etcd", "lease_id", currentLeaseID)
-				break
-			}
-		}
-	}
 }

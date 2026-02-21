@@ -10,7 +10,6 @@ import (
 func main() {
 	services := map[string]string{
 		"Redis":    "127.0.0.1:6379",
-		"Etcd":     "127.0.0.1:2379",
 		"Postgres": "127.0.0.1:5432",
 	}
 
