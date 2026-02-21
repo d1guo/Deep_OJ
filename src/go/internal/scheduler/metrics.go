@@ -43,12 +43,39 @@ var (
 			Help: "legacy 数据面循环启动次数",
 		},
 	)
+
+	schedulerRepairTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_repair_total",
+			Help: "控制面 repair 行为统计",
+		},
+		[]string{"result", "reason"},
+	)
+
+	schedulerStreamTrimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_stream_trim_total",
+			Help: "控制面 Stream XTRIM 行为统计",
+		},
+		[]string{"result"},
+	)
+
+	schedulerDBGCTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "scheduler_db_gc_total",
+			Help: "控制面 DB GC 行为统计",
+		},
+		[]string{"result", "reason"},
+	)
 )
 
 func init() {
 	reg.MustRegister(schedulerActiveWorkers)
 	reg.MustRegister(controlPlaneOnlyGauge)
 	reg.MustRegister(legacyLoopsStartedGauge)
+	reg.MustRegister(schedulerRepairTotal)
+	reg.MustRegister(schedulerStreamTrimTotal)
+	reg.MustRegister(schedulerDBGCTotal)
 }
 
 func SetControlPlaneOnly(enabled bool) {
@@ -85,4 +112,16 @@ func StartMetricsPoller(ctx context.Context, discovery *WorkerDiscovery) {
 func updateWorkerMetrics(discovery *WorkerDiscovery) {
 	count := discovery.GetWorkerCount()
 	schedulerActiveWorkers.Set(float64(count))
+}
+
+func ObserveRepairResult(result, reason string) {
+	schedulerRepairTotal.WithLabelValues(result, reason).Inc()
+}
+
+func ObserveStreamTrimResult(result string) {
+	schedulerStreamTrimTotal.WithLabelValues(result).Inc()
+}
+
+func ObserveDBGcResult(result, reason string) {
+	schedulerDBGCTotal.WithLabelValues(result, reason).Inc()
 }

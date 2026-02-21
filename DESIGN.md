@@ -8,13 +8,12 @@ Deep-OJ 的核心目标是构建一个可恢复、可观测、结果不乱序的
 | 组件 | 责任边界（做什么） | 非责任边界（不做什么） |
 | --- | --- | --- |
 | API | 鉴权、限流、参数校验、写入提交记录、触发入队 | 不直接执行判题、不直接确认队列消息 |
-| Scheduler | 编排与恢复策略（重试/回收/DLQ/背压），可承载 dispatcher/reclaimer | 不作为结果权威存储 |
+| Scheduler | 纯控制面：慢路径 repair（DB 扫描后 XADD）与 GC（XTRIM/DB 清理计划） | 不消费 Stream、不做派单、不做 ACK/reclaim 数据面动作 |
 | Worker | claim 任务、执行判题流程、写回执行结果、按规则 ACK | 不定义业务终态语义 |
 | Judge | 编译/运行/资源限制/输出采集，产出结构化执行结果 | 不维护分布式状态机 |
 | Redis | Streams/PEL/缓存/短期协调数据 | 不作为完成状态真相源 |
 | DB (PostgreSQL) | 任务状态机、attempt fencing、最终结果权威存储 | 不承担高频队列消费 |
 | MinIO | 测试数据与题目资产存储 | 不维护任务状态 |
-| Etcd | 服务发现、租约、实例活性 | 不存储判题业务状态 |
 | Prometheus | 指标采集与告警输入 | 不承载业务日志明细 |
 
 **结论：DB 为唯一状态机，Streams 仅驱动执行，不承诺最终完成语义。**
@@ -128,12 +127,12 @@ sequenceDiagram
 | 关键动作 | 主责组件 | 触发方式 | 失败后的重试/退避/DLQ 责任 |
 | --- | --- | --- | --- |
 | 提交落库（PENDING） | API | HTTP submit 事务写 DB | API 返回错误；不自行重试业务提交 |
-| 出队/claim | Worker Consumer（当前实现过渡期可由 Scheduler 代理） | `XREADGROUP` / reclaim | claim 失败由 consumer 退避；系统故障不 ACK |
+| 出队/claim | Worker Consumer | `XREADGROUP` / reclaim | claim 失败由 consumer 退避；系统故障不 ACK |
 | RUNNING 状态变更 | Worker（claim 成功后） | DB CAS `PENDING/DISPATCHED -> RUNNING` | CAS 业务失败按 INV-4 直接 ACK；系统失败退避重试 |
 | 判题执行 | Worker + Judge | RUNNING 成功后执行 | Worker 按 attempt 重试上限控制 |
 | FINISHED 状态变更 | Worker | 执行完成后 DB fencing UPDATE | 0 行更新视为 stale，记录 reason，不覆盖新 attempt |
 | XACK | Worker/Reclaimer | 仅在 DB 成功写入后 | 严禁提前 ACK；系统故障保持 pending |
-| 回收 reclaim | Reclaimer（Worker 或 Scheduler） | `XAUTOCLAIM/XCLAIM` | 按 INV-4 分流：业务失败 ACK；系统失败退避 |
+| 回收 reclaim | Worker Reclaimer | `XAUTOCLAIM/XCLAIM` | 按 INV-4 分流：业务失败 ACK；系统失败退避 |
 | DLQ 入队 | Scheduler/Reclaimer（控制面） | 超过重试上限 | TODO（D1/C6）：统一离线 replayer 与审计字段 |
 
 ## C1 Streams 入队（API）

@@ -104,6 +104,17 @@ scheduler:
   metrics:
     service_name: "deep-oj-scheduler"
     instance_id: ""
+  control_plane:
+    repair_enabled: false
+    repair_interval_ms: 30000
+    repair_batch_size: 200
+    repair_min_age_sec: 60
+    gc_enabled: false
+    gc_interval_ms: 600000
+    stream_trim_maxlen: 200000
+    db_retention_days: 14
+    db_delete_enabled: false
+    db_delete_batch_size: 500
 
 worker:
   id: ""

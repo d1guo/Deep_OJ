@@ -46,6 +46,39 @@ bash scripts/verify_b1_no_etcd.sh
 bash scripts/verify_b2_no_legacy_dataplane.sh
 ```
 
+### 0.3 B3 控制面 scheduler 验证
+
+scheduler 已收敛为纯控制面，只保留两类循环：
+
+- `RepairLoop`：扫描 DB 中需要补投递的任务并 `XADD` 到 `deepoj:jobs`
+- `GcLoop`：执行 `XTRIM` 与 DB 清理计划/清理（默认 dry-run）
+
+验证命令：
+
+```bash
+bash scripts/verify_b3_control_plane.sh
+```
+
+开启方式（建议优先环境变量覆盖）：
+
+```bash
+SCHEDULER_REPAIR_ENABLED=true \
+SCHEDULER_REPAIR_INTERVAL_MS=1000 \
+docker compose up -d scheduler
+```
+
+关键日志关键字：
+
+- `event=repair_xadd`
+- `event=stream_trim`
+- `event=db_gc_plan`
+
+关键指标：
+
+- `scheduler_repair_total{result,reason}`
+- `scheduler_stream_trim_total{result}`
+- `scheduler_db_gc_total{result,reason}`
+
 ## 1. 环境与依赖
 
 最低要求（生产建议高于此基线）：
@@ -376,7 +409,7 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 ### 5.2 关键指标列表（禁止 `job_id` label）
 
 - API：`http_requests_total`、`http_request_duration_seconds`、`submission_total`
-- Scheduler：`scheduler_queue_depth`、`scheduler_active_workers`、`submission_result_total`、`job_latency_seconds`
+- Scheduler：`control_plane_only`、`legacy_loops_started`、`scheduler_active_workers`、`scheduler_repair_total{result,reason}`、`scheduler_stream_trim_total{result}`、`scheduler_db_gc_total{result,reason}`
 - Worker：`worker_task_total`、`worker_task_duration_seconds`、`worker_compile_duration_seconds`、`worker_download_duration_seconds`、`worker_unzip_duration_seconds`
 - Worker（Judge 执行链路）：`judge_exec_duration_seconds{result}`、`judge_exec_inflight`、`judge_exec_total{result}`、`judge_verdict_total{verdict}`、`judge_protocol_errors_total{reason}`、`judge_output_truncated_total{stream}`
 - Worker（Streams 消费链路）：`worker_stream_consume_total{status,reason}`、`worker_stream_consume_latency_ms`、`worker_stream_inflight`

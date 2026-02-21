@@ -134,6 +134,12 @@
 ### E. 架构收敛（避免双系统语义打架）
 - [x] E1 固化 Streams 与 Scheduler/gRPC 决策（已选 A：Streams-only 数据面）  
   - 验收：`bash scripts/verify_e1_streams_only.sh`（scheduler control-plane only；worker 执行 consume/ack/reclaim）
+- [x] E2 B3 控制面收敛：scheduler 仅保留 repair/gc 循环，不再承担任何数据面职责  
+  - 验收证据（2026-02-21）：
+    - `bash scripts/verify_b3_control_plane.sh`
+    - 启动日志包含：`dispatch_mode=streams_only`、`control_plane_only=true`、`legacy_loops_started=0`、`control_plane_loops_started=repair,gc`
+    - 默认日志包含：`event=repair_disabled`、`event=gc_disabled`
+    - 开启 repair 后日志包含：`event=repair_xadd` 且 Redis `XRANGE/XREVRANGE deepoj:jobs` 可见对应 `job_id`
 
 ### F. judge-agent + UDS（可选但希望最终做完）
 - [ ] F1 judge-agent 常驻 + UDS RPC；请求必须携带 job_id+attempt_id
