@@ -1,0 +1,206 @@
+# Docker Compose 环境专用配置。
+# 通过 APP_CONFIG=/app/config.docker.yaml 选择本文件。
+
+server:
+  port: 50051
+  pool_size: 4
+
+path:
+  workspace_root: "/data/workspace"
+  compiler_bin: "/usr/bin/g++"
+  mount_dirs:
+    - "/lib"
+    - "/lib64"
+    - "/usr"
+    - "/bin"
+    - "/etc/alternatives"
+  mount_files:
+    - "/etc/localtime"
+    - "/dev/null"
+    - "/dev/zero"
+    - "/dev/random"
+    - "/dev/urandom"
+
+compile:
+  cpu_limit_s: 10
+  real_time_limit_s: 15
+  memory_limit_mb: 1024
+  tmpfs_size_mb: 128
+  log_max_size_mb: 16
+  max_errors: 10
+
+runner:
+  max_output_size: 10485760
+  output_buffer_size: 2097152
+  tmpfs_size_mb: 64
+  cgroup_pids_limit: 20
+  cgroup_cpu_max_cores: 1.0
+  cgroup_io_read_bps: 104857600
+  cgroup_io_write_bps: 104857600
+
+security:
+  run_as_uid: 65534
+  run_as_gid: 65534
+
+observability:
+  service_name: "deep-oj"
+  instance_id: ""
+
+api:
+  port: 18080
+  gin_mode: "release"
+  database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
+  redis_url: "oj-redis:6379"
+  minio:
+    endpoint: "http://oj-minio:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "deepoj_minio_password_change_me"
+    bucket: "deep-oj-problems"
+    secure: false
+  auth:
+    jwt_secret: "dev_jwt_secret_change_me"
+    jwt_expire_hours: 24
+    oauth_state_ttl_sec: 300
+    admin_users:
+      - "admin"
+    oauth:
+      github:
+        client_id: ""
+        client_secret: ""
+        redirect_url: "http://localhost:18080/api/v1/auth/github/callback"
+  limits:
+    submit_body_max_bytes: 1048576
+    problem_zip_max_bytes: 52428800
+    submit_code_max_bytes: 65536
+    default_time_limit_ms: 1000
+    max_time_limit_ms: 10000
+    default_memory_limit_kb: 65536
+    max_memory_limit_kb: 524288
+    inflight_ttl_sec: 600
+    rate_limit:
+      ip_limit: 60
+      user_limit: 120
+      window_sec: 60
+    problem_defaults:
+      time_limit_ms: 1000
+      memory_limit_mb: 128
+  metrics:
+    service_name: "deep-oj-api"
+    instance_id: ""
+  shutdown_timeout_sec: 5
+  stream:
+    stream_key: "deepoj:jobs"
+    stream_maxlen: 200000
+    job_payload_ttl_sec: 86400
+  trusted_proxies:
+    - "127.0.0.1"
+  cors_allowed_origins:
+    - "http://localhost:18080"
+  metrics_token: ""
+  timeouts:
+    read_header_sec: 5
+    read_sec: 15
+    write_sec: 30
+    idle_sec: 60
+  outbox:
+    enabled: true
+    dispatch_interval_ms: 200
+    dispatch_batch_size: 100
+    retry_base_ms: 500
+    retry_max_ms: 10000
+
+scheduler:
+  redis_url: "oj-redis:6379"
+  database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
+  scheduler_id: "scheduler-docker-1"
+  metrics_port: 9091
+  metrics_poll_ms: 1000
+  metrics:
+    service_name: "deep-oj-scheduler"
+    instance_id: ""
+  control_plane:
+    repair_enabled: false
+    repair_interval_ms: 30000
+    repair_batch_size: 200
+    repair_min_age_sec: 60
+    gc_enabled: false
+    gc_interval_ms: 600000
+    stream_trim_maxlen: 200000
+    db_retention_days: 14
+    db_delete_enabled: false
+    db_delete_batch_size: 500
+  workers:
+    addresses:
+      - "oj-worker:50051"
+    probe_timeout_ms: 1000
+
+worker:
+  id: "worker-docker-1"
+  addr: "oj-worker:50051"
+  port: 50051
+  redis_url: "oj-redis:6379"
+  database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
+  stream:
+    stream_key: "deepoj:jobs"
+    group: "deepoj:workers"
+    consumer: ""
+    read_count: 16
+    block_ms: 2000
+    lease_sec: 60
+    heartbeat_sec: 10
+    reclaim_interval_sec: 5
+    reclaim_count: 16
+    reclaim_grace_sec: 15
+    log_throttle_sec: 10
+    backpressure_sleep_ms: 50
+  minio:
+    endpoint: "http://oj-minio:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "deepoj_minio_password_change_me"
+    bucket: "deep-oj-problems"
+    secure: false
+  workspace: "/data/workspace"
+  judger_bin: "/app/judge_engine"
+  judger_config: "/app/config.docker.yaml"
+  pool_size: 4
+  keep_workdir: false
+  timeouts:
+    compile_ms: 10000
+    exec_buffer_ms: 500
+    download_ms: 60000
+    unzip_ms: 30000
+  testcase_cache:
+    max: 100
+    ttl_sec: 3600
+  unzip_limits:
+    max_bytes: 268435456
+    max_files: 2000
+    max_file_bytes: 67108864
+  result_ttl_sec: 600
+  checker_timeout_ms: 2000
+  cleanup_timeout_sec: 5
+  allow_host_checker: false
+  require_cgroups_v2: false
+  metrics:
+    service_name: "deep-oj-worker"
+    instance_id: ""
+  metrics_port: 9092
+  executor:
+    stdout_limit_bytes: 262144
+    stderr_limit_bytes: 1048576
+    cmd_cgroup_root: ""
+
+redis:
+  pool_size: 10
+  min_idle_conns: 3
+  dial_timeout_ms: 5000
+  read_timeout_ms: 3000
+  write_timeout_ms: 3000
+  password: "deepoj_redis_change_me"
+  tls_enabled: false
+
+postgres:
+  max_conns: 10
+  min_conns: 2
+  max_conn_lifetime_min: 60
+  max_conn_idle_min: 30
