@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
+	"math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,6 +32,7 @@ type TestCaseManager struct {
 	unzipMaxFiles   int
 	unzipMaxFile    int64
 	cacheTTL        time.Duration
+	cacheByteBudget int64
 	cacheMax        int
 
 	cacheMu   sync.Mutex
@@ -41,9 +45,16 @@ type cacheEntry struct {
 	etag       string
 	zipPath    string
 	workDir    string
+	sizeBytes  int64
 	lastAccess time.Time
 	elem       *list.Element
 }
+
+const (
+	minioRetryMaxAttempts = 4
+	minioRetryBaseDelay   = 200 * time.Millisecond
+	minioRetryMaxDelay    = 3 * time.Second
+)
 
 func NewTestCaseManager(cfg *Config) (*TestCaseManager, error) {
 	minioEndpoint, secure, err := normalizeMinIOEndpoint(cfg.MinIOEndpoint, getEnvBool("MINIO_SECURE", false))
@@ -68,10 +79,22 @@ func NewTestCaseManager(cfg *Config) (*TestCaseManager, error) {
 		unzipMaxFiles:   cfg.UnzipMaxFiles,
 		unzipMaxFile:    cfg.UnzipMaxFileBytes,
 		cacheTTL:        time.Duration(cfg.TestcaseCacheTTL) * time.Second,
+		cacheByteBudget: deriveCacheByteBudget(cfg),
 		cacheMax:        cfg.TestcaseCacheMax,
 		cacheList:       list.New(),
 		cacheMap:        make(map[string]*cacheEntry),
 	}, nil
+}
+
+func deriveCacheByteBudget(cfg *Config) int64 {
+	if cfg == nil || cfg.TestcaseCacheMax <= 0 || cfg.UnzipMaxBytes <= 0 {
+		return 0
+	}
+	maxEntries := int64(cfg.TestcaseCacheMax)
+	if maxEntries > (1<<63-1)/cfg.UnzipMaxBytes {
+		return 1<<63 - 1
+	}
+	return maxEntries * cfg.UnzipMaxBytes
 }
 
 func normalizeMinIOEndpoint(endpoint string, secure bool) (string, bool, error) {
@@ -102,7 +125,7 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 		dlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), m.downloadTimeout)
 		defer cancel()
 
-		remoteETag, err := m.getRemoteETag(dlCtx, objectName)
+		remoteETag, err := m.getRemoteETagWithRetry(dlCtx, objectName)
 		if err != nil {
 			return "", err
 		}
@@ -137,7 +160,7 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 		_ = os.Remove(tmpPath)
 
 		dlStart := time.Now()
-		if err := m.client.FGetObject(dlCtx, m.bucketName, objectName, tmpPath, minio.GetObjectOptions{}); err != nil {
+		if err := m.downloadObjectWithRetry(dlCtx, objectName, tmpPath); err != nil {
 			_ = os.Remove(tmpPath)
 			return "", err
 		}
@@ -160,19 +183,26 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 
 // Prepare ensures testcase zip is downloaded and unzipped, returns workdir
 func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string, error) {
+	workDir := filepath.Join(m.workspace, "cases_unzipped", problemID)
+	readyPath, readyETagPath := readyMarkerPaths(workDir)
+
 	zipPath, err := m.Download(ctx, problemID)
 	if err != nil {
+		if fileExists(readyPath) {
+			slog.Warn("MinIO 不可用，降级使用本地测试点缓存", "problem_id", problemID, "error", err)
+			m.touchCache(problemID, "", "", workDir)
+			return workDir, nil
+		}
 		return "", err
 	}
+	expectedETag := strings.TrimSpace(m.readEtag(zipPath))
 
-	workDir := filepath.Join(m.workspace, "cases_unzipped", problemID)
-	readyPath := filepath.Join(workDir, ".ready")
-	if fileExists(readyPath) {
+	if m.readyMatchesETag(workDir, expectedETag) {
 		return workDir, nil
 	}
 
 	_, err, _ = m.sf.Do("uz:"+problemID, func() (interface{}, error) {
-		if fileExists(readyPath) {
+		if m.readyMatchesETag(workDir, expectedETag) {
 			return workDir, nil
 		}
 
@@ -216,10 +246,17 @@ func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string
 			_ = os.RemoveAll(tmpDir)
 			return "", fmt.Errorf("rename failed: %w", err)
 		}
+		if expectedETag != "" {
+			if err := os.WriteFile(readyETagPath, []byte(expectedETag), 0644); err != nil {
+				return "", fmt.Errorf("write ready etag failed: %w", err)
+			}
+		} else {
+			_ = os.Remove(readyETagPath)
+		}
 		if err := os.WriteFile(readyPath, []byte(time.Now().Format(time.RFC3339)), 0644); err != nil {
 			return "", fmt.Errorf("write ready marker failed: %w", err)
 		}
-		m.touchCache(problemID, m.readEtag(zipPath), zipPath, workDir)
+		m.touchCache(problemID, expectedETag, zipPath, workDir)
 		return workDir, nil
 	})
 
@@ -227,6 +264,26 @@ func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string
 		return "", err
 	}
 	return workDir, nil
+}
+
+func readyMarkerPaths(workDir string) (string, string) {
+	return filepath.Join(workDir, ".ready"), filepath.Join(workDir, ".ready.etag")
+}
+
+func (m *TestCaseManager) readyMatchesETag(workDir, expectedETag string) bool {
+	readyPath, readyETagPath := readyMarkerPaths(workDir)
+	if !fileExists(readyPath) {
+		return false
+	}
+	expectedETag = strings.TrimSpace(expectedETag)
+	if expectedETag == "" {
+		return true
+	}
+	b, err := os.ReadFile(readyETagPath)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) == expectedETag
 }
 
 func fileExists(path string) bool {
@@ -256,6 +313,79 @@ func (m *TestCaseManager) getRemoteETag(ctx context.Context, objectName string) 
 		return "", err
 	}
 	return stat.ETag, nil
+}
+
+func (m *TestCaseManager) getRemoteETagWithRetry(ctx context.Context, objectName string) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= minioRetryMaxAttempts; attempt++ {
+		etag, err := m.getRemoteETag(ctx, objectName)
+		if err == nil {
+			return etag, nil
+		}
+		lastErr = err
+		if !isRetriableMinIOError(err) || attempt == minioRetryMaxAttempts {
+			break
+		}
+		if err := sleepWithRetry(ctx, retryDelay(attempt)); err != nil {
+			return "", err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("stat object failed")
+	}
+	return "", lastErr
+}
+
+func (m *TestCaseManager) downloadObjectWithRetry(ctx context.Context, objectName, localPath string) error {
+	var lastErr error
+	for attempt := 1; attempt <= minioRetryMaxAttempts; attempt++ {
+		err := m.client.FGetObject(ctx, m.bucketName, objectName, localPath, minio.GetObjectOptions{})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetriableMinIOError(err) || attempt == minioRetryMaxAttempts {
+			break
+		}
+		if err := sleepWithRetry(ctx, retryDelay(attempt)); err != nil {
+			return err
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("download object failed")
+	}
+	return lastErr
+}
+
+func isRetriableMinIOError(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func retryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := minioRetryBaseDelay << (attempt - 1)
+	if delay <= 0 || delay > minioRetryMaxDelay {
+		delay = minioRetryMaxDelay
+	}
+	jitter := delay / 4
+	if jitter <= 0 {
+		return delay
+	}
+	delta := time.Duration(rand.Int63n(int64(jitter*2)+1)) - jitter
+	return delay + delta
+}
+
+func sleepWithRetry(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (m *TestCaseManager) etagMatch(localPath, remoteETag string) bool {
@@ -292,6 +422,7 @@ func (m *TestCaseManager) touchCache(problemID, etag, zipPath, workDir string) {
 		if workDir != "" {
 			e.workDir = workDir
 		}
+		e.sizeBytes = m.calcEntrySizeBytes(e.zipPath, e.workDir)
 		m.cacheList.MoveToFront(e.elem)
 	} else {
 		entry := &cacheEntry{
@@ -299,6 +430,7 @@ func (m *TestCaseManager) touchCache(problemID, etag, zipPath, workDir string) {
 			etag:       etag,
 			zipPath:    zipPath,
 			workDir:    workDir,
+			sizeBytes:  m.calcEntrySizeBytes(zipPath, workDir),
 			lastAccess: time.Now(),
 		}
 		entry.elem = m.cacheList.PushFront(entry)
@@ -315,7 +447,21 @@ func (m *TestCaseManager) evictIfNeeded() {
 			m.removeEntry(id)
 		}
 	}
-	// Remove LRU
+
+	// Byte-budget-first eviction.
+	if m.cacheByteBudget > 0 {
+		for m.totalCacheBytes() > m.cacheByteBudget {
+			back := m.cacheList.Back()
+			if back == nil {
+				break
+			}
+			entry := back.Value.(*cacheEntry)
+			m.removeEntry(entry.problemID)
+		}
+		return
+	}
+
+	// Legacy count-based eviction when byte budget is not configured.
 	for m.cacheMax > 0 && m.cacheList.Len() > m.cacheMax {
 		back := m.cacheList.Back()
 		if back == nil {
@@ -324,6 +470,53 @@ func (m *TestCaseManager) evictIfNeeded() {
 		entry := back.Value.(*cacheEntry)
 		m.removeEntry(entry.problemID)
 	}
+}
+
+func (m *TestCaseManager) totalCacheBytes() int64 {
+	var total int64
+	for _, entry := range m.cacheMap {
+		total += entry.sizeBytes
+	}
+	return total
+}
+
+func (m *TestCaseManager) calcEntrySizeBytes(zipPath, workDir string) int64 {
+	var total int64
+	if zipPath != "" {
+		total += fileSize(zipPath)
+		total += fileSize(zipPath + ".etag")
+	}
+	if workDir != "" {
+		total += dirSize(workDir)
+	}
+	return total
+}
+
+func fileSize(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return 0
+	}
+	return st.Size()
+}
+
+func dirSize(root string) int64 {
+	var total int64
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d == nil || !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	return total
 }
 
 func (m *TestCaseManager) removeEntry(problemID string) {
@@ -342,6 +535,8 @@ func (m *TestCaseManager) removeEntry(problemID string) {
 	if entry.workDir != "" {
 		_ = os.RemoveAll(entry.workDir)
 		_ = os.Remove(entry.workDir + ".lock")
-		_ = os.Remove(entry.workDir + ".ready")
+		readyPath, readyETagPath := readyMarkerPaths(entry.workDir)
+		_ = os.Remove(readyPath)
+		_ = os.Remove(readyETagPath)
 	}
 }
