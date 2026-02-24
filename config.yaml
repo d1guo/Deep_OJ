@@ -1,179 +1,462 @@
-# Deep-OJ Worker Configuration
+# Deep OJ 统一配置文件。
+# 运行时唯一业务配置来源应为本文件（或 APP_CONFIG 指向的同结构文件）。
+# 除 APP_CONFIG 外，不建议再通过环境变量覆盖业务参数，避免双配置源。
 
 server:
-  port: 50051                  # gRPC 监听端口
-  pool_size: 4                 # 并发判题数 (信号量大小)
+  # worker 对外监听端口（仅在 worker.port 缺失时作为兼容回退）。
+  # 单位：端口号；建议范围：1-65535；配置错误会导致 worker 无法监听。
+  port: 50051
+  # worker 并发度兼容回退值（仅在 worker.pool_size 缺失时生效）。
+  # 单位：并发数；建议范围：1-CPU 核数；过大可能造成抢占和抖动。
+  pool_size: 4
 
 path:
+  # 判题工作区根目录，编译产物、运行目录、临时文件都在此树下创建。
+  # 建议使用独立磁盘路径；路径不可写会直接导致判题失败。
   workspace_root: "/data/workspace"
+  # 编译器可执行文件路径（C++ judge core 使用）。
+  # 若路径不存在或无执行权限，编译任务会全部失败。
   compiler_bin: "/usr/bin/g++"
-  
-  # 1. 挂载目录 (文件夹 -> 文件夹)
+  # 运行沙箱时需要 bind mount 进容器根文件系统的目录清单。
+  # 缺少关键目录会导致可执行文件无法启动。
   mount_dirs:
     - "/lib"
     - "/lib64"
     - "/usr"
     - "/bin"
-    - "/etc/alternatives" # 目录
-
-  # 2. [新增] 挂载文件 (文件 -> 文件)
+    - "/etc/alternatives"
+  # 运行沙箱时需要 bind mount 的单文件清单。
+  # 缺少设备文件或时区文件可能导致运行异常或日志时间错误。
   mount_files:
-    - "/etc/localtime"    # 让日志时间正确
-    - "/dev/null"         # 标准输入输出重定向需要
+    - "/etc/localtime"
+    - "/dev/null"
     - "/dev/zero"
     - "/dev/random"
     - "/dev/urandom"
 
 compile:
-  # 键名必须和 config.cpp 里写的一模一样！
+  # 编译阶段 CPU 时间上限。
+  # 单位：秒；建议范围：1-60；过小会导致复杂代码频繁 CE/TLE。
   cpu_limit_s: 10
+  # 编译阶段真实时间上限（墙钟时间）。
+  # 单位：秒；建议 >= cpu_limit_s；过小会导致编译提前中断。
   real_time_limit_s: 15
+  # 编译阶段内存上限。
+  # 单位：MB；过小会导致编译器崩溃，过大则提升资源风险。
   memory_limit_mb: 1024
+  # 编译阶段 /tmp tmpfs 容量上限。
+  # 单位：MB；过小可能导致中间文件写入失败。
   tmpfs_size_mb: 128
+  # 编译日志文件大小上限。
+  # 单位：MB；过小可能截断关键信息，过大增加磁盘压力。
   log_max_size_mb: 16
+  # 编译错误最多保留条数（用于截断过长错误输出）。
+  # 建议范围：1-200；过小会影响诊断，过大增加 IO。
   max_errors: 10
 
 runner:
-  pool_size: 4 # 根据物理核数自动调整，通常 = CPU核数
-  max_output_size: 10485760      # bytes
-  output_buffer_size: 2097152    # bytes
+  # 选手程序 stdout+stderr 总输出硬上限（判题结果 OLE 判定阈值）。
+  # 单位：字节；建议按题型设置；过小会误判，过大会占用磁盘/内存。
+  max_output_size: 10485760
+  # 输出缓冲容忍区（写入软限后仍允许的额外缓冲）。
+  # 单位：字节；用于吸收并发写波动，过大可能延迟 OLE 触发。
+  output_buffer_size: 2097152
+  # 运行阶段 /tmp tmpfs 容量上限。
+  # 单位：MB；过小可能导致运行时临时文件失败。
   tmpfs_size_mb: 64
+  # 单次运行可创建的进程数量上限（cgroup pids.max）。
+  # 过小可能误伤合法程序，过大提高 fork bomb 风险。
   cgroup_pids_limit: 20
+  # 单次运行可用 CPU 核上限（cgroup cpu.max 折算）。
+  # 单位：核心数（可小数）；建议 >0。
   cgroup_cpu_max_cores: 1.0
+  # 运行阶段 cgroup 读带宽上限。
+  # 单位：字节/秒；过小会拖慢大输入，过大增加宿主机竞争。
   cgroup_io_read_bps: 104857600
+  # 运行阶段 cgroup 写带宽上限。
+  # 单位：字节/秒；过小可能影响输出密集题。
   cgroup_io_write_bps: 104857600
 
 security:
-  # 容器内运行的用户 ID (nobody)
+  # 沙箱内运行用户 UID。
+  # 建议使用低权限用户；配置错误可能导致权限穿透风险。
   run_as_uid: 65534
+  # 沙箱内运行用户 GID。
+  # 需与 run_as_uid 配套，避免文件权限异常。
   run_as_gid: 65534
 
-# Go Services Configuration
+observability:
+  # 全局默认服务名；当各子服务 metrics.service_name 为空时回退到这里。
+  # 建议按部署环境区分前缀，方便多集群聚合。
+  service_name: ""
+  # 全局默认实例 ID；当各子服务 metrics.instance_id 为空时回退到这里。
+  # 建议设置为稳定实例标识，便于追踪。
+  instance_id: ""
 
 api:
+  # API HTTP 监听端口。
+  # 单位：端口号；与反向代理/容器映射不一致会导致无法访问。
   port: 8080
+  # Gin 运行模式，常用值：release 或 debug。
+  # 生产建议 release；debug 会输出更多日志并可能暴露调试信息。
   gin_mode: "release"
+  # PostgreSQL 连接串。
+  # 必填；连接失败会导致 API 启动失败。
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
+  # Redis 地址或 URL。
+  # 必填；不可达会导致提交入队、状态缓存等功能异常。
   redis_url: "localhost:6379"
   minio:
+    # MinIO 端点，可写 host:port 或 http(s)://host:port。
+    # 写错会导致题目包上传/下载失败。
     endpoint: "http://localhost:9000"
+    # MinIO Access Key。
     access_key: "change_me"
+    # MinIO Secret Key。
     secret_key: "change_me"
+    # 题目包桶名。
     bucket: "deep-oj-problems"
+    # 是否强制使用 TLS（当 endpoint 不含 scheme 时使用本项）。
+    # true 表示按 HTTPS 连接，false 表示 HTTP。
+    secure: false
   auth:
-    jwt_secret: ""            # 必填，留空会导致服务启动失败
+    # JWT 签名密钥。
+    # 必填且必须保密；泄露会导致令牌伪造风险。
+    jwt_secret: ""
+    # JWT 过期时间。
+    # 单位：小时；建议范围 1-168。
     jwt_expire_hours: 24
-    oauth_state_ttl_sec: 300  # OAuth state cookie TTL
+    # OAuth state Cookie 生命周期。
+    # 单位：秒；过短可能导致回调失败，过长增加重放窗口。
+    oauth_state_ttl_sec: 300
+    # 管理员用户名白名单。
+    # 为空表示无管理员账号可通过 AdminMiddleware。
     admin_users: []
     oauth:
       github:
+        # GitHub OAuth Client ID。
         client_id: ""
+        # GitHub OAuth Client Secret。
         client_secret: ""
+        # GitHub OAuth 回调地址。
+        # 必须与 GitHub 应用配置一致，否则登录回调会失败。
         redirect_url: "http://localhost:8080/api/v1/auth/github/callback"
   limits:
-    submit_body_max_bytes: 1048576   # 1MB
-    problem_zip_max_bytes: 52428800  # 50MB
+    # /submit 请求体总大小上限。
+    # 单位：字节；超限会被 API 直接拒绝。
+    submit_body_max_bytes: 1048576
+    # 题目 ZIP 上传大小上限。
+    # 单位：字节；超限会被 API 拒绝。
+    problem_zip_max_bytes: 52428800
+    # 提交代码字段大小上限。
+    # 单位：字节；超限会返回参数错误。
     submit_code_max_bytes: 65536
+    # 未指定 time_limit 时的默认值。
+    # 单位：毫秒。
     default_time_limit_ms: 1000
+    # 提交可接受的最大 time_limit。
+    # 单位：毫秒；防止异常大值拖垮系统。
     max_time_limit_ms: 10000
+    # 未指定 memory_limit 时的默认值。
+    # 单位：KB。
     default_memory_limit_kb: 65536
+    # 提交可接受的最大 memory_limit。
+    # 单位：KB；防止异常大值。
     max_memory_limit_kb: 524288
+    # 提交入队后 inflight 键的 TTL。
+    # 单位：秒；过短可能误判超时，过长会延迟垃圾回收。
     inflight_ttl_sec: 600
     rate_limit:
+      # 单 IP 在窗口内允许的请求数。
       ip_limit: 60
+      # 单用户在窗口内允许的请求数。
       user_limit: 120
+      # 限流窗口长度。
+      # 单位：秒。
       window_sec: 60
     problem_defaults:
+      # 题目默认时间限制（用于题目创建时兜底）。
+      # 单位：毫秒。
       time_limit_ms: 1000
+      # 题目默认内存限制（用于题目创建时兜底）。
+      # 单位：MB。
       memory_limit_mb: 128
   metrics:
+    # API 指标默认 service 标签值。
     service_name: "deep-oj-api"
+    # API 指标默认 instance 标签值。
+    # 为空时会回退到 observability.instance_id 或主机名。
     instance_id: ""
+  # API 收到退出信号后的优雅关闭超时。
+  # 单位：秒；过小会导致正在处理请求被中断。
   shutdown_timeout_sec: 5
   stream:
+    # 提交消息流 key。
+    # API 入队、scheduler repair、worker 消费必须一致。
     stream_key: "deepoj:jobs"
+    # Redis Stream 近似裁剪长度。
+    # 单位：条；过小可能丢失排障上下文，过大增加内存占用。
     stream_maxlen: 200000
+    # 任务 payload_ref 在 Redis 的 TTL。
+    # 单位：秒；过短会导致 worker 取不到 payload。
     job_payload_ttl_sec: 86400
+  # 受信任代理列表（逗号逻辑在运行时处理）。
+  # 建议仅配置可信反向代理网段，如 127.0.0.1 或内网 CIDR。
+  trusted_proxies:
+    - "127.0.0.1"
+  # CORS 允许的 Origin 白名单。
+  # 必须是完整 Origin（协议+域名+端口）；不匹配将被拒绝。
+  cors_allowed_origins: []
+  # /metrics 访问令牌。
+  # 为空时仅允许 loopback 访问；非空时需 Bearer Token。
+  metrics_token: ""
+  timeouts:
+    # HTTP 读取请求头超时。
+    # 单位：秒；过小可能影响慢连接客户端。
+    read_header_sec: 5
+    # HTTP 读取请求体总超时。
+    # 单位：秒。
+    read_sec: 15
+    # HTTP 写响应超时。
+    # 单位：秒。
+    write_sec: 30
+    # Keep-Alive 空闲连接超时。
+    # 单位：秒。
+    idle_sec: 60
+  outbox:
+    # 是否启用 Outbox 异步分发。
+    # true 可增强一致性；false 时提交通常走直接入队路径。
+    enabled: true
+    # 分发轮询间隔。
+    # 单位：毫秒；过小会增大 DB/Redis 压力。
+    dispatch_interval_ms: 200
+    # 单轮分发批大小。
+    # 单位：条；过大可能造成单轮抖动。
+    dispatch_batch_size: 100
+    # 重试退避初始值。
+    # 单位：毫秒。
+    retry_base_ms: 500
+    # 重试退避上限。
+    # 单位：毫秒。
+    retry_max_ms: 10000
 
 scheduler:
+  # scheduler 访问 Redis 的地址或 URL。
   redis_url: "localhost:6379"
+  # scheduler 访问 PostgreSQL 的连接串。
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
+  # scheduler 实例标识。
+  # 会注入 SCHEDULER_ID，并作为 INSTANCE_ID 的后备值。
   scheduler_id: "scheduler-1"
+  # scheduler 指标服务端口。
   metrics_port: 9091
+  # scheduler 指标轮询周期。
+  # 单位：毫秒。
   metrics_poll_ms: 1000
   metrics:
+    # scheduler 指标默认 service 标签值。
     service_name: "deep-oj-scheduler"
+    # scheduler 指标默认 instance 标签值。
     instance_id: ""
   control_plane:
+    # 是否启用 repair 循环（补偿 pending 任务）。
     repair_enabled: false
+    # repair 扫描间隔。
+    # 单位：毫秒。
     repair_interval_ms: 30000
+    # 每轮 repair 最多处理任务数。
     repair_batch_size: 200
+    # 仅修复“创建时间超过该年龄”的 pending 任务。
+    # 单位：秒。
     repair_min_age_sec: 60
+    # 是否启用 GC 循环。
     gc_enabled: false
+    # GC 执行间隔。
+    # 单位：毫秒。
     gc_interval_ms: 600000
+    # GC 对 Stream 的裁剪长度目标。
+    # 单位：条。
     stream_trim_maxlen: 200000
+    # DB 历史记录保留天数。
+    # 单位：天；设为 0 表示仅保留当天。
     db_retention_days: 14
+    # 是否允许执行 DB 删除。
+    # false 时仅计算/记录，不执行删除。
     db_delete_enabled: false
+    # 单轮 DB 删除批大小。
     db_delete_batch_size: 500
+  workers:
+    # scheduler 静态 worker 地址列表。
+    # 支持 "id=host:port" 或 "host:port"；为空时回退 worker.addr/worker.port。
+    addresses:
+      - "127.0.0.1:50051"
+    # scheduler TCP 探活超时。
+    # 单位：毫秒；过小会误判离线，过大增加探测延迟。
+    probe_timeout_ms: 1000
 
 worker:
+  # worker 实例 ID。
+  # 为空时自动生成 host+uuid。
   id: ""
+  # worker 对外地址（供 scheduler 探测和调度）。
+  # 建议使用可被 scheduler 访问的 host:port。
   addr: ""
+  # worker 监听端口。
+  # 若 addr 为空，可由该端口推导 ":port" 本地监听地址。
   port: 50051
+  # worker 访问 Redis 的地址或 URL。
   redis_url: "localhost:6379"
+  # worker 访问 PostgreSQL 的连接串。
   database_url: "postgres://deep_oj:change_me@localhost:5432/deep_oj?sslmode=disable"
   stream:
+    # worker 消费的任务流 key。
     stream_key: "deepoj:jobs"
+    # worker 所属消费组。
     group: "deepoj:workers"
+    # consumer 名称。
+    # 为空时自动使用 worker_id 或 host-pid。
     consumer: ""
+    # 每次 XREADGROUP 读取条数。
     read_count: 16
+    # XREADGROUP 阻塞等待时长。
+    # 单位：毫秒。
     block_ms: 2000
+    # 任务租约时长。
+    # 单位：秒；需大于单次心跳间隔。
     lease_sec: 60
+    # 任务心跳刷新周期。
+    # 单位：秒；过大可能导致 lease 提前过期。
     heartbeat_sec: 10
+    # reclaim 扫描周期。
+    # 单位：秒。
     reclaim_interval_sec: 5
+    # 每次 reclaim 最多处理条数。
     reclaim_count: 16
+    # 任务超过该空闲时长后允许被 reclaim。
+    # 单位：秒。
     reclaim_grace_sec: 15
+    # 重复日志节流窗口。
+    # 单位：秒；用于抑制高频重复日志。
+    log_throttle_sec: 10
+    # 无可用并发槽位时的退避睡眠。
+    # 单位：毫秒；过小会忙等，过大增加调度延迟。
+    backpressure_sleep_ms: 50
   minio:
+    # worker 下载题目包使用的 MinIO 端点。
     endpoint: "http://localhost:9000"
+    # MinIO Access Key。
     access_key: "change_me"
+    # MinIO Secret Key。
     secret_key: "change_me"
+    # 题目包桶名。
     bucket: "deep-oj-problems"
+    # 是否强制 TLS（endpoint 不含 scheme 时生效）。
+    secure: false
+  # worker 本地工作区根目录。
   workspace: "/data/workspace"
+  # Go worker 调用的 C++ 判题引擎二进制路径。
   judger_bin: "/app/judge_engine"
+  # C++ 判题引擎读取的配置文件路径。
+  # 通常应与 APP_CONFIG 指向同一文件或同结构文件。
   judger_config: "/app/config.yaml"
+  # worker 最大并发判题数。
+  # 建议范围：1-CPU 核数；过大可能导致上下文切换激增。
   pool_size: 4
+  # 是否保留工作目录。
+  # true 便于排障，false 节省磁盘空间。
   keep_workdir: false
-  result_ttl_sec: 600
-  checker_timeout_ms: 2000
-  cleanup_timeout_sec: 5
   timeouts:
+    # 编译超时。
+    # 单位：毫秒。
     compile_ms: 10000
+    # 执行超时附加缓冲。
+    # 单位：毫秒；用于吸收调度和清理误差。
     exec_buffer_ms: 500
+    # 题目 ZIP 下载超时。
+    # 单位：毫秒。
     download_ms: 60000
+    # 解压超时。
+    # 单位：毫秒。
     unzip_ms: 30000
   testcase_cache:
+    # 测试点缓存最大条目数。
+    # 过小会导致频繁回源下载，过大增加磁盘占用。
     max: 100
+    # 测试点缓存 TTL。
+    # 单位：秒；到期后可能触发重新下载与解压。
     ttl_sec: 3600
   unzip_limits:
-    max_bytes: 268435456    # 256MB
+    # 单个 ZIP 解压总字节上限。
+    # 单位：字节；用于防御 zip bomb。
+    max_bytes: 268435456
+    # 单个 ZIP 最多文件数。
     max_files: 2000
-    max_file_bytes: 67108864 # 64MB
+    # ZIP 内单文件最大字节上限。
+    # 单位：字节。
+    max_file_bytes: 67108864
+  # 判题结果在缓存层保留时间。
+  # 单位：秒。
+  result_ttl_sec: 600
+  # checker 执行超时。
+  # 单位：毫秒。
+  checker_timeout_ms: 2000
+  # 任务清理超时。
+  # 单位：秒；用于约束 cleanup 阶段耗时。
+  cleanup_timeout_sec: 5
+  # 是否允许使用宿主机 checker。
+  # 仅在可信环境开启，否则存在安全风险。
   allow_host_checker: false
+  # 是否强制要求 cgroup v2 可用。
+  # true 时若检测不到 cgroup v2，worker 将直接退出。
   require_cgroups_v2: false
   metrics:
+    # worker 指标默认 service 标签值。
     service_name: "deep-oj-worker"
+    # worker 指标默认 instance 标签值。
     instance_id: ""
+  # worker 指标服务端口。
   metrics_port: 9092
+  executor:
+    # 判题子进程 stdout 读取上限。
+    # 单位：字节；用于防止日志/输出撑爆内存。
+    stdout_limit_bytes: 262144
+    # 判题子进程 stderr 读取上限。
+    # 单位：字节。
+    stderr_limit_bytes: 1048576
+    # 判题子进程临时 cgroup 根路径。
+    # 为空时自动推导 /sys/fs/cgroup 下的 deep_oj_judge_cmd。
+    cmd_cgroup_root: ""
 
 redis:
+  # Redis 客户端连接池大小。
+  # 过小可能排队，过大可能占用过多连接。
   pool_size: 10
+  # Redis 最小空闲连接数。
   min_idle_conns: 3
+  # Redis 连接超时。
+  # 单位：毫秒。
   dial_timeout_ms: 5000
+  # Redis 读超时。
+  # 单位：毫秒。
   read_timeout_ms: 3000
+  # Redis 写超时。
+  # 单位：毫秒。
   write_timeout_ms: 3000
+  # Redis 密码。
+  # 若 Redis 未启用鉴权可留空。
+  password: ""
+  # 是否启用 TLS 连接 Redis。
+  # true 时会以 TLS 方式建立连接。
+  tls_enabled: false
 
 postgres:
+  # PostgreSQL 最大连接数。
   max_conns: 10
+  # PostgreSQL 最小连接数。
   min_conns: 2
+  # PostgreSQL 连接最大生存时间。
+  # 单位：分钟。
   max_conn_lifetime_min: 60
+  # PostgreSQL 连接最大空闲时间。
+  # 单位：分钟。
   max_conn_idle_min: 30

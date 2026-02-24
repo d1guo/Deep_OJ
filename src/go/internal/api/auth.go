@@ -49,9 +49,6 @@ func getJWTSecret() []byte {
 }
 
 func getJWTExpireDuration() time.Duration {
-	if sec := getEnvInt("JWT_EXPIRE_SEC", 0); sec > 0 {
-		return time.Duration(sec) * time.Second
-	}
 	hours := getEnvInt("JWT_EXPIRE_HOURS", 24)
 	return time.Duration(hours) * time.Hour
 }

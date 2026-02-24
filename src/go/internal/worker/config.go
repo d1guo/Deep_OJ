@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -49,61 +49,15 @@ type Config struct {
 	AllowHostChecker    bool
 }
 
-// YAMLConfig 映射 config.yaml 结构
-type YAMLConfig struct {
-	Server struct {
-		Port     int  `yaml:"port"`
-		PoolSize *int `yaml:"pool_size"`
-	} `yaml:"server"`
-	Path struct {
-		WorkspaceRoot string `yaml:"workspace_root"`
-	} `yaml:"path"`
-	// ... other fields if needed, currently Go worker mainly needs server & path
-}
-
 func LoadConfig() *Config {
-	// 1. Load YAML (if exists)
-	var yamlCfg YAMLConfig
-	configPath := ""
-	if _, err := os.Stat("config.yaml"); err == nil {
-		configPath = "config.yaml"
-		data, err := os.ReadFile(configPath)
-		if err != nil {
-			slog.Warn("读取 config.yaml 失败", "error", err)
-		} else {
-			if err := yaml.Unmarshal(data, &yamlCfg); err != nil {
-				slog.Warn("解析 config.yaml 失败", "error", err)
-			}
-		}
-	} else {
-		// Try absolute path if running from bin
-		absPath := "/app/config.yaml"
-		if _, err := os.Stat(absPath); err == nil {
-			configPath = absPath
-			data, err := os.ReadFile(absPath)
-			if err == nil {
-				yaml.Unmarshal(data, &yamlCfg)
-			}
-		}
-	}
-
-	// 2. Determine values (Env > YAML > Default)
-
-	// Port: YAML > Env > Default
-	port := yamlCfg.Server.Port
-	if port == 0 {
-		port = getEnvInt("WORKER_PORT", 50051)
-	}
-	workerAddr := getEnv("WORKER_ADDR", "")
+	port := getEnvInt("WORKER_PORT", 50051)
+	workerAddr := strings.TrimSpace(getEnv("WORKER_ADDR", ""))
 	if workerAddr == "" {
 		workerAddr = ":" + strconv.Itoa(port)
 	}
 
-	// Workspace: YAML > Env > Default
-	workspace := yamlCfg.Path.WorkspaceRoot
-	if workspace == "" {
-		workspace = getEnv("WORKSPACE", "/tmp/deep_oj_workspace")
-	}
+	workspace := getEnv("WORKSPACE", "/tmp/deep_oj_workspace")
+	defaultConfigPath := strings.TrimSpace(appconfig.ResolveConfigPath())
 
 	workerID := getEnv("WORKER_ID", "")
 	if workerID == "" {
@@ -135,7 +89,7 @@ func LoadConfig() *Config {
 		MinIOBucket:           getEnv("MINIO_BUCKET", "deep-oj-problems"),
 		Workspace:             workspace,
 		JudgerBin:             getEnv("JUDGER_BIN", "/app/judge_engine"),
-		ConfigPath:            getEnv("JUDGER_CONFIG", configPath),
+		ConfigPath:            getEnv("JUDGER_CONFIG", defaultConfigPath),
 		JobStreamKey:          getEnv("JOB_STREAM_KEY", "deepoj:jobs"),
 		JobStreamGroup:        getEnv("JOB_STREAM_GROUP", "deepoj:workers"),
 		JobStreamConsumer:     streamConsumer,
@@ -153,7 +107,7 @@ func LoadConfig() *Config {
 		UnzipTimeoutMs:      getEnvInt("UNZIP_TIMEOUT_MS", 30000),
 		KeepWorkdir:         getEnvBool("KEEP_WORKDIR", false),
 	}
-	configuredPoolSize, configuredPoolSizeSet := loadConfiguredPoolSize(yamlCfg.Server.PoolSize)
+	configuredPoolSize, configuredPoolSizeSet := loadConfiguredPoolSize()
 	cfg.PoolSize = normalizeWorkerPoolSize(configuredPoolSize, configuredPoolSizeSet, runtime.NumCPU())
 	cfg.TestcaseCacheMax = getEnvInt("TESTCASE_CACHE_MAX", 100)
 	cfg.TestcaseCacheTTL = getEnvInt("TESTCASE_CACHE_TTL_SEC", 3600)
@@ -202,19 +156,16 @@ func getEnvBool(key string, fallback bool) bool {
 	return fallback
 }
 
-func loadConfiguredPoolSize(yamlPoolSize *int) (int, bool) {
+func loadConfiguredPoolSize() (int, bool) {
 	if value, ok := os.LookupEnv("WORKER_POOL_SIZE"); ok {
 		parsed, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
-			slog.Warn("WORKER_POOL_SIZE 解析失败，回退到配置文件或 CPU 默认值", "value", value, "error", err)
-		} else {
-			return parsed, true
+			slog.Warn("WORKER_POOL_SIZE 解析失败，回退到 CPU 默认值", "value", value, "error", err)
+			return 0, false
 		}
+		return parsed, true
 	}
-	if yamlPoolSize == nil {
-		return 0, false
-	}
-	return *yamlPoolSize, true
+	return 0, false
 }
 
 func normalizeWorkerPoolSize(configured int, configuredSet bool, cpuCount int) int {

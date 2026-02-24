@@ -167,7 +167,12 @@ namespace deep_oj
 
                 int status;
                 // 1. 检查是否已退出
-                pid_t w = waitpid(pid_, &status, WNOHANG);
+                pid_t w;
+                for (;;) {
+                    w = waitpid(pid_, &status, WNOHANG);
+                    if (w == -1 && errno == EINTR) continue;
+                    break;
+                }
                 if (w == 0) {
                     // 2. 仍在运行 -> 强杀
                     ::kill(pid_, SIGKILL);

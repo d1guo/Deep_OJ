@@ -30,8 +30,7 @@ func TestNormalizeWorkerPoolSize_NonPositiveConfiguredFallsBackToCPU(t *testing.
 
 func TestLoadConfiguredPoolSize_UsesEnvOverride(t *testing.T) {
 	t.Setenv("WORKER_POOL_SIZE", "3")
-	yamlPool := 2
-	got, ok := loadConfiguredPoolSize(&yamlPool)
+	got, ok := loadConfiguredPoolSize()
 	if !ok {
 		t.Fatalf("expected configured pool from env")
 	}
@@ -40,14 +39,13 @@ func TestLoadConfiguredPoolSize_UsesEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadConfiguredPoolSize_InvalidEnvFallsBackToYAML(t *testing.T) {
+func TestLoadConfiguredPoolSize_InvalidEnvFallsBackToCPU(t *testing.T) {
 	t.Setenv("WORKER_POOL_SIZE", "not-a-number")
-	yamlPool := 5
-	got, ok := loadConfiguredPoolSize(&yamlPool)
-	if !ok {
-		t.Fatalf("expected configured pool from yaml fallback")
+	got, ok := loadConfiguredPoolSize()
+	if ok {
+		t.Fatalf("expected invalid env not to be considered configured")
 	}
-	if got != 5 {
-		t.Fatalf("expected yaml fallback pool=5, got %d", got)
+	if got != 0 {
+		t.Fatalf("expected fallback value 0, got %d", got)
 	}
 }

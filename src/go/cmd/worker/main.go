@@ -70,67 +70,7 @@ func main() {
 	if cfgPath != "" {
 		slog.Info("已加载配置", "path", cfgPath)
 	}
-	if cfgFile != nil {
-		// 将配置文件值写入环境默认值，运行时仍由 LoadConfig() 读取。
-		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfgFile.Redis.PoolSize)
-		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfgFile.Redis.MinIdleConns)
-		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfgFile.Redis.DialTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_READ_TIMEOUT_MS", cfgFile.Redis.ReadTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_WRITE_TIMEOUT_MS", cfgFile.Redis.WriteTimeoutMs)
-
-		wcfg := cfgFile.Worker
-		if wcfg.Port == 0 && cfgFile.Server.Port > 0 {
-			wcfg.Port = cfgFile.Server.Port
-		}
-		if wcfg.PoolSize == 0 && cfgFile.Server.PoolSize > 0 {
-			wcfg.PoolSize = cfgFile.Server.PoolSize
-		}
-		if wcfg.Workspace == "" && cfgFile.Path.WorkspaceRoot != "" {
-			wcfg.Workspace = cfgFile.Path.WorkspaceRoot
-		}
-
-		appconfig.SetEnvIfEmpty("WORKER_ID", wcfg.ID)
-		appconfig.SetEnvIfEmpty("WORKER_ADDR", wcfg.Addr)
-		appconfig.SetEnvIfEmptyInt("WORKER_PORT", wcfg.Port)
-		appconfig.SetEnvIfEmpty("REDIS_URL", wcfg.RedisURL)
-		appconfig.SetEnvIfEmpty("DATABASE_URL", wcfg.DatabaseURL)
-		appconfig.SetEnvIfEmpty("MINIO_ENDPOINT", wcfg.MinIO.Endpoint)
-		appconfig.SetEnvIfEmpty("MINIO_ACCESS_KEY", wcfg.MinIO.AccessKey)
-		appconfig.SetEnvIfEmpty("MINIO_SECRET_KEY", wcfg.MinIO.SecretKey)
-		appconfig.SetEnvIfEmpty("MINIO_BUCKET", wcfg.MinIO.Bucket)
-		appconfig.SetEnvIfEmpty("WORKSPACE", wcfg.Workspace)
-		appconfig.SetEnvIfEmpty("JUDGER_BIN", wcfg.JudgerBin)
-		appconfig.SetEnvIfEmpty("JUDGER_CONFIG", wcfg.JudgerConfig)
-		appconfig.SetEnvIfEmptyInt("WORKER_POOL_SIZE", wcfg.PoolSize)
-		appconfig.SetEnvIfEmptyBool("KEEP_WORKDIR", wcfg.KeepWorkdir)
-		appconfig.SetEnvIfEmptyInt("COMPILE_TIMEOUT_MS", wcfg.Timeouts.CompileMs)
-		appconfig.SetEnvIfEmptyInt("EXEC_TIMEOUT_BUFFER_MS", wcfg.Timeouts.ExecBufferMs)
-		appconfig.SetEnvIfEmptyInt("DOWNLOAD_TIMEOUT_MS", wcfg.Timeouts.DownloadMs)
-		appconfig.SetEnvIfEmptyInt("UNZIP_TIMEOUT_MS", wcfg.Timeouts.UnzipMs)
-		appconfig.SetEnvIfEmptyInt("TESTCASE_CACHE_MAX", wcfg.TestcaseCache.Max)
-		appconfig.SetEnvIfEmptyInt("TESTCASE_CACHE_TTL_SEC", wcfg.TestcaseCache.TTLSec)
-		appconfig.SetEnvIfEmptyInt64("UNZIP_MAX_BYTES", wcfg.UnzipLimits.MaxBytes)
-		appconfig.SetEnvIfEmptyInt("UNZIP_MAX_FILES", wcfg.UnzipLimits.MaxFiles)
-		appconfig.SetEnvIfEmptyInt64("UNZIP_MAX_FILE_BYTES", wcfg.UnzipLimits.MaxFileBytes)
-		appconfig.SetEnvIfEmptyInt("RESULT_TTL_SEC", wcfg.ResultTTLSec)
-		appconfig.SetEnvIfEmptyInt("CHECKER_TIMEOUT_MS", wcfg.CheckerTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("CLEANUP_TIMEOUT_SEC", wcfg.CleanupTimeoutSec)
-		appconfig.SetEnvIfEmptyBool("ALLOW_HOST_CHECKER", wcfg.AllowHostChecker)
-		appconfig.SetEnvIfEmptyBool("REQUIRE_CGROUPS_V2", wcfg.RequireCgroupsV2)
-		appconfig.SetEnvIfEmpty("SERVICE_NAME", wcfg.Metrics.ServiceName)
-		appconfig.SetEnvIfEmpty("INSTANCE_ID", wcfg.Metrics.InstanceID)
-		appconfig.SetEnvIfEmptyInt("WORKER_METRICS_PORT", wcfg.MetricsPort)
-		appconfig.SetEnvIfEmpty("JOB_STREAM_KEY", wcfg.Stream.StreamKey)
-		appconfig.SetEnvIfEmpty("JOB_STREAM_GROUP", wcfg.Stream.Group)
-		appconfig.SetEnvIfEmpty("JOB_STREAM_CONSUMER", wcfg.Stream.Consumer)
-		appconfig.SetEnvIfEmptyInt("JOB_STREAM_READ_COUNT", wcfg.Stream.ReadCount)
-		appconfig.SetEnvIfEmptyInt("JOB_STREAM_BLOCK_MS", wcfg.Stream.BlockMs)
-		appconfig.SetEnvIfEmptyInt("JOB_LEASE_SEC", wcfg.Stream.LeaseSec)
-		appconfig.SetEnvIfEmptyInt("JOB_HEARTBEAT_SEC", wcfg.Stream.HeartbeatSec)
-		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_INTERVAL_SEC", wcfg.Stream.ReclaimIntervalSec)
-		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_COUNT", wcfg.Stream.ReclaimCount)
-		appconfig.SetEnvIfEmptyInt("JOB_RECLAIM_GRACE_SEC", wcfg.Stream.ReclaimGraceSec)
-	}
+	appconfig.ApplyRuntimeEnvForWorker(cfgFile)
 
 	cfg := worker.LoadConfig()
 	slog.Info("工作节点启动中", "id", cfg.WorkerID, "bin", cfg.JudgerBin)

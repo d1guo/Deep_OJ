@@ -93,7 +93,7 @@ int main() {
         "language": 1, # CPP
         "code": code,
         "time_limit": 1000,
-        "memory_limit": 128
+        "memory_limit": 65536  # KB (64MB)
     }
     
     resp = requests.post(f"{API_URL}/api/v1/submit", headers=headers, json=data)
