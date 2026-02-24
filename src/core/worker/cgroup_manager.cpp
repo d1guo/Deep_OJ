@@ -106,33 +106,52 @@ CgroupManager& CgroupManager::operator=(CgroupManager&& other) noexcept {
 // 静态方法
 
 bool CgroupManager::IsSupported() {
-    // 检查 /sys/fs/cgroup 是否为 cgroup2 文件系统
-    struct statfs buf;
-    if (statfs("/sys/fs/cgroup", &buf) != 0) {
-        return false;
+    return !GetCgroup2MountRoot().empty();
+}
+
+std::string CgroupManager::GetCgroup2MountRoot() {
+    // 优先统一层级挂载点，再回退到传统路径。
+    const std::vector<std::string> candidates = {
+        "/sys/fs/cgroup/unified",
+        "/sys/fs/cgroup",
+    };
+
+    for (const auto& root : candidates) {
+        struct statfs buf;
+        if (statfs(root.c_str(), &buf) != 0) {
+            continue;
+        }
+        if (buf.f_type != CGROUP2_SUPER_MAGIC) {
+            continue;
+        }
+        if (!fs::exists(root + "/cgroup.controllers")) {
+            continue;
+        }
+        return root;
     }
-    return buf.f_type == CGROUP2_SUPER_MAGIC;
+
+    return "";
 }
 
 // 核心功能实现
 
 bool CgroupManager::EnsureParentReady() {
     std::error_code ec;
-    
+
     // 1. 确保 cgroup 根目录存在
     if (!fs::exists(cgroup_root_, ec)) {
-        // 创建根目录 (例如 /sys/fs/cgroup/deep_oj)
+        // 创建根目录 (例如 /sys/fs/cgroup/deep_oj 或 /sys/fs/cgroup/unified/deep_oj)
         if (!fs::create_directories(cgroup_root_, ec)) {
             std::cerr << "[CgroupManager] 创建根目录失败: "
                       << cgroup_root_ << std::endl;
             return false;
         }
     }
-    
-    // 2. 获取根目录的父目录 (通常是 /sys/fs/cgroup)
+
+    // 2. 获取根目录的父目录 (通常是 /sys/fs/cgroup 或 /sys/fs/cgroup/unified)
     fs::path parent_path = fs::path(cgroup_root_).parent_path();
     std::string subtree_control = parent_path.string() + "/cgroup.subtree_control";
-    
+
     // 3. 在父目录启用控制器
     // 尽量启用 memory/pids/cpu/io，若父目录已由运维提前开启则允许失败降级。
     auto buildControllerEnableList = [](const std::string& raw) {
@@ -152,7 +171,7 @@ bool CgroupManager::EnsureParentReady() {
          std::cerr << "[CgroupManager] 警告：在 " << subtree_control
                    << " 启用控制器失败（可能已由管理员预先开启）" << std::endl;
     }
-    
+
     // 4. 在我们的根目录也启用控制器 (为了让 job 子目录能用)
     // 这是必须成功的，因为 setup_cgroups.sh 应该把 deep_oj 目录的所有权给了我们
     std::string our_subtree_control = cgroup_root_ + "/cgroup.subtree_control";
@@ -163,7 +182,7 @@ bool CgroupManager::EnsureParentReady() {
                   << " 启用控制器失败，请检查目录属主或委派配置。" << std::endl;
         return false;
     }
-    
+
     return true;
 }
 
@@ -171,13 +190,13 @@ bool CgroupManager::Create() {
     if (created_) {
         return true;  // 已经创建过了
     }
-    
+
     // 1. 确保父目录准备好
     if (!EnsureParentReady()) {
         std::cerr << "[CgroupManager] 准备父目录失败" << std::endl;
         return false;
     }
-    
+
     // 2. 创建子 cgroup 目录
     std::error_code ec;
     if (!fs::create_directories(cgroup_path_, ec)) {
@@ -187,7 +206,7 @@ bool CgroupManager::Create() {
             return false;
         }
     }
-    
+
     created_ = true;
     std::cerr << "[CgroupManager] 已创建 cgroup: " << cgroup_path_ << std::endl;
     return true;
@@ -198,21 +217,21 @@ bool CgroupManager::SetMemoryLimit(uint64_t bytes, bool disable_swap) {
         std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
-    
+
     // 1. 设置 memory.max (硬限制)
     // 超过此限制时，进程会被 OOM Killer 终止。
     if (!WriteToFile(cgroup_path_ + "/memory.max", std::to_string(bytes))) {
         std::cerr << "[CgroupManager] 设置 memory.max 失败" << std::endl;
         return false;
     }
-    
+
     // 2. 设置 memory.swap.max (Swap 限制)
     // 设为 0 完全禁用 Swap，防止程序通过 Swap 绕过内存限制
     if (disable_swap) {
         // 注意: 某些系统可能不支持 memory.swap.max，忽略错误
         WriteToFile(cgroup_path_ + "/memory.swap.max", "0");
     }
-    
+
     std::cerr << "[CgroupManager] 内存限制已设置: " << bytes << " 字节"
               << (disable_swap ? "，已禁用 swap" : "") << std::endl;
     return true;
@@ -223,7 +242,7 @@ bool CgroupManager::SetPidsLimit(int max_pids) {
         std::cerr << "[CgroupManager] cgroup 尚未创建" << std::endl;
         return false;
     }
-    
+
     // 设置 pids.max (进程数限制)
     // 这是防御 Fork 炸弹的关键
     // 推荐值: 20 (足够正常程序使用，但限制了 Fork 炸弹)
@@ -231,7 +250,7 @@ bool CgroupManager::SetPidsLimit(int max_pids) {
         std::cerr << "[CgroupManager] 设置 pids.max 失败" << std::endl;
         return false;
     }
-    
+
     std::cerr << "[CgroupManager] 进程数限制已设置: " << max_pids << std::endl;
     return true;
 }

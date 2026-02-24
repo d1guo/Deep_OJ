@@ -61,6 +61,19 @@ func buildRedisOptions(addr string) *redis.Options {
 	return opts
 }
 
+func cgroupV2Available() bool {
+	candidates := []string{
+		"/sys/fs/cgroup/unified/cgroup.controllers",
+		"/sys/fs/cgroup/cgroup.controllers",
+	}
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
 	cfgFile, cfgPath, err := appconfig.Load()
 	if err != nil {
@@ -76,11 +89,9 @@ func main() {
 	slog.Info("工作节点启动中", "id", cfg.WorkerID, "bin", cfg.JudgerBin)
 	slog.Info("工作节点并发配置", "max_concurrency", cfg.PoolSize, "num_cpu", runtime.NumCPU())
 
-	if getEnvBool("REQUIRE_CGROUPS_V2", false) {
-		if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
-			slog.Error("Cgroups v2 不可用，按 REQUIRE_CGROUPS_V2=1 配置退出", "error", err)
-			os.Exit(1)
-		}
+	if getEnvBool("REQUIRE_CGROUPS_V2", false) && !cgroupV2Available() {
+		slog.Error("Cgroups v2 不可用，按 REQUIRE_CGROUPS_V2=1 配置退出")
+		os.Exit(1)
 	}
 
 	worker.InitMetrics()

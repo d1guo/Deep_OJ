@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# 配置
-CGROUP_ROOT="/sys/fs/cgroup"
-CJ_PATH="${CGROUP_ROOT}/deep_oj"
 WORKER_USER=${SUDO_USER:-$(whoami)}
 WORKER_GROUP=${SUDO_USER:-$(whoami)}
 
@@ -14,16 +11,27 @@ fi
 
 echo "正在为 Deep-OJ 配置 Cgroups v2..."
 
-# 1. 检查 Cgroups v2
-if [ $(stat -f -c %T "$CGROUP_ROOT") != "cgroup2s" ] && [ $(stat -f -c %T "$CGROUP_ROOT") != "tmpfs" ]; then
-    # 部分系统可能把 cgroup2 挂在 tmpfs 或 cgroup2fs，上层 C++ 会再做魔数校验。
-    # 这里先做一次轻量探测。
-    if mount | grep "cgroup2" > /dev/null; then
-        echo "检测到 Cgroups v2。"
-    else
-        echo "未检测到或未挂载 Cgroups v2，脚本可能失败。"
+# 1. 解析 Cgroups v2 挂载点（优先 unified）
+detect_cgroup_root() {
+    if [ -f "/sys/fs/cgroup/unified/cgroup.controllers" ]; then
+        echo "/sys/fs/cgroup/unified"
+        return 0
     fi
+    if [ -f "/sys/fs/cgroup/cgroup.controllers" ]; then
+        echo "/sys/fs/cgroup"
+        return 0
+    fi
+    return 1
+}
+
+CGROUP_ROOT="$(detect_cgroup_root || true)"
+if [ -z "$CGROUP_ROOT" ]; then
+    echo "未检测到可用的 Cgroups v2 挂载点（/sys/fs/cgroup/unified 或 /sys/fs/cgroup）。"
+    exit 1
 fi
+echo "检测到 Cgroups v2 挂载点：$CGROUP_ROOT"
+
+CJ_PATH="${CGROUP_ROOT}/deep_oj"
 
 # 2. 创建 deep_oj cgroup
 if [ ! -d "$CJ_PATH" ]; then
@@ -34,8 +42,8 @@ fi
 # 3. 在根目录启用控制器（若尚未启用）
 # 当前假设 deep_oj 位于 root 下，需启用 memory 与 pids。
 for controller in memory pids; do
-    if grep -q "$controller" "$CGROUP_ROOT/cgroup.controllers"; then
-        if ! grep -q "$controller" "$CGROUP_ROOT/cgroup.subtree_control"; then
+    if grep -qw "$controller" "$CGROUP_ROOT/cgroup.controllers"; then
+        if ! grep -qw "$controller" "$CGROUP_ROOT/cgroup.subtree_control"; then
             echo "+$controller" > "$CGROUP_ROOT/cgroup.subtree_control"
             echo "已在根目录启用 $controller"
         fi
