@@ -30,7 +30,6 @@ namespace deep_oj {
         std::memset(&deep_oj::g_runner_config, 0, sizeof(deep_oj::g_runner_config));
 
         // Core 线程池配置默认值
-        deep_oj::g_runner_config.pool_size = 4;
         deep_oj::g_runner_config.run_tmpfs_size_mb = 64;
         deep_oj::g_runner_config.compile_tmpfs_size_mb = 128;
         deep_oj::g_runner_config.compile_log_max_bytes = 16 * 1024 * 1024;
@@ -43,9 +42,6 @@ namespace deep_oj {
         // Runner 配置 (核心判题线程池)
         if (config["runner"]) {
             YAML::Node runner = config["runner"];
-            if (runner["pool_size"]) {
-                deep_oj::g_runner_config.pool_size = runner["pool_size"].as<int>();
-            } 
             // 读取 max_output_size (默认 10MB)
             deep_oj::g_runner_config.max_output_size = runner["max_output_size"] ? runner["max_output_size"].as<long long>() : 10 * 1024 * 1024;
             // 读取 output_buffer_size (默认 2MB)
@@ -129,13 +125,6 @@ namespace deep_oj {
         long long mem_mb = compileNode["memory_limit_mb"].as<long long>();
         deep_oj::g_runner_config.compile_mem_limit = mem_mb * 1024LL * 1024LL; 
 
-        // 最大输出限制
-        if (compileNode["max_output_size_mb"]) {
-            long long out_mb = compileNode["max_output_size_mb"].as<long long>();
-            deep_oj::g_runner_config.max_output_size = out_mb * 1024LL * 1024LL;
-        } else {
-            deep_oj::g_runner_config.max_output_size = 10 * 1024 * 1024; // 10MB
-        }
         if (compileNode["tmpfs_size_mb"]) {
             deep_oj::g_runner_config.compile_tmpfs_size_mb = compileNode["tmpfs_size_mb"].as<long long>();
         }
@@ -161,7 +150,7 @@ namespace deep_oj {
         deep_oj::g_runner_config.run_gid = static_cast<gid_t>(secNode["run_as_gid"].as<unsigned long>());
 
         std::cerr << "[配置] 加载完成。WorkRoot: " << deep_oj::g_runner_config.workspace_root 
-                  << ", PoolSize: " << deep_oj::g_runner_config.pool_size << std::endl;
+                  << ", MaxOutputBytes: " << deep_oj::g_runner_config.max_output_size << std::endl;
 
     } catch (const YAML::Exception& ex) {
         std::cerr << "[配置] YAML 解析失败: " << ex.what() << std::endl;

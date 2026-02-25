@@ -29,7 +29,8 @@ class CgroupManager {
 public:
     /**
      * @brief 构造函数
-     * @param cgroup_root Cgroup 根目录，默认 /sys/fs/cgroup/deep_oj
+     * @param cgroup_root Cgroup 根目录，如 /sys/fs/cgroup/deep_oj
+     *                    或 /sys/fs/cgroup/unified/deep_oj
      * @param job_id 任务 ID，用于创建唯一的子 cgroup
      */
     CgroupManager(const std::string& cgroup_root, const std::string& job_id);
@@ -56,7 +57,7 @@ public:
      * 实现步骤:
      * 1. 确保父目录存在
      * 2. 在父目录的 cgroup.subtree_control 启用 +memory +pids
-     * 3. 创建子目录 /sys/fs/cgroup/deep_oj/{job_id}
+     * 3. 创建子目录 {cgroup_root}/{job_id}
      * 
      * @return true 如果创建成功
      */
@@ -156,11 +157,22 @@ public:
     /**
      * @brief 检查系统是否支持 Cgroups v2
      * 
-     * 检测方法: 检查 /sys/fs/cgroup 是否为 cgroup2 类型
+     * 检测方法:
+     * 1. 优先检查 /sys/fs/cgroup/unified
+     * 2. 回退检查 /sys/fs/cgroup
+     * 3. 仅当挂载点为 cgroup2 且存在 cgroup.controllers 时返回支持
      * 
      * @return true 如果支持 Cgroups v2
      */
     static bool IsSupported();
+
+    /**
+     * @brief 获取可用的 Cgroups v2 挂载根路径
+     * 
+     * 优先返回 /sys/fs/cgroup/unified；否则回退 /sys/fs/cgroup。
+     * 返回空字符串表示当前环境不可用。
+     */
+    static std::string GetCgroup2MountRoot();
 
 private:
     /**
@@ -198,7 +210,7 @@ private:
     bool EnsureParentReady();
 
 private:
-    std::string cgroup_root_;   ///< cgroup 根目录 (如 /sys/fs/cgroup/deep_oj)
+    std::string cgroup_root_;   ///< cgroup 根目录 (如 /sys/fs/cgroup/deep_oj 或 /sys/fs/cgroup/unified/deep_oj)
     std::string job_id_;        ///< 任务 ID
     std::string cgroup_path_;   ///< 完整路径 = cgroup_root_ + "/" + job_id_
     bool created_ = false;      ///< 是否已创建

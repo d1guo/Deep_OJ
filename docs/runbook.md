@@ -22,5 +22,6 @@
 
 ## 5. Cgroups v2 未启用
 1. 宿主机启用 cgroup v2（内核参数）
-2. Docker 挂载 `/sys/fs/cgroup`
-3. Worker 设置 `REQUIRE_CGROUPS_V2=1`
+2. Docker 挂载 `/sys/fs/cgroup`（hybrid 模式下确认容器内可见 `/sys/fs/cgroup/unified`）
+3. 容器内检查：`test -f /sys/fs/cgroup/unified/cgroup.controllers || test -f /sys/fs/cgroup/cgroup.controllers`
+4. Worker 设置 `REQUIRE_CGROUPS_V2=1`

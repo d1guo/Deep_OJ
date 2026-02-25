@@ -1,19 +1,28 @@
-# Docker Compose 环境专用配置。
-# 通过 APP_CONFIG=/app/config.docker.yaml 选择本文件。
+# Deep OJ Docker 环境专用配置文件。
+# 通过 APP_CONFIG=/app/config.docker.yaml 指定后，API/Scheduler/Worker 都读取本文件。
+# 本文件与 config.yaml 使用同一套 schema，仅取值按容器网络与容器服务名定制。
 
 server:
+  # worker 对外监听端口（仅在 worker.port 缺失时作为兼容回退）。
+  # 单位：端口号；建议范围：1-65535。
   port: 50051
+  # worker 并发度兼容回退值（仅在 worker.pool_size 缺失时生效）。
+  # 单位：并发数；建议范围：1-CPU 核数。
   pool_size: 4
 
 path:
+  # 判题工作区根目录；容器内需与 volume 挂载路径一致。
   workspace_root: "/data/workspace"
+  # 编译器可执行路径（C++ core 读取）。
   compiler_bin: "/usr/bin/g++"
+  # 运行沙箱时 bind mount 的目录列表。
   mount_dirs:
     - "/lib"
     - "/lib64"
     - "/usr"
     - "/bin"
     - "/etc/alternatives"
+  # 运行沙箱时 bind mount 的文件列表。
   mount_files:
     - "/etc/localtime"
     - "/dev/null"
@@ -22,185 +31,326 @@ path:
     - "/dev/urandom"
 
 compile:
+  # 编译阶段 CPU 时间上限（秒）。
   cpu_limit_s: 10
+  # 编译阶段墙钟时间上限（秒）。
   real_time_limit_s: 15
+  # 编译阶段内存上限（MB）。
   memory_limit_mb: 1024
+  # 编译阶段 /tmp tmpfs 大小（MB）。
   tmpfs_size_mb: 128
+  # 编译日志大小上限（MB）。
   log_max_size_mb: 16
+  # 编译错误最多保留条数。
   max_errors: 10
 
 runner:
+  # 选手程序输出硬上限（字节），超限触发 OLE。
   max_output_size: 10485760
+  # 输出缓冲区上限（字节）。
   output_buffer_size: 2097152
+  # 运行阶段 /tmp tmpfs 大小（MB）。
   tmpfs_size_mb: 64
+  # 可创建进程数上限（cgroup pids）。
   cgroup_pids_limit: 20
+  # CPU 核上限（可小数）。
   cgroup_cpu_max_cores: 1.0
+  # 读带宽上限（字节/秒）。
   cgroup_io_read_bps: 104857600
+  # 写带宽上限（字节/秒）。
   cgroup_io_write_bps: 104857600
 
 security:
+  # 沙箱运行用户 UID。
   run_as_uid: 65534
+  # 沙箱运行用户 GID。
   run_as_gid: 65534
 
 observability:
+  # 全局默认 service 标签值。
   service_name: "deep-oj"
+  # 全局默认 instance 标签值。
   instance_id: ""
 
 api:
+  # API 监听端口（容器内端口，需与 compose 端口映射匹配）。
   port: 18080
+  # Gin 运行模式。
   gin_mode: "release"
+  # PostgreSQL 连接串（Docker 网络内地址）。
   database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
+  # Redis 地址（Docker 网络内地址）。
   redis_url: "oj-redis:6379"
   minio:
+    # MinIO 端点（Docker 网络内服务名）。
     endpoint: "http://oj-minio:9000"
+    # MinIO Access Key。
     access_key: "deepoj_minio_user"
+    # MinIO Secret Key。
     secret_key: "deepoj_minio_password_change_me"
+    # MinIO 桶名。
     bucket: "deep-oj-problems"
+    # 是否强制 TLS（endpoint 不带 scheme 时生效）。
     secure: false
   auth:
+    # JWT 签名密钥（示例值，仅用于开发/测试）。
     jwt_secret: "dev_jwt_secret_change_me"
+    # JWT 过期时间（小时）。
     jwt_expire_hours: 24
+    # OAuth state Cookie TTL（秒）。
     oauth_state_ttl_sec: 300
+    # 管理员用户名白名单。
     admin_users:
       - "admin"
     oauth:
       github:
+        # GitHub OAuth Client ID。
         client_id: ""
+        # GitHub OAuth Client Secret。
         client_secret: ""
+        # GitHub OAuth 回调地址。
         redirect_url: "http://localhost:18080/api/v1/auth/github/callback"
   limits:
+    # /submit 请求体上限（字节）。
     submit_body_max_bytes: 1048576
+    # 题目 ZIP 上传上限（字节）。
     problem_zip_max_bytes: 52428800
+    # 提交代码上限（字节）。
     submit_code_max_bytes: 65536
+    # 默认 time_limit（毫秒）。
     default_time_limit_ms: 1000
+    # 最大 time_limit（毫秒）。
     max_time_limit_ms: 10000
+    # 默认 memory_limit（KB）。
     default_memory_limit_kb: 65536
+    # 最大 memory_limit（KB）。
     max_memory_limit_kb: 524288
+    # inflight 键 TTL（秒）。
     inflight_ttl_sec: 600
     rate_limit:
+      # 单 IP 窗口内请求数上限。
       ip_limit: 60
+      # 单用户窗口内请求数上限。
       user_limit: 120
+      # 限流窗口长度（秒）。
       window_sec: 60
     problem_defaults:
+      # 题目默认时间限制（毫秒）。
       time_limit_ms: 1000
+      # 题目默认内存限制（MB）。
       memory_limit_mb: 128
   metrics:
+    # API metrics service 标签值。
     service_name: "deep-oj-api"
+    # API metrics instance 标签值。
     instance_id: ""
+  # API 优雅关闭超时（秒）。
   shutdown_timeout_sec: 5
   stream:
+    # 任务 Stream key。
     stream_key: "deepoj:jobs"
+    # Stream 近似裁剪长度。
     stream_maxlen: 200000
+    # payload_ref TTL（秒）。
     job_payload_ttl_sec: 86400
+  # 受信任代理列表。
   trusted_proxies:
     - "127.0.0.1"
+  # 允许跨域的 Origin 列表。
   cors_allowed_origins:
     - "http://localhost:18080"
+  # /metrics 访问令牌；为空时仅允许 loopback。
   metrics_token: ""
   timeouts:
+    # 读请求头超时（秒）。
     read_header_sec: 5
+    # 读请求体超时（秒）。
     read_sec: 15
+    # 写响应超时（秒）。
     write_sec: 30
+    # 空闲连接超时（秒）。
     idle_sec: 60
   outbox:
+    # 是否启用 Outbox 分发。
     enabled: true
+    # 分发轮询间隔（毫秒）。
     dispatch_interval_ms: 200
+    # 每轮分发批量大小。
     dispatch_batch_size: 100
+    # 重试退避基础值（毫秒）。
     retry_base_ms: 500
+    # 重试退避上限（毫秒）。
     retry_max_ms: 10000
 
 scheduler:
+  # scheduler 连接 Redis 地址。
   redis_url: "oj-redis:6379"
+  # scheduler 连接 PostgreSQL 地址。
   database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
+  # scheduler 实例标识。
   scheduler_id: "scheduler-docker-1"
+  # scheduler metrics 端口。
   metrics_port: 9091
+  # metrics 轮询周期（毫秒）。
   metrics_poll_ms: 1000
   metrics:
+    # scheduler metrics service 标签。
     service_name: "deep-oj-scheduler"
+    # scheduler metrics instance 标签。
     instance_id: ""
   control_plane:
+    # 是否启用 repair。
     repair_enabled: false
+    # repair 周期（毫秒）。
     repair_interval_ms: 30000
+    # repair 批量上限。
     repair_batch_size: 200
+    # repair 最小任务年龄（秒）。
     repair_min_age_sec: 60
+    # 是否启用 GC。
     gc_enabled: false
+    # GC 周期（毫秒）。
     gc_interval_ms: 600000
+    # Stream 裁剪长度。
     stream_trim_maxlen: 200000
+    # DB 保留天数。
     db_retention_days: 14
+    # 是否启用 DB 删除。
     db_delete_enabled: false
+    # DB 删除批量上限。
     db_delete_batch_size: 500
   workers:
+    # 静态 worker 地址列表（Docker 网络内服务名）。
     addresses:
       - "oj-worker:50051"
+    # worker 探活超时（毫秒）。
     probe_timeout_ms: 1000
 
 worker:
+  # worker 实例 ID。
   id: "worker-docker-1"
+  # worker 对外地址。
   addr: "oj-worker:50051"
+  # worker 监听端口。
   port: 50051
+  # worker 连接 Redis 地址。
   redis_url: "oj-redis:6379"
+  # worker 连接 PostgreSQL 地址。
   database_url: "postgres://deep_oj:deepoj_pg_password_change_me@oj-postgres:5432/deep_oj?sslmode=disable"
   stream:
+    # 消费流 key。
     stream_key: "deepoj:jobs"
+    # 消费组名。
     group: "deepoj:workers"
+    # consumer 名称，空则自动生成。
     consumer: ""
+    # 每次读取条数。
     read_count: 16
+    # 阻塞读超时（毫秒）。
     block_ms: 2000
+    # 任务租约时长（秒）。
     lease_sec: 60
+    # 心跳周期（秒）。
     heartbeat_sec: 10
+    # reclaim 周期（秒）。
     reclaim_interval_sec: 5
+    # reclaim 批量上限。
     reclaim_count: 16
+    # reclaim 宽限时间（秒）。
     reclaim_grace_sec: 15
+    # 日志节流窗口（秒）。
     log_throttle_sec: 10
+    # 背压休眠时长（毫秒）。
     backpressure_sleep_ms: 50
   minio:
+    # MinIO 地址（Docker 网络内）。
     endpoint: "http://oj-minio:9000"
+    # MinIO Access Key。
     access_key: "deepoj_minio_user"
+    # MinIO Secret Key。
     secret_key: "deepoj_minio_password_change_me"
+    # 题目桶名。
     bucket: "deep-oj-problems"
+    # 是否强制 TLS。
     secure: false
+  # 工作目录。
   workspace: "/data/workspace"
+  # 判题引擎路径。
   judger_bin: "/app/judge_engine"
+  # 判题引擎配置路径。
   judger_config: "/app/config.docker.yaml"
+  # 并发度。
   pool_size: 4
+  # 是否保留工作目录。
   keep_workdir: false
   timeouts:
+    # 编译超时（毫秒）。
     compile_ms: 10000
+    # 执行附加缓冲（毫秒）。
     exec_buffer_ms: 500
+    # 下载超时（毫秒）。
     download_ms: 60000
+    # 解压超时（毫秒）。
     unzip_ms: 30000
   testcase_cache:
+    # 缓存条目上限。
     max: 100
+    # 缓存 TTL（秒）。
     ttl_sec: 3600
   unzip_limits:
+    # 解压总字节上限。
     max_bytes: 268435456
+    # 文件数量上限。
     max_files: 2000
+    # 单文件字节上限。
     max_file_bytes: 67108864
+  # 结果缓存 TTL（秒）。
   result_ttl_sec: 600
+  # checker 超时（毫秒）。
   checker_timeout_ms: 2000
+  # cleanup 超时（秒）。
   cleanup_timeout_sec: 5
+  # 是否允许宿主机 checker。
   allow_host_checker: false
+  # 是否强制要求 cgroup v2。
   require_cgroups_v2: false
   metrics:
+    # worker metrics service 标签。
     service_name: "deep-oj-worker"
+    # worker metrics instance 标签。
     instance_id: ""
+  # worker metrics 端口。
   metrics_port: 9092
   executor:
+    # 判题子进程 stdout 读取上限（字节）。
     stdout_limit_bytes: 262144
+    # 判题子进程 stderr 读取上限（字节）。
     stderr_limit_bytes: 1048576
+    # 判题子进程 cgroup 根路径；空则自动推导。
     cmd_cgroup_root: ""
 
 redis:
+  # Redis 连接池大小。
   pool_size: 10
+  # 最小空闲连接数。
   min_idle_conns: 3
+  # 拨号超时（毫秒）。
   dial_timeout_ms: 5000
+  # 读超时（毫秒）。
   read_timeout_ms: 3000
+  # 写超时（毫秒）。
   write_timeout_ms: 3000
+  # Redis 密码。
   password: "deepoj_redis_change_me"
+  # 是否启用 TLS。
   tls_enabled: false
 
 postgres:
+  # 最大连接数。
   max_conns: 10
+  # 最小连接数。
   min_conns: 2
+  # 连接最大生存时间（分钟）。
   max_conn_lifetime_min: 60
+  # 连接最大空闲时间（分钟）。
   max_conn_idle_min: 30

@@ -79,8 +79,6 @@ namespace deep_oj {
         uid_t run_uid;
         gid_t run_gid;
 
-        int pool_size; // 核心判题并发数
-
         // cgroup 限制
         int cgroup_pids_limit;
         double cgroup_cpu_max_cores;

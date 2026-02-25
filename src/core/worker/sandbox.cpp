@@ -167,7 +167,12 @@ namespace deep_oj
 
                 int status;
                 // 1. 检查是否已退出
-                pid_t w = waitpid(pid_, &status, WNOHANG);
+                pid_t w;
+                for (;;) {
+                    w = waitpid(pid_, &status, WNOHANG);
+                    if (w == -1 && errno == EINTR) continue;
+                    break;
+                }
                 if (w == 0) {
                     // 2. 仍在运行 -> 强杀
                     ::kill(pid_, SIGKILL);
@@ -509,10 +514,11 @@ namespace deep_oj
         // 如果系统不支持 (如 WSL)，优雅降级到仅 setrlimit 模式
         std::unique_ptr<CgroupManager> cgroup;
         bool cgroup_enabled = false;
-        if (CgroupManager::IsSupported()) {
+        std::string cgroup_mount_root = CgroupManager::GetCgroup2MountRoot();
+        if (!cgroup_mount_root.empty()) {
             try {
                 std::string cgroup_id = "run_" + std::to_string(pid);
-                cgroup = std::make_unique<CgroupManager>("/sys/fs/cgroup/deep_oj", cgroup_id);
+                cgroup = std::make_unique<CgroupManager>(cgroup_mount_root + "/deep_oj", cgroup_id);
                 if (cgroup->Create()) {
                     // pids.max: configurable, default 20
                     int pids_limit = g_runner_config.cgroup_pids_limit > 0 ? g_runner_config.cgroup_pids_limit : 20;
@@ -531,7 +537,8 @@ namespace deep_oj
                     // 将子进程加入 cgroup
                     cgroup->AddProcess(pid);
                     cgroup_enabled = true;
-                    std::cerr << "[沙箱] Cgroups v2 已启用 (PID=" << pid << ")" << std::endl;
+                    std::cerr << "[沙箱] Cgroups v2 已启用 (PID=" << pid
+                              << ", root=" << cgroup_mount_root << ")" << std::endl;
                 }
             } catch (const std::exception& e) {
                 std::cerr << "[沙箱] Cgroups v2 初始化失败，降级到 setrlimit 模式: " << e.what() << std::endl;

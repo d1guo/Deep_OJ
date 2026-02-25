@@ -31,7 +31,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -99,64 +98,7 @@ func main() {
 	if cfgPath != "" {
 		slog.Info("已加载配置", "path", cfgPath)
 	}
-	if cfg != nil {
-		// 将配置文件值写入进程内默认环境变量，运行时仍从环境变量读取。
-		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfg.Redis.PoolSize)
-		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfg.Redis.MinIdleConns)
-		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfg.Redis.DialTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_READ_TIMEOUT_MS", cfg.Redis.ReadTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_WRITE_TIMEOUT_MS", cfg.Redis.WriteTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONNS", cfg.Postgres.MaxConns)
-		appconfig.SetEnvIfEmptyInt("PG_MIN_CONNS", cfg.Postgres.MinConns)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_LIFETIME_MIN", cfg.Postgres.MaxConnLifetimeMin)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_IDLE_MIN", cfg.Postgres.MaxConnIdleMin)
-
-		appconfig.SetEnvIfEmptyInt("PORT", cfg.API.Port)
-		appconfig.SetEnvIfEmpty("GIN_MODE", cfg.API.GinMode)
-		appconfig.SetEnvIfEmpty("DATABASE_URL", cfg.API.DatabaseURL)
-		appconfig.SetEnvIfEmpty("REDIS_URL", cfg.API.RedisURL)
-		appconfig.SetEnvIfEmpty("MINIO_ENDPOINT", cfg.API.MinIO.Endpoint)
-		appconfig.SetEnvIfEmpty("MINIO_ACCESS_KEY", cfg.API.MinIO.AccessKey)
-		appconfig.SetEnvIfEmpty("MINIO_SECRET_KEY", cfg.API.MinIO.SecretKey)
-		appconfig.SetEnvIfEmpty("MINIO_BUCKET", cfg.API.MinIO.Bucket)
-
-		if len(cfg.API.Auth.AdminUsers) > 0 {
-			appconfig.SetEnvIfEmpty("ADMIN_USERS", strings.Join(cfg.API.Auth.AdminUsers, ","))
-		}
-		appconfig.SetEnvIfEmpty("JWT_SECRET", cfg.API.Auth.JWTSecret)
-		appconfig.SetEnvIfEmptyInt("JWT_EXPIRE_HOURS", cfg.API.Auth.JWTExpireHours)
-		appconfig.SetEnvIfEmptyInt("OAUTH_STATE_TTL_SEC", cfg.API.Auth.OAuthStateTTLSeconds)
-		appconfig.SetEnvIfEmpty("GITHUB_CLIENT_ID", cfg.API.Auth.OAuth.GitHub.ClientID)
-		appconfig.SetEnvIfEmpty("GITHUB_CLIENT_SECRET", cfg.API.Auth.OAuth.GitHub.ClientSecret)
-		appconfig.SetEnvIfEmpty("GITHUB_REDIRECT_URL", cfg.API.Auth.OAuth.GitHub.RedirectURL)
-		if cfg.API.Limits.SubmitBodyMaxBytes > 0 {
-			appconfig.SetEnvIfEmpty("SUBMIT_BODY_MAX_BYTES", fmt.Sprintf("%d", cfg.API.Limits.SubmitBodyMaxBytes))
-		}
-		if cfg.API.Limits.ProblemZipMaxBytes > 0 {
-			appconfig.SetEnvIfEmpty("PROBLEM_ZIP_MAX_BYTES", fmt.Sprintf("%d", cfg.API.Limits.ProblemZipMaxBytes))
-		}
-		if cfg.API.Limits.SubmitCodeMaxBytes > 0 {
-			appconfig.SetEnvIfEmpty("SUBMIT_CODE_MAX_BYTES", fmt.Sprintf("%d", cfg.API.Limits.SubmitCodeMaxBytes))
-		}
-		appconfig.SetEnvIfEmptyInt("SUBMIT_DEFAULT_TIME_LIMIT_MS", cfg.API.Limits.DefaultTimeLimitMs)
-		appconfig.SetEnvIfEmptyInt("SUBMIT_MAX_TIME_LIMIT_MS", cfg.API.Limits.MaxTimeLimitMs)
-		appconfig.SetEnvIfEmptyInt("SUBMIT_DEFAULT_MEMORY_LIMIT_KB", cfg.API.Limits.DefaultMemoryLimitKb)
-		appconfig.SetEnvIfEmptyInt("SUBMIT_MAX_MEMORY_LIMIT_KB", cfg.API.Limits.MaxMemoryLimitKb)
-		appconfig.SetEnvIfEmptyInt("SUBMIT_INFLIGHT_TTL_SEC", cfg.API.Limits.InflightTTLSec)
-		appconfig.SetEnvIfEmptyInt("RATE_LIMIT_IP_PER_WINDOW", cfg.API.Limits.RateLimit.IPLimit)
-		appconfig.SetEnvIfEmptyInt("RATE_LIMIT_USER_PER_WINDOW", cfg.API.Limits.RateLimit.UserLimit)
-		appconfig.SetEnvIfEmptyInt("RATE_LIMIT_WINDOW_SEC", cfg.API.Limits.RateLimit.WindowSec)
-		appconfig.SetEnvIfEmptyInt("PROBLEM_DEFAULT_TIME_LIMIT_MS", cfg.API.Limits.ProblemDefaults.TimeLimitMs)
-		appconfig.SetEnvIfEmptyInt("PROBLEM_DEFAULT_MEMORY_LIMIT_MB", cfg.API.Limits.ProblemDefaults.MemoryLimitMB)
-		appconfig.SetEnvIfEmptyInt("API_SHUTDOWN_TIMEOUT_SEC", cfg.API.ShutdownTimeoutSec)
-
-		appconfig.SetEnvIfEmpty("SERVICE_NAME", cfg.API.Metrics.ServiceName)
-		appconfig.SetEnvIfEmpty("INSTANCE_ID", cfg.API.Metrics.InstanceID)
-
-		appconfig.SetEnvIfEmpty("JOB_STREAM_KEY", cfg.API.Stream.StreamKey)
-		appconfig.SetEnvIfEmptyInt64("JOB_STREAM_MAXLEN", cfg.API.Stream.StreamMaxLen)
-		appconfig.SetEnvIfEmptyInt("JOB_PAYLOAD_TTL_SEC", cfg.API.Stream.JobPayloadTTLSec)
-	}
+	appconfig.ApplyRuntimeEnvForAPI(cfg)
 
 	// 1. 初始化配置 (从环境变量读取)
 	dbURL := os.Getenv("DATABASE_URL")

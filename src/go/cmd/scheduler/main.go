@@ -8,32 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/repository"
 	"github.com/d1guo/deep_oj/internal/scheduler"
 	"github.com/d1guo/deep_oj/pkg/observability"
-	"gopkg.in/yaml.v3"
 )
-
-type schedulerControlPlaneConfigFile struct {
-	Scheduler struct {
-		ControlPlane struct {
-			RepairEnabled    *bool  `yaml:"repair_enabled"`
-			RepairIntervalMs *int   `yaml:"repair_interval_ms"`
-			RepairBatchSize  *int   `yaml:"repair_batch_size"`
-			RepairMinAgeSec  *int   `yaml:"repair_min_age_sec"`
-			GCEnabled        *bool  `yaml:"gc_enabled"`
-			GCIntervalMs     *int   `yaml:"gc_interval_ms"`
-			StreamTrimMaxLen *int64 `yaml:"stream_trim_maxlen"`
-			DBRetentionDays  *int   `yaml:"db_retention_days"`
-			DBDeleteEnabled  *bool  `yaml:"db_delete_enabled"`
-			DBDeleteBatch    *int   `yaml:"db_delete_batch_size"`
-		} `yaml:"control_plane"`
-	} `yaml:"scheduler"`
-}
 
 func getEnvInt(key string, fallback int) int {
 	if value, ok := os.LookupEnv(key); ok {
@@ -42,58 +23,6 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
-}
-
-func setEnvIfEmptyBool(key string, value *bool) {
-	if value == nil {
-		return
-	}
-	appconfig.SetEnvIfEmpty(key, strconv.FormatBool(*value))
-}
-
-func setEnvIfEmptyIntPtr(key string, value *int) {
-	if value == nil {
-		return
-	}
-	appconfig.SetEnvIfEmpty(key, strconv.Itoa(*value))
-}
-
-func setEnvIfEmptyInt64Ptr(key string, value *int64) {
-	if value == nil {
-		return
-	}
-	appconfig.SetEnvIfEmpty(key, strconv.FormatInt(*value, 10))
-}
-
-func applyControlPlaneDefaultsFromConfig(configPath string) {
-	if strings.TrimSpace(configPath) == "" {
-		return
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		slog.Warn("读取配置文件失败，跳过 scheduler.control_plane 默认值回填", "path", configPath, "error", err)
-		return
-	}
-
-	var cfg schedulerControlPlaneConfigFile
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		slog.Warn("解析配置文件失败，跳过 scheduler.control_plane 默认值回填", "path", configPath, "error", err)
-		return
-	}
-
-	cp := cfg.Scheduler.ControlPlane
-	setEnvIfEmptyBool("SCHEDULER_REPAIR_ENABLED", cp.RepairEnabled)
-	setEnvIfEmptyIntPtr("SCHEDULER_REPAIR_INTERVAL_MS", cp.RepairIntervalMs)
-	setEnvIfEmptyIntPtr("SCHEDULER_REPAIR_BATCH_SIZE", cp.RepairBatchSize)
-	setEnvIfEmptyIntPtr("SCHEDULER_REPAIR_MIN_AGE_SEC", cp.RepairMinAgeSec)
-
-	setEnvIfEmptyBool("SCHEDULER_GC_ENABLED", cp.GCEnabled)
-	setEnvIfEmptyIntPtr("SCHEDULER_GC_INTERVAL_MS", cp.GCIntervalMs)
-	setEnvIfEmptyInt64Ptr("SCHEDULER_STREAM_TRIM_MAXLEN", cp.StreamTrimMaxLen)
-	setEnvIfEmptyIntPtr("SCHEDULER_DB_RETENTION_DAYS", cp.DBRetentionDays)
-	setEnvIfEmptyBool("SCHEDULER_DB_DELETE_ENABLED", cp.DBDeleteEnabled)
-	setEnvIfEmptyIntPtr("SCHEDULER_DB_DELETE_BATCH_SIZE", cp.DBDeleteBatch)
 }
 
 func main() {
@@ -105,28 +34,7 @@ func main() {
 	if cfgPath != "" {
 		slog.Info("已加载配置", "path", cfgPath)
 	}
-	if cfg != nil {
-		appconfig.SetEnvIfEmptyInt("REDIS_POOL_SIZE", cfg.Redis.PoolSize)
-		appconfig.SetEnvIfEmptyInt("REDIS_MIN_IDLE_CONNS", cfg.Redis.MinIdleConns)
-		appconfig.SetEnvIfEmptyInt("REDIS_DIAL_TIMEOUT_MS", cfg.Redis.DialTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_READ_TIMEOUT_MS", cfg.Redis.ReadTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("REDIS_WRITE_TIMEOUT_MS", cfg.Redis.WriteTimeoutMs)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONNS", cfg.Postgres.MaxConns)
-		appconfig.SetEnvIfEmptyInt("PG_MIN_CONNS", cfg.Postgres.MinConns)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_LIFETIME_MIN", cfg.Postgres.MaxConnLifetimeMin)
-		appconfig.SetEnvIfEmptyInt("PG_MAX_CONN_IDLE_MIN", cfg.Postgres.MaxConnIdleMin)
-
-		appconfig.SetEnvIfEmpty("REDIS_URL", cfg.Scheduler.RedisURL)
-		appconfig.SetEnvIfEmpty("DATABASE_URL", cfg.Scheduler.DatabaseURL)
-		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_PORT", cfg.Scheduler.MetricsPort)
-		appconfig.SetEnvIfEmptyInt("SCHEDULER_METRICS_POLL_INTERVAL_MS", cfg.Scheduler.MetricsPollMs)
-		appconfig.SetEnvIfEmpty("SERVICE_NAME", cfg.Scheduler.Metrics.ServiceName)
-		appconfig.SetEnvIfEmpty("INSTANCE_ID", cfg.Scheduler.Metrics.InstanceID)
-		appconfig.SetEnvIfEmpty("JOB_STREAM_KEY", cfg.API.Stream.StreamKey)
-		appconfig.SetEnvIfEmptyInt64("JOB_STREAM_MAXLEN", cfg.API.Stream.StreamMaxLen)
-		appconfig.SetEnvIfEmptyInt("JOB_PAYLOAD_TTL_SEC", cfg.API.Stream.JobPayloadTTLSec)
-	}
-	applyControlPlaneDefaultsFromConfig(cfgPath)
+	appconfig.ApplyRuntimeEnvForScheduler(cfg)
 
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
@@ -176,6 +84,7 @@ func main() {
 	defer dbPool.Close()
 
 	controlPlaneCfg := scheduler.LoadControlPlaneConfig()
+	schedulerID := os.Getenv("SCHEDULER_ID")
 
 	scheduler.SetControlPlaneOnly(true)
 	scheduler.SetLegacyLoopsStarted(0)
@@ -188,6 +97,7 @@ func main() {
 
 	slog.Info(
 		"scheduler 控制面已启动",
+		"scheduler_id", schedulerID,
 		"dispatch_mode", controlPlaneCfg.DispatchMode,
 		"control_plane_only", true,
 		"legacy_loops_started", 0,

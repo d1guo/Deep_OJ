@@ -242,7 +242,7 @@ done
 | Judge 出现 OOM/MLE 异常增多 | 代码内存占用过大、内存限制过低、容器内存紧张 | `docker compose logs --tail=300 worker | rg -i "Memory Limit|OOM|killed"` | 调整内存上限，检查宿主机内存，限制异常任务并重试 |
 | 出现僵尸进程或残留判题进程 | kill/cleanup 未完整执行、worker 异常中断 | `docker exec -it oj-worker ps -eo pid,ppid,stat,cmd | rg "judge_engine| Z "` | 重启 worker 清理现场；后续按任务 G1/G2 加强进程组 kill 与幂等清理 |
 | stdout/stderr 大输出导致任务卡死 | 子进程输出过大导致 pipe 满；或 drain/截断异常 | `docker compose logs --tail=400 worker | rg -i "truncated_stdout|truncated_stderr|pipe|timeout|Wait"` | 检查日志字段 `truncated_stdout/truncated_stderr` 与 `stdout_len/stderr_len`；必要时调整 `JUDGE_STDOUT_LIMIT_BYTES`/`JUDGE_STDERR_LIMIT_BYTES` |
-| cgroup 清理失败或权限报错 | 宿主机未启用 cgroup v2、挂载权限不足 | `docker compose logs --tail=300 worker | rg -i "cgroup|permission|cleanup"`; `test -f /sys/fs/cgroup/cgroup.controllers && echo ok` | 启用 cgroup v2，保留 compose 中 `/sys/fs/cgroup` 挂载与必要 capabilities |
+| cgroup 清理失败或权限报错 | 宿主机未启用 cgroup v2、挂载权限不足 | `docker compose logs --tail=300 worker | rg -i "cgroup|permission|cleanup"`; `test -f /sys/fs/cgroup/unified/cgroup.controllers || test -f /sys/fs/cgroup/cgroup.controllers` | 启用 cgroup v2，保留 compose 中 `/sys/fs/cgroup` 挂载与必要 capabilities |
 | metrics 维度爆炸（高基数） | 错误新增了 `job_id` 等高基数 label | `cd src/go && go test ./internal/survey -v`; `rg -n '"job_id"' src/go/internal/*/metrics.go` | 移除高基数 label，仅保留低基数字段；用日志追 job，不在 metrics 打 `job_id` |
 | 时钟漂移导致超时/重试判断异常 | 宿主机或容器时间不同步 | `date -u`; `docker exec -it oj-api date -u`; `docker exec -it oj-worker date -u` | 统一 NTP，同步宿主机时间，避免跨节点时间偏差 |
 | 磁盘写爆（workspace/日志膨胀） | `data/workspace`、日志、Docker 卷膨胀 | `df -h`; `du -sh data/workspace`; `docker system df` | 清理历史工作目录和无用镜像卷，设置日志轮转与容量阈值 |
@@ -488,7 +488,7 @@ bash scripts/repo_survey_probe.sh
 
 运行前提检查（建议）：
 
-- 宿主机启用 cgroup v2
+- 宿主机启用 cgroup v2（统一层级或 hybrid，容器内可见 `cgroup.controllers`）
 - 最小化容器权限（当前为可运行优先，仍有收敛空间）
 - 明确生产环境 secrets 管理（`JWT_SECRET`、`REDIS_PASSWORD`、`POSTGRES_PASSWORD`、`MINIO_*`）
 
