@@ -87,6 +87,23 @@ docker compose up -d --build
 docker compose ps
 ```
 
+### 启用观测栈（Prometheus + Grafana）
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+
+# Prometheus
+curl -fsS http://127.0.0.1:19090/-/ready
+
+# Grafana
+curl -fsS http://127.0.0.1:13000/api/health
+```
+
+说明：
+- Grafana 默认账号：`admin` / `admin`
+- API `/metrics` 在 Docker 配置下启用 token 鉴权，默认 token：`deepoj_metrics_token_dev`
+- Prometheus 已内置抓取 `api/scheduler/worker` 三类目标
+
 ## 验收脚本
 
 ### 架构收敛验证

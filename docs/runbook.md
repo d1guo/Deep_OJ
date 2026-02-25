@@ -25,3 +25,22 @@
 2. Docker 挂载 `/sys/fs/cgroup`（hybrid 模式下确认容器内可见 `/sys/fs/cgroup/unified`）
 3. 容器内检查：`test -f /sys/fs/cgroup/unified/cgroup.controllers || test -f /sys/fs/cgroup/cgroup.controllers`
 4. Worker 设置 `REQUIRE_CGROUPS_V2=1`
+
+## 6. Prometheus/Grafana 观测栈
+1. 启动：
+   `docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build`
+2. 健康检查：
+   `curl -fsS http://127.0.0.1:19090/-/ready`
+   `curl -fsS http://127.0.0.1:13000/api/health`
+3. 抓取状态：
+   `curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,health:.health,lastError:.lastError}'`
+4. API 指标鉴权：
+   `curl -sS -H "Authorization: Bearer deepoj_metrics_token_dev" http://127.0.0.1:18080/metrics | head`
+
+## 7. 观测常见故障
+1. Prometheus `api` 目标 `DOWN`：
+   检查 `config.docker.yaml` 的 `metrics_token` 与 `docker/observability/prometheus/prometheus.yml` Bearer token 是否一致。
+2. Grafana 无数据：
+   检查 `http://127.0.0.1:13000/api/health`、`http://127.0.0.1:19090/-/ready`，以及数据源是否为 `Prometheus`。
+3. 端口冲突：
+   默认使用 `19090`（Prometheus）和 `13000`（Grafana）。

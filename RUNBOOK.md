@@ -21,6 +21,14 @@ docker compose ps
 python3 tests/integration/test_e2e.py
 ```
 
+如需同时拉起观测栈：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+curl -fsS http://127.0.0.1:19090/-/ready
+curl -fsS http://127.0.0.1:13000/api/health
+```
+
 预期：
 
 - `docker compose ps` 中 `api/scheduler/worker/redis/postgres/minio` 为 `Up`
@@ -131,12 +139,13 @@ cd /home/diguo/Deep_OJ/src/go && go test ./internal/worker -run TestJudgeSelfTes
 | Redis | `oj-redis` | `6379` | 无映射 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" PING` |
 | PostgreSQL | `oj-postgres` | `5432` | 无映射 | `docker exec -it oj-postgres pg_isready -U deep_oj -d deep_oj` |
 | MinIO | `oj-minio` | `9000`,`9001` | 无映射 | `docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -fsS http://oj-minio:9000/minio/health/live` |
-| Prometheus（外部） | N/A | 默认 `9090` | 视部署而定 | 本仓库未内置服务；外部 Prometheus 抓取 API/Scheduler/Worker metrics |
+| Prometheus | `oj-prometheus` | `9090` | `19090` | `curl -fsS http://127.0.0.1:19090/-/ready` |
+| Grafana | `oj-grafana` | `3000` | `13000` | `curl -fsS http://127.0.0.1:13000/api/health` |
 
 备注：
 
 - 当前 `docker-compose.yml` 未暴露 `scheduler:9091`、`worker:9092` 到宿主机；主机侧排查建议通过 `docker compose logs` 或同网络临时容器访问。
-- API `/metrics` 默认仅允许 loopback 访问（若未配置 `METRICS_TOKEN`）。
+- API `/metrics` 在 Docker 配置里默认启用 token 鉴权，`METRICS_TOKEN=deepoj_metrics_token_dev`。
 
 ## 3. 端到端验收（提交 -> 执行 -> 查询结果）
 
@@ -244,6 +253,8 @@ done
 | stdout/stderr 大输出导致任务卡死 | 子进程输出过大导致 pipe 满；或 drain/截断异常 | `docker compose logs --tail=400 worker | rg -i "truncated_stdout|truncated_stderr|pipe|timeout|Wait"` | 检查日志字段 `truncated_stdout/truncated_stderr` 与 `stdout_len/stderr_len`；必要时调整 `JUDGE_STDOUT_LIMIT_BYTES`/`JUDGE_STDERR_LIMIT_BYTES` |
 | cgroup 清理失败或权限报错 | 宿主机未启用 cgroup v2、挂载权限不足 | `docker compose logs --tail=300 worker | rg -i "cgroup|permission|cleanup"`; `test -f /sys/fs/cgroup/unified/cgroup.controllers || test -f /sys/fs/cgroup/cgroup.controllers` | 启用 cgroup v2，保留 compose 中 `/sys/fs/cgroup` 挂载与必要 capabilities |
 | metrics 维度爆炸（高基数） | 错误新增了 `job_id` 等高基数 label | `cd src/go && go test ./internal/survey -v`; `rg -n '"job_id"' src/go/internal/*/metrics.go` | 移除高基数 label，仅保留低基数字段；用日志追 job，不在 metrics 打 `job_id` |
+| Prometheus target 显示 `DOWN` | 服务未启动、token 不匹配、网络名错误 | `curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,health:.health,lastError:.lastError}'`; `docker compose logs --tail=200 prometheus api scheduler worker` | 先确认 `api/scheduler/worker` 容器为 Up；核对 `config.docker.yaml` 的 `metrics_token` 与 `prometheus.yml` Bearer token 一致；确认 compose 网络为 `deep-oj-net` |
+| Grafana 面板无数据 | 数据源未加载或 Prometheus 不可达 | `curl -sS -u admin:admin http://127.0.0.1:13000/api/datasources/name/Prometheus`; `curl -sS -u admin:admin http://127.0.0.1:13000/api/search?query=Deep-OJ`; `curl -fsS http://127.0.0.1:19090/-/ready` | 确认 provisioning 文件挂载路径正确；重启 `grafana/prometheus`；检查 13000/19090 端口冲突 |
 | 时钟漂移导致超时/重试判断异常 | 宿主机或容器时间不同步 | `date -u`; `docker exec -it oj-api date -u`; `docker exec -it oj-worker date -u` | 统一 NTP，同步宿主机时间，避免跨节点时间偏差 |
 | 磁盘写爆（workspace/日志膨胀） | `data/workspace`、日志、Docker 卷膨胀 | `df -h`; `du -sh data/workspace`; `docker system df` | 清理历史工作目录和无用镜像卷，设置日志轮转与容量阈值 |
 | MinIO 拉取失败（Worker 下载 testcase 失败） | MinIO 不可达、凭证错误、对象缺失 | `docker compose logs --tail=300 worker | rg -i "minio|download|Prepare testcases failed"`; `docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -fsS http://oj-minio:9000/minio/health/live` | 校验 `MINIO_*` 环境变量、确认对象存在、恢复 MinIO 后重试任务 |
@@ -395,13 +406,30 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KE
 
 ### 5.1 指标入口
 
-- API：`http://127.0.0.1:18080/metrics`（默认仅 loopback 可访问）
+- API：`http://127.0.0.1:18080/metrics`（需要 `Authorization: Bearer deepoj_metrics_token_dev`）
 - Scheduler：容器内 `:9091/metrics`（compose 未映射宿主机）
 - Worker：容器内 `:9092/metrics`（compose 未映射宿主机）
+- Prometheus：`http://127.0.0.1:19090`
+- Grafana：`http://127.0.0.1:13000`（默认账号 `admin/admin`）
+
+观测栈启动命令：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d --build
+```
+
+快速自检：
+
+```bash
+curl -fsS http://127.0.0.1:19090/-/ready
+curl -fsS http://127.0.0.1:13000/api/health
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,health:.health,lastError:.lastError}'
+```
 
 容器网络内抓取示例：
 
 ```bash
+curl -sS -H "Authorization: Bearer deepoj_metrics_token_dev" http://127.0.0.1:18080/metrics | head
 docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-scheduler:9091/metrics | head
 docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker:9092/metrics | head
 ```
@@ -465,6 +493,7 @@ bash scripts/repo_survey_probe.sh
 - `API_METRICS_URL`（默认 `http://localhost:8080/metrics`）
 - `SCHEDULER_METRICS_URL`（默认 `http://localhost:9091/metrics`）
 - `WORKER_METRICS_URL`（默认 `http://localhost:9092/metrics`）
+- `METRICS_TOKEN`（默认 `deepoj_metrics_token_dev`）
 
 ### 6.2 输出解释
 
@@ -476,7 +505,7 @@ bash scripts/repo_survey_probe.sh
 
 - Redis 失败：优先检查 URL/密码、容器网络与 `redis-cli` 连通性
 - DB 失败：校验 `DATABASE_URL` 用户密码与数据库名
-- Metrics 失败：确认目标端口是否已暴露；未暴露时改用容器网络内探测
+- Metrics 失败：确认目标端口是否已暴露；API 指标确认 Bearer token；未暴露时改用容器网络内探测
 
 ## 7. 安全与运行边界（简版）
 
