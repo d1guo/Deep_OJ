@@ -6,6 +6,7 @@ DATABASE_URL="${DATABASE_URL:-postgres://postgres:postgres@localhost:5432/deepoj
 API_METRICS_URL="${API_METRICS_URL:-http://localhost:8080/metrics}"
 SCHEDULER_METRICS_URL="${SCHEDULER_METRICS_URL:-http://localhost:9091/metrics}"
 WORKER_METRICS_URL="${WORKER_METRICS_URL:-http://localhost:9092/metrics}"
+METRICS_TOKEN="${METRICS_TOKEN:-deepoj_metrics_token_dev}"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,7 @@ Environment:
   API_METRICS_URL        (default http://localhost:8080/metrics)
   SCHEDULER_METRICS_URL  (default http://localhost:9091/metrics)
   WORKER_METRICS_URL     (default http://localhost:9092/metrics)
+  METRICS_TOKEN          (default deepoj_metrics_token_dev)
 EOF
 }
 
@@ -64,7 +66,7 @@ fi
 
 echo "[3/3] Metrics endpoint smoke check"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS "${API_METRICS_URL}" | filter_stream "http_requests_total|submission_total" || true
+  curl -fsS -H "Authorization: Bearer ${METRICS_TOKEN}" "${API_METRICS_URL}" | filter_stream "http_requests_total|submission_total" || true
   curl -fsS "${SCHEDULER_METRICS_URL}" | filter_stream "scheduler_active_workers|control_plane_only" || true
   curl -fsS "${WORKER_METRICS_URL}" | filter_stream "worker_task_total|worker_task_duration_seconds" || true
 else

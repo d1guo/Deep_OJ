@@ -160,7 +160,7 @@ api:
   cors_allowed_origins:
     - "http://localhost:18080"
   # /metrics 访问令牌；为空时仅允许 loopback。
-  metrics_token: ""
+  metrics_token: "deepoj_metrics_token_dev"
   timeouts:
     # 读请求头超时（秒）。
     read_header_sec: 5

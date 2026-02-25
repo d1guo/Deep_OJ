@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Deep-OJ
+    orgId: 1
+    folder: Deep-OJ
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

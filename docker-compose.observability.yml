@@ -1,0 +1,40 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: oj-prometheus
+    restart: unless-stopped
+    ports:
+      - "19090:9090"
+    volumes:
+      - ./docker/observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+      - scheduler
+      - worker
+    networks:
+      - deep-oj-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oj-grafana
+    restart: unless-stopped
+    ports:
+      - "13000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - deep-oj-net
+
+volumes:
+  prometheus-data:
+  grafana-data:

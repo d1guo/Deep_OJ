@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["oj-api:18080"]
+    authorization:
+      type: Bearer
+      credentials: deepoj_metrics_token_dev
+
+  - job_name: scheduler
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["oj-scheduler:9091"]
+
+  - job_name: worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["oj-worker:9092"]

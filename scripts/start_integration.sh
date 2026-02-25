@@ -5,6 +5,7 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
+METRICS_TOKEN="${METRICS_TOKEN:-deepoj_metrics_token_dev}"
 
 cleanup() {
     echo -e "\n${RED}停止服务中...${NC}"
@@ -139,7 +140,7 @@ if [ $EXIT_CODE -eq 0 ]; then
     sleep 2
     echo -e "\n${GREEN}验证监控指标...${NC}"
     echo "--- API 指标 (:8080) ---"
-    curl -s http://localhost:8080/metrics | grep "http_requests_total" | head -n 5
+    curl -s -H "Authorization: Bearer ${METRICS_TOKEN}" http://localhost:8080/metrics | grep "http_requests_total" | head -n 5
     
     echo -e "\n--- 调度器指标 (:9091) ---"
     curl -s http://localhost:9091/metrics | grep "scheduler_active_workers"

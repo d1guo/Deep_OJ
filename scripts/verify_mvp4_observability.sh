@@ -19,6 +19,7 @@ API_BACKPRESSURE_OLDEST_AGE_CRIT_MS="${API_BACKPRESSURE_OLDEST_AGE_CRIT_MS:-8640
 API_BACKPRESSURE_OLDEST_AGE_WARN_MS="${API_BACKPRESSURE_OLDEST_AGE_WARN_MS:-43200000}"
 API_MINIO_ENDPOINT="${API_MINIO_ENDPOINT:-http://oj-minio:9000}"
 WORKER_MINIO_ENDPOINT="${WORKER_MINIO_ENDPOINT:-oj-minio:9000}"
+METRICS_TOKEN="${METRICS_TOKEN:-deepoj_metrics_token_dev}"
 
 COMPOSE_BUILD="${COMPOSE_BUILD:-0}"
 RUNTIME_OVERRIDE="${RUNTIME_OVERRIDE:-1}"
@@ -366,10 +367,11 @@ fetch_metrics_from_container() {
   local container="$1"
   local port="$2"
   local out_file="$3"
+  local auth_token="${4:-}"
   local raw_file="$TMP_DIR/metrics_raw_${container}_${port}.txt"
   local err_file="$TMP_DIR/metrics_err_${container}_${port}.txt"
 
-  if ! docker exec "$container" bash -lc "set -euo pipefail; exec 3<>/dev/tcp/127.0.0.1/${port}; printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3; cat <&3" >"$raw_file" 2>"$err_file"; then
+  if ! docker exec -e METRICS_TOKEN="$auth_token" "$container" bash -lc "set -euo pipefail; exec 3<>/dev/tcp/127.0.0.1/${port}; printf 'GET /metrics HTTP/1.1\r\nHost: localhost\r\n' >&3; if [[ -n \"\${METRICS_TOKEN:-}\" ]]; then printf 'Authorization: Bearer %s\r\n' \"\$METRICS_TOKEN\" >&3; fi; printf 'Connection: close\r\n\r\n' >&3; cat <&3" >"$raw_file" 2>"$err_file"; then
     return 1
   fi
 
@@ -488,10 +490,10 @@ METRICS_OK_COUNT=0
 METRICS_COMPONENTS=""
 
 API_CONTAINER="$(find_container_by_service api)"
-if [[ -n "$API_CONTAINER" ]] && fetch_metrics_from_container "$API_CONTAINER" "18080" "$API_METRICS"; then
+if [[ -n "$API_CONTAINER" ]] && fetch_metrics_from_container "$API_CONTAINER" "18080" "$API_METRICS" "$METRICS_TOKEN"; then
   METRICS_OK_COUNT=$((METRICS_OK_COUNT + 1))
   METRICS_COMPONENTS="${METRICS_COMPONENTS}api "
-elif curl -sS "$API_BASE/metrics" -o "$API_METRICS"; then
+elif curl -sS -H "Authorization: Bearer $METRICS_TOKEN" "$API_BASE/metrics" -o "$API_METRICS"; then
   METRICS_OK_COUNT=$((METRICS_OK_COUNT + 1))
   METRICS_COMPONENTS="${METRICS_COMPONENTS}api "
 else
