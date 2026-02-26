@@ -230,7 +230,7 @@ func enqueueRepairedJob(ctx context.Context, cfg ControlPlaneConfig, redisClient
 		return errRepairMarshal
 	}
 
-	payloadRef := common.TaskPayloadPrefix + candidate.JobID
+	payloadRef := common.NamespacedRedisKey(common.TaskPayloadPrefix + candidate.JobID)
 	payloadTTL := time.Duration(cfg.JobPayloadTTLSec) * time.Second
 	if payloadTTL <= 0 {
 		payloadTTL = time.Duration(defaultJobPayloadTTLSec) * time.Second
@@ -240,7 +240,7 @@ func enqueueRepairedJob(ctx context.Context, cfg ControlPlaneConfig, redisClient
 	}
 
 	xaddArgs := &redis.XAddArgs{
-		Stream: cfg.JobStreamKey,
+		Stream: common.NamespacedRedisKey(cfg.JobStreamKey),
 		Values: map[string]interface{}{
 			"job_id":      candidate.JobID,
 			"enqueue_ts":  time.Now().UnixMilli(),

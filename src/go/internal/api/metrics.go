@@ -193,6 +193,8 @@ func init() {
 	submitTotal.WithLabelValues("error")
 	submit429Total.WithLabelValues("rate_limit")
 	submit429Total.WithLabelValues("backpressure")
+	submit429Total.WithLabelValues("inflight_cap")
+	apiBackpressureRejectTotal.WithLabelValues("inflight_cap")
 	requestDurationSeconds.WithLabelValues("unknown", "2xx")
 }
 

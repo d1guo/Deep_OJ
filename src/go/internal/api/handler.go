@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog" // [New] Structured Logging
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/d1guo/deep_oj/internal/model"
@@ -57,13 +58,58 @@ type rateLimitConfig struct {
 	window    time.Duration
 }
 
-func getRateLimitConfig() rateLimitConfig {
+func getLegacyRateLimitConfig() rateLimitConfig {
 	windowSec := getEnvInt("RATE_LIMIT_WINDOW_SEC", 60)
 	return rateLimitConfig{
 		ipLimit:   getEnvInt("RATE_LIMIT_IP_PER_WINDOW", 60),
 		userLimit: getEnvInt("RATE_LIMIT_USER_PER_WINDOW", 120),
 		window:    time.Duration(windowSec) * time.Second,
 	}
+}
+
+func getAuthRateLimitConfig() rateLimitConfig {
+	legacy := getLegacyRateLimitConfig()
+	windowSec := getEnvInt("AUTH_RATE_LIMIT_WINDOW_SEC", int(legacy.window/time.Second))
+	return normalizeRateLimitConfig(rateLimitConfig{
+		ipLimit:   getEnvInt("AUTH_RATE_LIMIT_IP_PER_WINDOW", legacy.ipLimit),
+		userLimit: getEnvInt("AUTH_RATE_LIMIT_USER_PER_WINDOW", legacy.userLimit),
+		window:    time.Duration(windowSec) * time.Second,
+	}, legacy)
+}
+
+func getSubmitRateLimitConfig() rateLimitConfig {
+	legacy := getLegacyRateLimitConfig()
+	windowSec := getEnvInt("SUBMIT_RATE_LIMIT_WINDOW_SEC", int(legacy.window/time.Second))
+	return normalizeRateLimitConfig(rateLimitConfig{
+		ipLimit:   getEnvInt("SUBMIT_RATE_LIMIT_IP_PER_WINDOW", legacy.ipLimit),
+		userLimit: getEnvInt("SUBMIT_RATE_LIMIT_USER_PER_WINDOW", legacy.userLimit),
+		window:    time.Duration(windowSec) * time.Second,
+	}, legacy)
+}
+
+func normalizeRateLimitConfig(cfg, fallback rateLimitConfig) rateLimitConfig {
+	out := cfg
+	if out.ipLimit <= 0 {
+		out.ipLimit = fallback.ipLimit
+	}
+	if out.userLimit <= 0 {
+		out.userLimit = fallback.userLimit
+	}
+	if out.window <= 0 {
+		out.window = fallback.window
+	}
+	return out
+}
+
+func getSubmitMaxInflight() int {
+	v := getEnvInt("SUBMIT_MAX_INFLIGHT", 0)
+	if v > 0 {
+		return v
+	}
+	if strings.EqualFold(strings.TrimSpace(getEnvString("REDIS_KEY_ENV", "")), "dev") {
+		return 5000
+	}
+	return 500
 }
 
 // SubmitResponse 提交响应结构
@@ -74,14 +120,13 @@ type SubmitResponse struct {
 }
 
 // RateLimit 限流 (简单固定窗口)
-func (h *Handler) checkRateLimit(ctx *gin.Context, ip string, userID int) bool {
+func (h *Handler) checkRateLimit(ctx *gin.Context, scope, ip string, userID int, cfg rateLimitConfig) bool {
 	// 简化版限流: IP + 用户双维度固定窗口
-	cfg := getRateLimitConfig()
-	if !h.consumeRateLimit(ctx, "rate_limit:ip:"+ip, cfg.ipLimit, cfg.window) {
+	if !h.consumeRateLimit(ctx, common.NamespacedRedisKey("rate_limit:"+scope+":ip:"+ip), cfg.ipLimit, cfg.window) {
 		return false
 	}
 	if userID > 0 {
-		if !h.consumeRateLimit(ctx, fmt.Sprintf("rate_limit:user:%d", userID), cfg.userLimit, cfg.window) {
+		if !h.consumeRateLimit(ctx, common.NamespacedRedisKey(fmt.Sprintf("rate_limit:%s:user:%d", scope, userID)), cfg.userLimit, cfg.window) {
 			return false
 		}
 	}
@@ -118,9 +163,10 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 	if uid, exists := c.Get("user_id"); exists {
 		userID = int(uid.(int64))
 	}
-	if !h.checkRateLimit(c, c.ClientIP(), userID) {
+	if !h.checkRateLimit(c, "submit", c.ClientIP(), userID, getSubmitRateLimitConfig()) {
 		logger.Warn("访问频率超限")
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁", "code": "RATE_LIMITED"})
+		submit429Total.WithLabelValues("rate_limit").Inc()
 		RequestTotal.WithLabelValues(method, path, "429").Inc()
 		return
 	}
@@ -186,7 +232,8 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 		}
 		testcaseHash = problem.TestcaseHash
 	}
-	cacheKey := generateCacheKey(req.Code, req.Language, req.TimeLimit, req.MemoryLimit, req.ProblemID, testcaseHash)
+	rawCacheKey := generateCacheKey(req.Code, req.Language, req.TimeLimit, req.MemoryLimit, req.ProblemID, testcaseHash)
+	cacheKey := common.NamespacedRedisKey(rawCacheKey)
 
 	// 2. 检查缓存 (Cache Aside 模式 - 读)
 	cached, err := h.redis.Get(ctx, cacheKey)
@@ -240,12 +287,28 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 
 	}
 
+	// 2.5 submit inflight cap: 防止提交面无限扩张（与 stream lag/backlog 无关）
+	submitMaxInflight := getSubmitMaxInflight()
+	if submitMaxInflight > 0 {
+		active, err := h.db.CountActiveSubmissions(ctx)
+		if err != nil {
+			logger.Warn("读取活跃提交数失败，跳过 inflight_cap 限制", "error", err)
+		} else if active >= int64(submitMaxInflight) {
+			logger.Warn("触发 submit inflight_cap 拒绝", "active", active, "submit_max_inflight", submitMaxInflight)
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "系统繁忙，请稍后重试", "code": "INFLIGHT_CAP_REACHED"})
+			submit429Total.WithLabelValues("inflight_cap").Inc()
+			apiBackpressureRejectTotal.WithLabelValues("inflight_cap").Inc()
+			RequestTotal.WithLabelValues(method, path, "429").Inc()
+			return
+		}
+	}
+
 	// 3. 生成 Job ID (UUID v4)
 	jobID := uuid.New().String()
 	logger = logger.With("job_id", jobID) // 将 job_id 注入日志上下文
 
 	// 去重：相同 cache_key 已在处理中，直接返回已有 job_id
-	inflightKey := common.InFlightKeyPrefix + cacheKey
+	inflightKey := common.NamespacedRedisKey(common.InFlightKeyPrefix + rawCacheKey)
 	inflightTTLSec := getEnvInt("SUBMIT_INFLIGHT_TTL_SEC", 600)
 	if ok, err := h.redis.SetNX(ctx, inflightKey, jobID, time.Duration(inflightTTLSec)*time.Second); err != nil {
 		logger.Warn("Inflight SetNX failed", "error", err)
@@ -304,7 +367,7 @@ func (h *Handler) HandleSubmit(c *gin.Context) {
 
 	outboxEnabled := getEnvBool("OUTBOX_ENABLED", true)
 	if outboxEnabled {
-		streamKey := getEnvString("JOB_STREAM_KEY", defaultJobStreamKey)
+		streamKey := common.NamespacedRedisKey(getEnvString("JOB_STREAM_KEY", defaultJobStreamKey))
 		outboxEvent := &repository.OutboxEvent{
 			EventType: repository.OutboxEventTypeSubmissionEnqueue,
 			JobID:     jobID,
@@ -413,8 +476,15 @@ func (h *Handler) HandleStatus(c *gin.Context) {
 	}
 
 	// 2. 再查 Redis 缓存 (热点数据)
-	resultKey := common.ResultKeyPrefix + jobID
+	legacyResultKey := common.ResultKeyPrefix + jobID
+	resultKey := common.NamespacedRedisKey(legacyResultKey)
 	result, err := h.redis.Get(ctx, resultKey)
+	if (err != nil || strings.TrimSpace(result) == "") && resultKey != legacyResultKey {
+		if legacyResult, legacyErr := h.redis.Get(ctx, legacyResultKey); legacyErr == nil && strings.TrimSpace(legacyResult) != "" {
+			result = legacyResult
+			err = nil
+		}
+	}
 	if err == nil && result != "" {
 		var data map[string]interface{}
 		if err := json.Unmarshal([]byte(result), &data); err != nil {

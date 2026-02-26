@@ -1,4 +1,2 @@
 services:
-  worker:
-    security_opt:
-      - seccomp=unconfined
+  worker: {}

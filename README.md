@@ -104,6 +104,14 @@ curl -fsS http://127.0.0.1:13000/api/health
 - API `/metrics` 在 Docker 配置下启用 token 鉴权，默认 token：`deepoj_metrics_token_dev`
 - Prometheus 已内置抓取 `api/scheduler/worker` 三类目标
 
+## 观测口径（固定）
+
+- `submit QPS`：API 入队成功速率（`/submit` 返回 200 的速率）。
+- `Jobs/s`：任务端到端完成速率（worker 执行并最终完成）。
+- `E2E P95/P99`：提交到最终完成的端到端时延分位数。
+
+说明：`submit QPS` 与 `Jobs/s` 不等价；前者是入口吞吐，后者是处理吞吐。
+
 ## 验收脚本
 
 ### 架构收敛验证
@@ -142,6 +150,12 @@ bash scripts/verify_worker_process_cleanup.sh
 | `db_delete_batch_size` | `500` | DB 删除批大小 |
 
 说明：默认配置下 repair/gc 处于关闭状态，避免误操作。
+
+## Redis Key 命名空间
+
+- 统一命名空间：`<key_prefix>[:<key_env>]`，默认 `deepoj`。
+- Docker 本地默认：`deepoj:dev`；生产配置默认：`deepoj:prod`。
+- 业务 key 统一写入该命名空间，避免 dev/prod 共用 Redis 时互相污染。
 
 ## 目录说明（核心）
 

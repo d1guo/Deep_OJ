@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/d1guo/deep_oj/pkg/common"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -70,7 +71,8 @@ func TestEnqueueJobToStream_XAddFailureDeletesPayload(t *testing.T) {
 	if len(client.delKeys) != 1 {
 		t.Fatalf("expected one rollback key, got %d", len(client.delKeys))
 	}
-	if client.delKeys[0] != "task:payload:job-1" {
+	expectedPayloadKey := common.NamespacedRedisKey("task:payload:job-1")
+	if client.delKeys[0] != expectedPayloadKey {
 		t.Fatalf("unexpected rollback key: %s", client.delKeys[0])
 	}
 }
@@ -96,8 +98,9 @@ func TestEnqueueJobToStreamOrReply5xx_XAddFailure(t *testing.T) {
 	}
 	seenPayloadRollback := false
 	seenInflightCleanup := false
+	expectedPayloadKey := common.NamespacedRedisKey("task:payload:job-2")
 	for _, k := range client.delKeys {
-		if k == "task:payload:job-2" {
+		if k == expectedPayloadKey {
 			seenPayloadRollback = true
 		}
 		if k == "inflight:key" {
@@ -126,7 +129,8 @@ func TestEnqueueJobToStream_PayloadEnvelopeV1Fields(t *testing.T) {
 	if client.xaddCalls != 1 {
 		t.Fatalf("expected XAdd called once, got %d", client.xaddCalls)
 	}
-	if client.setKey != "task:payload:job-3" {
+	expectedPayloadKey := common.NamespacedRedisKey("task:payload:job-3")
+	if client.setKey != expectedPayloadKey {
 		t.Fatalf("unexpected payload key: %s", client.setKey)
 	}
 	if client.setTTL <= 0 {

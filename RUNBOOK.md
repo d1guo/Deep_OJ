@@ -58,7 +58,7 @@ bash scripts/verify_no_legacy_dataplane.sh
 
 scheduler 已收敛为纯控制面，只保留两类循环：
 
-- `RepairLoop`：扫描 DB 中需要补投递的任务并 `XADD` 到 `deepoj:jobs`
+- `RepairLoop`：扫描 DB 中需要补投递的任务并 `XADD` 到 `<redis_ns>:jobs`
 - `GcLoop`：执行 `XTRIM` 与 DB 清理计划/清理（默认 dry-run）
 
 验证命令：
@@ -245,8 +245,8 @@ done
 | --- | --- | --- | --- |
 | Redis 不可达，API 报 `QUEUE_ERROR` | `REDIS_PASSWORD` 不一致、Redis 容器未启动、网络不可达 | `docker compose ps redis`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" PING`; `docker compose logs --tail=200 api` | 统一 `REDIS_PASSWORD`，重启 `redis/api/scheduler/worker`，必要时 `docker compose up -d` |
 | DB 连接池耗尽，接口变慢/5xx | `PG_MAX_CONNS` 太小、长事务、慢 SQL | `docker compose logs --tail=300 api | rg -i "database|timeout|too many"`; `docker exec -it oj-postgres psql -U deep_oj -d deep_oj -c "select * from pg_stat_activity;"` | 增大 `PG_MAX_CONNS`，排查慢查询，缩短事务并重启 API |
-| Stream backlog 持续增长（`deepoj:jobs`） | Worker 消费异常、下游执行慢、Redis 压力高 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XLEN deepoj:jobs`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING deepoj:jobs deepoj:workers`; `docker compose logs --tail=200 worker` | 优先恢复 worker 消费能力，再按资源瓶颈扩容 worker 或限流 |
-| Worker 不消费任务 | Worker 启动失败、流消费组配置错误、DB/Redis 依赖异常 | `docker compose logs --tail=200 worker`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS deepoj:jobs` | 修复 `JOB_STREAM_*` 与依赖配置，确认消费组存在并可读写，重启 worker |
+| Stream backlog 持续增长（`<ns>:jobs`） | Worker 消费异常、下游执行慢、Redis 压力高 | `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XLEN "${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}:jobs"`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}:jobs" "${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}:workers"`; `docker compose logs --tail=200 worker` | 优先恢复 worker 消费能力，再按资源瓶颈扩容 worker 或限流 |
+| Worker 不消费任务 | Worker 启动失败、流消费组配置错误、DB/Redis 依赖异常 | `docker compose logs --tail=200 worker`; `docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}:jobs"` | 修复 `JOB_STREAM_*` 与依赖配置，确认消费组存在并可读写，重启 worker |
 | Judge 出现超时/TLE 异常增多 | 用户代码死循环、时间限制过低、机器负载过高 | `docker compose logs --tail=300 worker | rg -i "Time Limit|timed out|command timed out"` | 调整题目时限、检查资源压力、必要时横向扩容 worker |
 | Judge 出现 OOM/MLE 异常增多 | 代码内存占用过大、内存限制过低、容器内存紧张 | `docker compose logs --tail=300 worker | rg -i "Memory Limit|OOM|killed"` | 调整内存上限，检查宿主机内存，限制异常任务并重试 |
 | 出现僵尸进程或残留判题进程 | kill/cleanup 未完整执行、worker 异常中断 | `docker exec -it oj-worker ps -eo pid,ppid,stat,cmd | rg "judge_engine| Z "` | 重启 worker 清理现场；后续按任务 G1/G2 加强进程组 kill 与幂等清理 |
@@ -263,17 +263,18 @@ done
 ## 4.1 Redis Streams 验证（C1/C4）
 
 ```bash
-STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+REDIS_NS="${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}"
+STREAM_KEY="${JOB_STREAM_KEY:-${REDIS_NS}:jobs}"
 MAXLEN="${JOB_STREAM_MAXLEN:-200000}"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XRANGE "$STREAM_KEY" - + COUNT 5
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XLEN "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO STREAM "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
-docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}"
-docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" - + 10
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-${REDIS_NS}:workers}"
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "${JOB_STREAM_GROUP:-${REDIS_NS}:workers}" - + 10
 # 谨慎使用：会把超时 pending entry 转移到当前 consumer（用于 C4 reclaim 排障）
 MIN_IDLE_MS=$(( (${JOB_LEASE_SEC:-60} + ${JOB_RECLAIM_GRACE_SEC:-15}) * 1000 ))
-docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY" "${JOB_STREAM_GROUP:-deepoj:workers}" "${JOB_STREAM_CONSUMER:-debug-consumer}" "$MIN_IDLE_MS" 0-0 COUNT 10
+docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY" "${JOB_STREAM_GROUP:-${REDIS_NS}:workers}" "${JOB_STREAM_CONSUMER:-debug-consumer}" "$MIN_IDLE_MS" 0-0 COUNT 10
 # 手动补救清理（幂等）：按近似长度裁剪
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XTRIM "$STREAM_KEY" MAXLEN "~" "$MAXLEN"
 ```
@@ -317,7 +318,8 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 验证命令（容器部署）：
 
 ```bash
-STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
+REDIS_NS="${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}"
+STREAM_KEY="${JOB_STREAM_KEY:-${REDIS_NS}:jobs}"
 POSTGRES_DB="${POSTGRES_DB:-deep_oj}"
 POSTGRES_USER="${POSTGRES_USER:-deep_oj}"
 
@@ -365,8 +367,9 @@ docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -it oj-postgres \
 
 ```bash
 cd /home/diguo/Deep_OJ
-STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}" \
-GROUP="${JOB_STREAM_GROUP:-deepoj:workers}" \
+REDIS_NS="${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}" \
+STREAM_KEY="${JOB_STREAM_KEY:-${REDIS_NS}:jobs}" \
+GROUP="${JOB_STREAM_GROUP:-${REDIS_NS}:workers}" \
 REDIS_PASSWORD="${REDIS_PASSWORD}" \
 bash scripts/collect_stream_pressure.sh
 ```
@@ -381,14 +384,15 @@ bash scripts/collect_stream_pressure.sh
 示例：
 
 ```json
-{"ts_ms":1771090570165,"stream_key":"deepoj:jobs","group":"deepoj:workers","xlen":30,"pending":10,"lag":20,"lag_valid":true,"oldest_age_ms":130306,"oldest_age_source":"pending","approx":false}
+{"ts_ms":1771090570165,"stream_key":"deepoj:dev:jobs","group":"deepoj:dev:workers","xlen":30,"pending":10,"lag":20,"lag_valid":true,"oldest_age_ms":130306,"oldest_age_source":"pending","approx":false}
 ```
 
 当 `lag=null` 时的排障步骤（不要按 0 处理）：
 
 ```bash
-STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
-GROUP="${JOB_STREAM_GROUP:-deepoj:workers}"
+REDIS_NS="${REDIS_KEY_PREFIX:-deepoj}${REDIS_KEY_ENV:+:${REDIS_KEY_ENV}}"
+STREAM_KEY="${JOB_STREAM_KEY:-${REDIS_NS}:jobs}"
+GROUP="${JOB_STREAM_GROUP:-${REDIS_NS}:workers}"
 
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XINFO GROUPS "$STREAM_KEY"
 docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XPENDING "$STREAM_KEY" "$GROUP"
@@ -449,7 +453,15 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 - Metrics 标签禁止使用 `job_id`（高基数）。
 - 单个任务追踪使用日志字段，不在指标上挂高基数 ID。
 
-### 5.3 日志字段规范与单 Job 定位
+### 5.3 吞吐口径说明（固定）
+
+- `submit QPS`：表示 API 入队成功速率（提交接口 200）。
+- `Jobs/s`：表示 worker 端到端完成速率（最终完成落库）。
+- `E2E P95/P99`：表示提交到完成的端到端时延分位。
+
+说明：`submit QPS` 与 `Jobs/s` 不等价。入口能吃下的速率可以高于实际完成速率。
+
+### 5.4 日志字段规范与单 Job 定位
 
 建议日志字段：
 
@@ -497,7 +509,7 @@ bash scripts/repo_survey_probe.sh
 
 ### 6.2 输出解释
 
-- `[1/3]`：输出 `deepoj:jobs` 的 `XLEN`
+- `[1/3]`：输出 `<redis_ns>:jobs` 的 `XLEN`
 - `[2/3]`：输出 PG 表列表与 `submissions` 字段定义
 - `[3/3]`：输出核心 metrics 名称匹配结果
 

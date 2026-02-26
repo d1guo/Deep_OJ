@@ -49,6 +49,7 @@ func enqueueJobToStream(
 	}
 
 	streamKey := getEnvString("JOB_STREAM_KEY", defaultJobStreamKey)
+	streamKey = common.NamespacedRedisKey(streamKey)
 	streamMaxLen := getEnvInt64("JOB_STREAM_MAXLEN", defaultJobStreamMaxLen)
 	payloadTTLSec := getEnvInt("JOB_PAYLOAD_TTL_SEC", defaultJobPayloadTTLSec)
 	if payloadTTLSec <= 0 {
@@ -56,7 +57,7 @@ func enqueueJobToStream(
 	}
 	payloadTTL := time.Duration(payloadTTLSec) * time.Second
 	enqueueTS := time.Now().UnixMilli()
-	payloadRef := common.TaskPayloadPrefix + jobID
+	payloadRef := common.NamespacedRedisKey(common.TaskPayloadPrefix + jobID)
 
 	payloadBytes, err := json.Marshal(payloadEnvelopeV1{
 		SchemaVersion: jobStreamSchemaVersionV1,

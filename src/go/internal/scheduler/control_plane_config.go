@@ -3,6 +3,8 @@ package scheduler
 import (
 	"os"
 	"strings"
+
+	"github.com/d1guo/deep_oj/pkg/common"
 )
 
 const (
@@ -50,6 +52,7 @@ func LoadControlPlaneConfig() ControlPlaneConfig {
 	if streamKey == "" {
 		streamKey = defaultJobStreamKey
 	}
+	streamKey = common.NamespacedRedisKey(streamKey)
 
 	streamMaxLen := int64(getEnvInt("JOB_STREAM_MAXLEN", int(defaultJobStreamMaxLen)))
 	if streamMaxLen <= 0 {

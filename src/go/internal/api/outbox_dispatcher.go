@@ -130,7 +130,7 @@ func (d *outboxDispatcher) dispatchOne(ctx context.Context, evt repository.Outbo
 		payloadTTL = time.Duration(defaultJobPayloadTTLSec) * time.Second
 	}
 
-	payloadRef := common.TaskPayloadPrefix + evt.JobID
+	payloadRef := common.NamespacedRedisKey(common.TaskPayloadPrefix + evt.JobID)
 	if err := d.redis.Set(ctx, payloadRef, payloadEnvelope, payloadTTL); err != nil {
 		d.markDispatchError(ctx, logger, evt, "redis_set_error", err)
 		return
@@ -140,6 +140,7 @@ func (d *outboxDispatcher) dispatchOne(ctx context.Context, evt repository.Outbo
 	if streamKey == "" {
 		streamKey = getEnvString("JOB_STREAM_KEY", defaultJobStreamKey)
 	}
+	streamKey = common.NamespacedRedisKey(streamKey)
 	streamMaxLen := getEnvInt64("JOB_STREAM_MAXLEN", defaultJobStreamMaxLen)
 
 	xaddArgs := buildStreamXAddArgs(streamKey, streamMaxLen, map[string]interface{}{

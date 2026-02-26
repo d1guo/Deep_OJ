@@ -11,6 +11,13 @@ namespace deep_oj {
     void LoadSeccompRules(const char* exe_path);
 
     /**
+     * @brief 是否启用运行阶段 seccomp 白名单。
+     * 读取环境变量 JUDGE_RUN_SECCOMP_MODE，默认 strict（启用）。
+     * 仅当显式设置为 off 时关闭（用于应急）。
+     */
+    bool ShouldEnableRunSeccomp();
+
+    /**
      * @brief 加载编译阶段 Seccomp 规则
      * 编译阶段使用默认允许 + 危险系统调用黑名单策略，限制高危能力。
      */

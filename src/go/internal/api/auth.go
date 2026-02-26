@@ -60,7 +60,7 @@ func getOAuthStateTTL() time.Duration {
 
 // Register 处理用户注册
 func (h *Handler) Register(c *gin.Context) {
-	if !h.checkRateLimit(c, c.ClientIP(), 0) {
+	if !h.checkRateLimit(c, "auth", c.ClientIP(), 0, getAuthRateLimitConfig()) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁", "code": "RATE_LIMITED"})
 		return
 	}
@@ -108,7 +108,7 @@ func (h *Handler) Register(c *gin.Context) {
 
 // Login 处理用户登录
 func (h *Handler) Login(c *gin.Context) {
-	if !h.checkRateLimit(c, c.ClientIP(), 0) {
+	if !h.checkRateLimit(c, "auth", c.ClientIP(), 0, getAuthRateLimitConfig()) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁", "code": "RATE_LIMITED"})
 		return
 	}

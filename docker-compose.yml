@@ -24,6 +24,8 @@ services:
       - SETGID
     security_opt:
       - no-new-privileges:true
+      - apparmor=unconfined
+      - seccomp=unconfined
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - ./data/workspace:/data/workspace:rw

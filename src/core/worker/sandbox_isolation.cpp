@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
+#include <cstdlib>
 
 // 严重警告: 必须严格遵守 Async-Signal-Safe C 风格
 // 禁止使用: malloc/new, exceptions, STL, iostream
@@ -184,6 +185,26 @@ namespace deep_oj {
             if (rmdir("old_root") == -1 && errno != EEXIST && errno != EBUSY) {}
         }
 
+        [[noreturn]] void ExitRunExecError(const char* exe_path)
+        {
+            int err = errno;
+            char msg[1024];
+            int n = snprintf(
+                msg,
+                sizeof(msg),
+                "[sandbox][run_exec_failed] errno=%d(%s) exe=%s",
+                err,
+                strerror(err),
+                exe_path ? exe_path : "-");
+            if (n < 0) n = 0;
+            size_t len = (size_t)n;
+            if (len >= sizeof(msg)) len = sizeof(msg) - 1;
+            msg[len++] = '\n';
+            ssize_t wrote = write(STDERR_FILENO, msg, len);
+            (void)wrote;
+            _exit(ERR_EXEC_FAILED);
+        }
+
     } // anonymous namespace
 
     int RunChildFn(void* arg)
@@ -303,8 +324,14 @@ namespace deep_oj {
         if (setrlimit(RLIMIT_STACK, &stack_limit) == -1) _exit(ERR_RLIMIT_STACK);
 
         rlimit nproc_limit;
-        nproc_limit.rlim_cur = 5;
-        nproc_limit.rlim_max = 5;
+        // 过低的 RLIMIT_NPROC 会在 execve 阶段触发 EAGAIN，导致误判为 execve_failed。
+        // 与 cgroup pids 上限保持一致（默认 20），兼顾防逃逸与可运行性。
+        rlim_t nproc_cap = g_runner_config.cgroup_pids_limit > 0
+            ? (rlim_t)g_runner_config.cgroup_pids_limit
+            : (rlim_t)20;
+        if (nproc_cap < 10) nproc_cap = 10;
+        nproc_limit.rlim_cur = nproc_cap;
+        nproc_limit.rlim_max = nproc_cap;
         if (setrlimit(RLIMIT_NPROC, &nproc_limit) == -1) _exit(ERR_RLIMIT_NPROC);
 
         rlimit fsize_limit;
@@ -339,14 +366,15 @@ namespace deep_oj {
         // 7. 安全增强：禁止提升特权 + 加载 Seccomp 白名单 (exec 前最后一步)
         // -----------------------------------------------------
         if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(ERR_SANDBOX_EXCEPTION);
-        LoadSeccompRules(new_exe);
+        if (ShouldEnableRunSeccomp()) {
+            LoadSeccompRules(new_exe);
+        }
         
         // 8. 执行用户程序
         char* const envp[] = { (char*)"PATH=/bin:/usr/bin", nullptr };
         
         execle(new_exe, new_exe, nullptr, envp);
-
-        _exit(ERR_EXEC_FAILED); // 如果 exec 失败
+        ExitRunExecError(new_exe); // 如果 exec 失败，输出 errno 诊断后退出
         return 0; 
     }
 

@@ -833,11 +833,18 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 		return streamProcessResult{status: status, reason: reason}
 	}
 
-	payloadRaw, err := c.redis.Get(ctx, payloadRef)
+	payloadKey := common.NamespacedRedisKey(payloadRef)
+	payloadRaw, err := c.redis.Get(ctx, payloadKey)
+	if (err != nil || strings.TrimSpace(payloadRaw) == "") && payloadKey != payloadRef {
+		if legacyRaw, legacyErr := c.redis.Get(ctx, payloadRef); legacyErr == nil && strings.TrimSpace(legacyRaw) != "" {
+			payloadRaw = legacyRaw
+			err = nil
+		}
+	}
 	if err != nil || strings.TrimSpace(payloadRaw) == "" {
 		status = streamConsumeStatusError
 		reason = streamReasonPayloadInvalid
-		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload missing: "+payloadRef); perr != nil {
+		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload missing: "+payloadKey); perr != nil {
 			status = streamConsumeStatusError
 			reason = streamReasonDBError
 			logger.Error("Failed to persist poison state", "reason", reason, "error", perr)
@@ -849,7 +856,7 @@ func (c *StreamConsumer) handleMessage(ctx context.Context, msg redis.XMessage) 
 			logger.Error("XACK failed", "reason", reason, "error", ackErr)
 			return streamProcessResult{status: status, reason: reason}
 		}
-		logger.Warn("Rejected stream message: payload missing", "reason", streamReasonPayloadInvalid, "payload_ref", payloadRef, "error", err)
+		logger.Warn("Rejected stream message: payload missing", "reason", streamReasonPayloadInvalid, "payload_ref", payloadKey, "error", err)
 		return streamProcessResult{status: status, reason: reason}
 	}
 
@@ -980,11 +987,18 @@ func (c *StreamConsumer) handleReclaimedMessage(ctx context.Context, msg redis.X
 		return streamProcessResult{status: streamConsumeStatusError, reason: streamReasonMissingField}
 	}
 
-	payloadRaw, err := c.redis.Get(ctx, payloadRef)
+	payloadKey := common.NamespacedRedisKey(payloadRef)
+	payloadRaw, err := c.redis.Get(ctx, payloadKey)
+	if (err != nil || strings.TrimSpace(payloadRaw) == "") && payloadKey != payloadRef {
+		if legacyRaw, legacyErr := c.redis.Get(ctx, payloadRef); legacyErr == nil && strings.TrimSpace(legacyRaw) != "" {
+			payloadRaw = legacyRaw
+			err = nil
+		}
+	}
 	if err != nil || strings.TrimSpace(payloadRaw) == "" {
 		status = reclaimStatusReject
 		reason = streamReasonPayloadInvalid
-		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload missing: "+payloadRef); perr != nil {
+		if perr := c.markPoisonBeforeAck(ctx, logger, jobID, reason, "payload missing: "+payloadKey); perr != nil {
 			status = reclaimStatusError
 			reason = streamReasonDBError
 			logger.Error("Failed to persist poison state for reclaimed message", "reason", reason, "error", perr)
@@ -1298,8 +1312,16 @@ func (c *StreamConsumer) resolveFinalResult(
 	resp *pb.TaskResponse,
 	execErr error,
 ) (string, map[string]interface{}) {
-	resultKey := common.ResultKeyPrefix + jobID
-	if raw, err := c.redis.Get(ctx, resultKey); err == nil && strings.TrimSpace(raw) != "" {
+	legacyResultKey := common.ResultKeyPrefix + jobID
+	resultKey := common.NamespacedRedisKey(legacyResultKey)
+	raw, err := c.redis.Get(ctx, resultKey)
+	if (err != nil || strings.TrimSpace(raw) == "") && resultKey != legacyResultKey {
+		if legacyRaw, legacyErr := c.redis.Get(ctx, legacyResultKey); legacyErr == nil && strings.TrimSpace(legacyRaw) != "" {
+			raw = legacyRaw
+			err = nil
+		}
+	}
+	if err == nil && strings.TrimSpace(raw) != "" {
 		var result map[string]interface{}
 		if uerr := json.Unmarshal([]byte(raw), &result); uerr == nil {
 			if _, ok := result["job_id"]; !ok {

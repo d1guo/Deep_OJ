@@ -134,6 +134,22 @@ api:
       user_limit: 120
       # 限流窗口长度（秒）。
       window_sec: 60
+    auth_rate_limit:
+      # auth 路由（register/login）限流：单 IP 窗口内请求上限。
+      ip_limit: 60
+      # auth 路由限流：单用户窗口内请求上限。
+      user_limit: 120
+      # auth 路由限流窗口（秒）。
+      window_sec: 60
+    submit_rate_limit:
+      # submit 路由限流：单 IP 窗口内请求上限（本地压测放宽）。
+      ip_limit: 1200
+      # submit 路由限流：单用户窗口内请求上限（本地压测放宽）。
+      user_limit: 2400
+      # submit 路由限流窗口（秒）。
+      window_sec: 60
+    # submit 入口活跃任务数上限（pending+processing），用于防爆兜底。
+    submit_max_inflight: 5000
     problem_defaults:
       # 题目默认时间限制（毫秒）。
       time_limit_ms: 1000
@@ -344,6 +360,10 @@ redis:
   password: "deepoj_redis_change_me"
   # 是否启用 TLS。
   tls_enabled: false
+  # Redis 业务键统一前缀。
+  key_prefix: "deepoj"
+  # Redis 业务键环境后缀（与生产隔离）。
+  key_env: "dev"
 
 postgres:
   # 最大连接数。

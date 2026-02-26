@@ -260,7 +260,7 @@ func getResultTTL() time.Duration {
 func (s *JudgeService) reportResult(ctx context.Context, jobID string, result map[string]interface{}) error {
 	jsonBytes, _ := json.Marshal(result)
 
-	resultKey := common.ResultKeyPrefix + jobID
+	resultKey := common.NamespacedRedisKey(common.ResultKeyPrefix + jobID)
 	if _, err := s.redis.SetNX(ctx, resultKey, string(jsonBytes), getResultTTL()).Result(); err != nil {
 		slog.Error("Redis SetNX 失败", "job_id", jobID, "error", err)
 		return err

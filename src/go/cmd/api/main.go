@@ -43,6 +43,7 @@ import (
 	"github.com/d1guo/deep_oj/internal/api"
 	"github.com/d1guo/deep_oj/internal/appconfig"
 	"github.com/d1guo/deep_oj/internal/repository"
+	"github.com/d1guo/deep_oj/pkg/common"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -68,6 +69,17 @@ func getEnvBool(key string, fallback bool) bool {
 		return false
 	default:
 		return fallback
+	}
+}
+
+func readEffectiveRateLimit(prefix string) map[string]int {
+	legacyIP := getEnvInt("RATE_LIMIT_IP_PER_WINDOW", 60)
+	legacyUser := getEnvInt("RATE_LIMIT_USER_PER_WINDOW", 120)
+	legacyWindow := getEnvInt("RATE_LIMIT_WINDOW_SEC", 60)
+	return map[string]int{
+		"ip_limit":   getEnvInt(prefix+"_IP_PER_WINDOW", legacyIP),
+		"user_limit": getEnvInt(prefix+"_USER_PER_WINDOW", legacyUser),
+		"window_sec": getEnvInt(prefix+"_WINDOW_SEC", legacyWindow),
 	}
 }
 
@@ -99,6 +111,24 @@ func main() {
 		slog.Info("已加载配置", "path", cfgPath)
 	}
 	appconfig.ApplyRuntimeEnvForAPI(cfg)
+
+	submitMaxInflight := getEnvInt("SUBMIT_MAX_INFLIGHT", 0)
+	if submitMaxInflight <= 0 {
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("REDIS_KEY_ENV")), "dev") {
+			submitMaxInflight = 5000
+		} else {
+			submitMaxInflight = 500
+		}
+	}
+	slog.Info(
+		"API effective runtime config",
+		"effective_auth_rate_limit", readEffectiveRateLimit("AUTH_RATE_LIMIT"),
+		"effective_submit_rate_limit", readEffectiveRateLimit("SUBMIT_RATE_LIMIT"),
+		"submit_max_inflight", submitMaxInflight,
+		"effective_redis_key_namespace", common.RedisKeyNamespace(),
+		"effective_redis_key_prefix", strings.TrimSpace(os.Getenv("REDIS_KEY_PREFIX")),
+		"effective_redis_key_env", strings.TrimSpace(os.Getenv("REDIS_KEY_ENV")),
+	)
 
 	// 1. 初始化配置 (从环境变量读取)
 	dbURL := os.Getenv("DATABASE_URL")

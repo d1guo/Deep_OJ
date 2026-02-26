@@ -3,24 +3,23 @@
 #include "sandbox_internal.h"
 #include <seccomp.h>
 #include <fcntl.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace deep_oj {
 
+    bool ShouldEnableRunSeccomp() {
+        const char* mode = std::getenv("JUDGE_RUN_SECCOMP_MODE");
+        if (mode == nullptr || mode[0] == '\0') {
+            return true;
+        }
+        return std::strcmp(mode, "off") != 0;
+    }
+
     void LoadSeccompRules(const char* exe_path) {
+        (void)exe_path;
         scmp_filter_ctx ctx = seccomp_init(SCMP_ACT_KILL);
         if (!ctx) _exit(ERR_SANDBOX_EXCEPTION);
-
-        // 辅助宏：允许指定系统调用（带参数检查）
-        // 允许系统调用，且参数 0 (a0) 必须等于指定值
-        #define ALLOW_SYS_ARG0_EQ(syscall_name, specific_val) \
-            if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(syscall_name), 1, \
-                SCMP_A0(SCMP_CMP_EQ, (scmp_datum_t)(specific_val))) != 0) { \
-                seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION); \
-            }
-
-        // 核心防御：execve 限制
-        // 允许执行当前程序
-        ALLOW_SYS_ARG0_EQ(execve, exe_path);
 
         // 核心防御：open/openat 禁止写权限 (只读)
         if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(open), 1, 
@@ -31,9 +30,20 @@ namespace deep_oj {
                 SCMP_CMP(2, SCMP_CMP_MASKED_EQ, O_WRONLY | O_RDWR, 0)) != 0) {
              seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION);
         }
-        
+
+        // 允许执行程序；不使用指针等值约束，避免对 argv 地址布局过敏导致误杀。
+        if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(execve), 0) != 0) {
+            seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION);
+        }
+        if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(execveat), 0) != 0) {
+            seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION);
+        }
+
         // 允许其他基础系统调用
-        #define ALLOW_SYSCALL(name) seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 0)
+        #define ALLOW_SYSCALL(name) \
+            if (seccomp_rule_add(ctx, SCMP_ACT_ALLOW, SCMP_SYS(name), 0) != 0) { \
+                seccomp_release(ctx); _exit(ERR_SANDBOX_EXCEPTION); \
+            }
         
         ALLOW_SYSCALL(read);
         ALLOW_SYSCALL(write);
@@ -51,24 +61,43 @@ namespace deep_oj {
         ALLOW_SYSCALL(readlink);
         ALLOW_SYSCALL(gettimeofday);
         ALLOW_SYSCALL(clock_gettime);
+        ALLOW_SYSCALL(rt_sigaction);
+        ALLOW_SYSCALL(rt_sigprocmask);
+        ALLOW_SYSCALL(rt_sigreturn);
+        ALLOW_SYSCALL(sigaltstack);
+        ALLOW_SYSCALL(getpid);
+        ALLOW_SYSCALL(getppid);
+        ALLOW_SYSCALL(gettid);
+        ALLOW_SYSCALL(getuid);
+        ALLOW_SYSCALL(geteuid);
+        ALLOW_SYSCALL(getgid);
+        ALLOW_SYSCALL(getegid);
+        ALLOW_SYSCALL(fcntl);
+        ALLOW_SYSCALL(statx);
+        ALLOW_SYSCALL(statfs);
+        ALLOW_SYSCALL(fstatfs);
+        ALLOW_SYSCALL(ioctl);
+        ALLOW_SYSCALL(madvise);
+        ALLOW_SYSCALL(sched_getaffinity);
         
-        // 加上刚才发现的“必杀名单”
+        // 运行时加载器与 libc 依赖调用
         ALLOW_SYSCALL(prlimit64);
         ALLOW_SYSCALL(rseq);
         ALLOW_SYSCALL(getrandom);
         ALLOW_SYSCALL(futex);
         ALLOW_SYSCALL(newfstatat);
-        ALLOW_SYSCALL(faccessat); // [Fix] Required by some runtimes
-        ALLOW_SYSCALL(pread64);   // [Fix] Required by glibc/loader
-        ALLOW_SYSCALL(arch_prctl); // [Fix] Required by TLS (glibc)
-        ALLOW_SYSCALL(set_tid_address); // [Fix] Required by glibc
-        ALLOW_SYSCALL(set_robust_list); // [Fix] Required by glibc
+        ALLOW_SYSCALL(faccessat);
+        ALLOW_SYSCALL(pread64);
+        ALLOW_SYSCALL(arch_prctl);
+        ALLOW_SYSCALL(set_tid_address);
+        ALLOW_SYSCALL(set_robust_list);
 
         if (seccomp_load(ctx) != 0) {
             seccomp_release(ctx);
             _exit(ERR_SANDBOX_EXCEPTION);
         }
         seccomp_release(ctx);
+        #undef ALLOW_SYSCALL
     }
 
     void LoadCompileSeccompRules() {

@@ -110,6 +110,35 @@ namespace deep_oj
             }
         }
 
+        struct RunExecFailureMarker
+        {
+            bool found = false;
+            std::string detail;
+        };
+
+        RunExecFailureMarker ReadRunExecFailureMarker(const std::string& stderr_path)
+        {
+            RunExecFailureMarker marker;
+            if (stderr_path.empty()) return marker;
+
+            std::ifstream ifs(stderr_path);
+            if (!ifs) return marker;
+
+            const std::string prefix = "[sandbox][run_exec_failed]";
+            std::string line;
+            while (std::getline(ifs, line))
+            {
+                if (line.rfind(prefix, 0) != 0) continue;
+                marker.found = true;
+                marker.detail = line.substr(prefix.size());
+                if (!marker.detail.empty() && marker.detail.front() == ' ') {
+                    marker.detail.erase(0, 1);
+                }
+                return marker;
+            }
+            return marker;
+        }
+
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
         // RAII helpers for parent process management (只在父进程使用，允许 C++ 特性)
         class ProcessGuard
@@ -650,6 +679,8 @@ namespace deep_oj
             return result;
         }
 
+        const RunExecFailureMarker run_exec_marker = ReadRunExecFailureMarker(stderr_path);
+
         if (WIFEXITED(status))
         {
             result.exit_signal = 0;
@@ -657,6 +688,24 @@ namespace deep_oj
             if (result.exit_code == 0)
             {
                 result.status = SandboxStatus::OK; 
+            }
+            else if (result.exit_code == ERR_EXEC_FAILED)
+            {
+                if (run_exec_marker.found)
+                {
+                    result.status = SandboxStatus::SYSTEM_ERROR;
+                    result.sandbox_error = "execve_failed";
+                    if (!run_exec_marker.detail.empty()) {
+                        result.error_message = "程序启动失败: " + run_exec_marker.detail;
+                    } else {
+                        result.error_message = "程序启动失败: execve failed";
+                    }
+                }
+                else
+                {
+                    // 127 也可能是用户程序正常退出码，未命中标记时按 RE 处理。
+                    result.status = SandboxStatus::RUNTIME_ERROR;
+                }
             }
             else if (result.exit_code >= 120) 
             {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/d1guo/deep_oj/internal/appconfig"
+	"github.com/d1guo/deep_oj/pkg/common"
 	"github.com/google/uuid"
 )
 
@@ -90,8 +91,8 @@ func LoadConfig() *Config {
 		Workspace:             workspace,
 		JudgerBin:             getEnv("JUDGER_BIN", "/app/judge_engine"),
 		ConfigPath:            getEnv("JUDGER_CONFIG", defaultConfigPath),
-		JobStreamKey:          getEnv("JOB_STREAM_KEY", "deepoj:jobs"),
-		JobStreamGroup:        getEnv("JOB_STREAM_GROUP", "deepoj:workers"),
+		JobStreamKey:          common.NamespacedRedisKey(getEnv("JOB_STREAM_KEY", "deepoj:jobs")),
+		JobStreamGroup:        common.NamespacedRedisKey(getEnv("JOB_STREAM_GROUP", "deepoj:workers")),
 		JobStreamConsumer:     streamConsumer,
 		JobStreamReadCount:    getEnvInt("JOB_STREAM_READ_COUNT", 16),
 		JobStreamBlockMs:      getEnvInt("JOB_STREAM_BLOCK_MS", 2000),

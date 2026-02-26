@@ -112,6 +112,9 @@ type APILimits struct {
 	MaxMemoryLimitKb     int             `yaml:"max_memory_limit_kb"`
 	InflightTTLSec       int             `yaml:"inflight_ttl_sec"`
 	RateLimit            RateLimitConfig `yaml:"rate_limit"`
+	AuthRateLimit        RateLimitConfig `yaml:"auth_rate_limit"`
+	SubmitRateLimit      RateLimitConfig `yaml:"submit_rate_limit"`
+	SubmitMaxInflight    int             `yaml:"submit_max_inflight"`
 	ProblemDefaults      ProblemDefaults `yaml:"problem_defaults"`
 }
 
@@ -239,6 +242,8 @@ type RedisConfig struct {
 	WriteTimeoutMs int    `yaml:"write_timeout_ms"`
 	Password       string `yaml:"password"`
 	TLSEnabled     *bool  `yaml:"tls_enabled"`
+	KeyPrefix      string `yaml:"key_prefix"`
+	KeyEnv         string `yaml:"key_env"`
 }
 
 type PostgresConfig struct {
@@ -305,9 +310,34 @@ func ApplyRuntimeEnvForAPI(cfg *Config) {
 	setEnvInt("SUBMIT_DEFAULT_MEMORY_LIMIT_KB", cfg.API.Limits.DefaultMemoryLimitKb)
 	setEnvInt("SUBMIT_MAX_MEMORY_LIMIT_KB", cfg.API.Limits.MaxMemoryLimitKb)
 	setEnvInt("SUBMIT_INFLIGHT_TTL_SEC", cfg.API.Limits.InflightTTLSec)
-	setEnvInt("RATE_LIMIT_IP_PER_WINDOW", cfg.API.Limits.RateLimit.IPLimit)
-	setEnvInt("RATE_LIMIT_USER_PER_WINDOW", cfg.API.Limits.RateLimit.UserLimit)
-	setEnvInt("RATE_LIMIT_WINDOW_SEC", cfg.API.Limits.RateLimit.WindowSec)
+	legacyRateLimit := normalizeRateLimitConfig(cfg.API.Limits.RateLimit, RateLimitConfig{
+		IPLimit:   60,
+		UserLimit: 120,
+		WindowSec: 60,
+	})
+	authRateLimit := normalizeRateLimitConfig(cfg.API.Limits.AuthRateLimit, legacyRateLimit)
+	submitRateLimit := normalizeRateLimitConfig(cfg.API.Limits.SubmitRateLimit, legacyRateLimit)
+
+	submitMaxInflight := cfg.API.Limits.SubmitMaxInflight
+	if submitMaxInflight <= 0 {
+		if strings.EqualFold(strings.TrimSpace(cfg.Redis.KeyEnv), "dev") {
+			submitMaxInflight = 5000
+		} else {
+			submitMaxInflight = 500
+		}
+	}
+
+	// Legacy unified rate-limit envs remain for fallback compatibility.
+	setEnvInt("RATE_LIMIT_IP_PER_WINDOW", legacyRateLimit.IPLimit)
+	setEnvInt("RATE_LIMIT_USER_PER_WINDOW", legacyRateLimit.UserLimit)
+	setEnvInt("RATE_LIMIT_WINDOW_SEC", legacyRateLimit.WindowSec)
+	setEnvInt("AUTH_RATE_LIMIT_IP_PER_WINDOW", authRateLimit.IPLimit)
+	setEnvInt("AUTH_RATE_LIMIT_USER_PER_WINDOW", authRateLimit.UserLimit)
+	setEnvInt("AUTH_RATE_LIMIT_WINDOW_SEC", authRateLimit.WindowSec)
+	setEnvInt("SUBMIT_RATE_LIMIT_IP_PER_WINDOW", submitRateLimit.IPLimit)
+	setEnvInt("SUBMIT_RATE_LIMIT_USER_PER_WINDOW", submitRateLimit.UserLimit)
+	setEnvInt("SUBMIT_RATE_LIMIT_WINDOW_SEC", submitRateLimit.WindowSec)
+	setEnvInt("SUBMIT_MAX_INFLIGHT", submitMaxInflight)
 	setEnvInt("PROBLEM_DEFAULT_TIME_LIMIT_MS", cfg.API.Limits.ProblemDefaults.TimeLimitMs)
 	setEnvInt("PROBLEM_DEFAULT_MEMORY_LIMIT_MB", cfg.API.Limits.ProblemDefaults.MemoryLimitMB)
 
@@ -452,11 +482,31 @@ func applySharedRuntimeEnv(cfg *Config) {
 	setEnvInt("REDIS_WRITE_TIMEOUT_MS", cfg.Redis.WriteTimeoutMs)
 	setEnv("REDIS_PASSWORD", cfg.Redis.Password)
 	setEnvBool("REDIS_TLS", boolValue(cfg.Redis.TLSEnabled, false))
+	keyPrefix := strings.TrimSpace(cfg.Redis.KeyPrefix)
+	if keyPrefix == "" {
+		keyPrefix = "deepoj"
+	}
+	setEnv("REDIS_KEY_PREFIX", keyPrefix)
+	setEnv("REDIS_KEY_ENV", strings.TrimSpace(cfg.Redis.KeyEnv))
 
 	setEnvInt("PG_MAX_CONNS", cfg.Postgres.MaxConns)
 	setEnvInt("PG_MIN_CONNS", cfg.Postgres.MinConns)
 	setEnvInt("PG_MAX_CONN_LIFETIME_MIN", cfg.Postgres.MaxConnLifetimeMin)
 	setEnvInt("PG_MAX_CONN_IDLE_MIN", cfg.Postgres.MaxConnIdleMin)
+}
+
+func normalizeRateLimitConfig(cfg RateLimitConfig, fallback RateLimitConfig) RateLimitConfig {
+	out := cfg
+	if out.IPLimit <= 0 {
+		out.IPLimit = fallback.IPLimit
+	}
+	if out.UserLimit <= 0 {
+		out.UserLimit = fallback.UserLimit
+	}
+	if out.WindowSec <= 0 {
+		out.WindowSec = fallback.WindowSec
+	}
+	return out
 }
 
 func setMinIOEnv(cfg MinIOConfig) {

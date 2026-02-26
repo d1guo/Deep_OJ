@@ -132,6 +132,20 @@ func (db *PostgresDB) GetSubmission(ctx context.Context, jobID string) (*model.S
 	return &s, nil
 }
 
+// CountActiveSubmissions returns the number of submissions in pending/processing states.
+func (db *PostgresDB) CountActiveSubmissions(ctx context.Context) (int64, error) {
+	query := `
+		SELECT COUNT(*)
+		FROM submissions
+		WHERE state IN ('pending', 'processing')
+	`
+	var count int64
+	if err := db.pool.QueryRow(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // UpdateSubmissionResultIfNotDone 更新提交状态和结果，并返回端到端耗时 (秒)
 // 幂等: 如果 state 已是 done，则不更新
 func (db *PostgresDB) UpdateSubmissionResultIfNotDone(ctx context.Context, jobID string, status string, result any) (float64, bool, error) {
