@@ -109,19 +109,19 @@ curl -fsS http://127.0.0.1:13000/api/health
 ### 架构收敛验证
 
 ```bash
-bash scripts/verify_b1_no_etcd.sh
-bash scripts/verify_b2_no_legacy_dataplane.sh
-bash scripts/verify_b3_control_plane.sh
+bash scripts/verify_no_etcd_runtime.sh
+bash scripts/verify_no_legacy_dataplane.sh
+bash scripts/verify_scheduler_control_plane.sh
 ```
 
 ### 功能与稳定性验证
 
 ```bash
-bash scripts/verify_mvp2_e2e.sh
-bash scripts/verify_mvp3_crash_recover.sh
-bash scripts/verify_mvp4_observability.sh
+bash scripts/verify_end_to_end_flow.sh
+bash scripts/verify_crash_recovery.sh
+bash scripts/verify_observability_pipeline.sh
 bash scripts/verify_ci.sh
-bash scripts/verify_g1_kill_all.sh
+bash scripts/verify_worker_process_cleanup.sh
 ```
 
 ## Scheduler 控制面配置

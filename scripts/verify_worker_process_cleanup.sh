@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 提交长任务，主动 kill 判题父进程，验证子进程会被完整清理（防“僵尸子孙”泄漏）。
+# 2) 验证被 kill 后系统仍可继续处理后续任务（可恢复性）。
+# 3) 输出进程快照与证据字段，便于安全验收留档。
+# 这是“进程树清理能力”专项脚本。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -9,7 +15,7 @@ API_BASE="${API_BASE:-http://127.0.0.1:${VERIFY_API_PORT}}"
 USERNAME="${USERNAME:-admin}"
 PASSWORD="${PASSWORD:-password}"
 EMAIL="${EMAIL:-${USERNAME}@example.com}"
-API_JWT_SECRET="${API_JWT_SECRET:-verify-g1-jwt-secret}"
+API_JWT_SECRET="${API_JWT_SECRET:-verify-worker-process-cleanup-jwt-secret}"
 WORKER_MINIO_ENDPOINT="${WORKER_MINIO_ENDPOINT:-oj-minio:9000}"
 DISPATCH_RPC_TIMEOUT_MS="${DISPATCH_RPC_TIMEOUT_MS:-30000}"
 COMPOSE_BUILD="${COMPOSE_BUILD:-1}"
@@ -33,13 +39,14 @@ KILL_AFTER_FILE=""
 KILL_DEBUG_BEFORE_FILE=""
 KILL_DEBUG_AFTER_FILE=""
 
-# 默认 compose 保持受限 seccomp，本脚本额外叠加 verify override 仅在验收场景放开。
-COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.verify-g1.yml)
+# 默认 compose 保持受限 seccomp。
+# 这里叠加的覆盖文件用于验收场景下放开必要配置，不影响默认部署。
+COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.verify-process-cleanup.yml)
 if [[ -f docker-compose.override.yml ]]; then
   COMPOSE_FILES+=(-f docker-compose.override.yml)
 fi
 
-RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_g1.runtime.override.yml"
+RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_worker_process_cleanup.runtime.override.yml"
 cat >"$RUNTIME_OVERRIDE_FILE" <<YAML
 services:
   api:
@@ -644,6 +651,8 @@ for cmd in bash curl docker python3; do
   require_cmd "$cmd"
 done
 
+# 主流程：
+# 拉起服务 -> 提交长任务并强杀父进程 -> 检查子进程/泄漏 -> 提交后续任务验证系统仍健康。
 echo "[1/9] start services"
 if [[ "$COMPOSE_BUILD" == "1" ]]; then
   compose_cmd up -d --build || fatal "docker compose up -d --build failed"
@@ -693,7 +702,7 @@ PY
 
 http_request POST "$API_BASE/api/v1/problems" "200" \
   -H "Authorization: Bearer $token" \
-  -F 'title=G1 Kill All Verify' \
+  -F 'title=Worker Process Cleanup Verify' \
   -F 'time_limit=2000' \
   -F 'memory_limit=128' \
   -F "file=@$problem_zip"
@@ -841,33 +850,33 @@ if [[ "$leak_ok" -ne 1 ]]; then
 fi
 
 echo "[8/9] evidence"
-echo "EVIDENCE_G1_PARENT_KILL: judge_pid=${judge_pid} child_pids=${child_pids_csv} all_gone=${all_gone} job_id=${kill_job_id} status=${kill_job_status:-unknown} verdict=${kill_job_verdict:-unknown}"
-echo "EVIDENCE_G1_KILL_BEFORE_PS:"
+echo "EVIDENCE_PROCESS_CLEANUP_PARENT_KILL: judge_pid=${judge_pid} child_pids=${child_pids_csv} all_gone=${all_gone} job_id=${kill_job_id} status=${kill_job_status:-unknown} verdict=${kill_job_verdict:-unknown}"
+echo "EVIDENCE_PROCESS_CLEANUP_BEFORE_PS:"
 if [[ -n "$KILL_BEFORE_FILE" && -s "$KILL_BEFORE_FILE" ]]; then
   cat "$KILL_BEFORE_FILE"
 else
   echo "<empty>"
 fi
-echo "EVIDENCE_G1_KILL_AFTER_PS:"
+echo "EVIDENCE_PROCESS_CLEANUP_AFTER_PS:"
 if [[ -n "$KILL_AFTER_FILE" && -s "$KILL_AFTER_FILE" ]]; then
   cat "$KILL_AFTER_FILE"
 else
   echo "<none>"
 fi
-echo "EVIDENCE_G1_KILL_BEFORE_CGROUP:"
+echo "EVIDENCE_PROCESS_CLEANUP_BEFORE_CGROUP:"
 if [[ -n "$KILL_DEBUG_BEFORE_FILE" && -s "$KILL_DEBUG_BEFORE_FILE" ]]; then
   cat "$KILL_DEBUG_BEFORE_FILE"
 else
   echo "<empty>"
 fi
-echo "EVIDENCE_G1_KILL_AFTER_CGROUP:"
+echo "EVIDENCE_PROCESS_CLEANUP_AFTER_CGROUP:"
 if [[ -n "$KILL_DEBUG_AFTER_FILE" && -s "$KILL_DEBUG_AFTER_FILE" ]]; then
   cat "$KILL_DEBUG_AFTER_FILE"
 else
   echo "<none>"
 fi
-echo "EVIDENCE_G1_NO_LEAK: baseline_judge=${baseline_judge_count} final_judge=${final_judge_count} leaked=0"
-echo "EVIDENCE_G1_STILL_WORKS: job_id=${ac_job_id} status=${ac_top_status} verdict=${normalized_ac_verdict}"
+echo "EVIDENCE_PROCESS_CLEANUP_NO_LEAK: baseline_judge=${baseline_judge_count} final_judge=${final_judge_count} leaked=0"
+echo "EVIDENCE_PROCESS_CLEANUP_STILL_WORKS: job_id=${ac_job_id} status=${ac_top_status} verdict=${normalized_ac_verdict}"
 
 echo "[9/9] done"
-echo "G1 verify passed"
+echo "worker process cleanup verify passed"

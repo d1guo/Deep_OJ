@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 启动 compose 并确认运行时完全不依赖 etcd。
+# 2) 串行执行端到端、崩溃恢复、可观测性与基础 CI 验收。
+# 3) 在环境满足时附加执行“进程树清理”安全验收。
+# 失败时会自动打印 compose 诊断日志，便于快速定位问题。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -16,6 +22,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 诊断与通用执行函数
 compose_service_exists() {
   local service="$1"
   local svc
@@ -81,25 +88,26 @@ run_script_step() {
   fi
 }
 
-run_optional_g1() {
-  if [[ ! -f scripts/verify_g1_kill_all.sh ]]; then
-    echo "[7/8] 跳过 G1：未找到 scripts/verify_g1_kill_all.sh"
+# 可选执行“进程树清理”验收（依赖额外权限，可能在部分环境不满足）
+run_optional_process_cleanup() {
+  if [[ ! -f scripts/verify_worker_process_cleanup.sh ]]; then
+    echo "[7/8] 跳过进程清理验收：未找到 scripts/verify_worker_process_cleanup.sh"
     return 0
   fi
 
-  if [[ -f scripts/verify_g1_prereq.sh ]]; then
-    echo "[7/8] 检查 G1 运行前置条件"
-    if ! bash scripts/verify_g1_prereq.sh; then
-      echo "[7/8] 跳过 G1：当前环境不满足前置条件" >&2
+  if [[ -f scripts/verify_sandbox_prerequisites.sh ]]; then
+    echo "[7/8] 检查进程清理验收前置条件"
+    if ! bash scripts/verify_sandbox_prerequisites.sh; then
+      echo "[7/8] 跳过进程清理验收：当前环境不满足前置条件" >&2
       return 0
     fi
   else
-    echo "[7/8] 未找到 verify_g1_prereq.sh，按可运行处理并直接执行 G1"
+    echo "[7/8] 未找到 verify_sandbox_prerequisites.sh，按可运行处理并直接执行进程清理验收"
   fi
 
-  echo "[7/8] 执行 scripts/verify_g1_kill_all.sh"
-  if ! bash scripts/verify_g1_kill_all.sh; then
-    fatal "脚本执行失败: scripts/verify_g1_kill_all.sh"
+  echo "[7/8] 执行 scripts/verify_worker_process_cleanup.sh"
+  if ! bash scripts/verify_worker_process_cleanup.sh; then
+    fatal "脚本执行失败: scripts/verify_worker_process_cleanup.sh"
   fi
 }
 
@@ -113,6 +121,8 @@ export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}"
 export MINIO_ROOT_USER="${MINIO_ROOT_USER:-deepoj_minio_user}"
 export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}"
 
+# 主流程：
+# 先做架构红线检查（无 etcd），再串行跑功能验收，最后尝试安全验收。
 echo "[1/8] docker compose up -d --build"
 assert_no_etcd_service_defined
 if ! docker compose up -d --build; then
@@ -123,10 +133,10 @@ echo "[2/8] docker compose ps 断言不存在 etcd"
 assert_no_etcd_service_defined
 assert_no_etcd_service_running
 
-run_script_step "[3/8] 执行 scripts/verify_mvp2_e2e.sh" "scripts/verify_mvp2_e2e.sh"
-run_script_step "[4/8] 执行 scripts/verify_mvp3_crash_recover.sh" "scripts/verify_mvp3_crash_recover.sh"
-run_script_step "[5/8] 执行 scripts/verify_mvp4_observability.sh" "scripts/verify_mvp4_observability.sh"
+run_script_step "[3/8] 执行 scripts/verify_end_to_end_flow.sh" "scripts/verify_end_to_end_flow.sh"
+run_script_step "[4/8] 执行 scripts/verify_crash_recovery.sh" "scripts/verify_crash_recovery.sh"
+run_script_step "[5/8] 执行 scripts/verify_observability_pipeline.sh" "scripts/verify_observability_pipeline.sh"
 run_script_step "[6/8] 执行 scripts/verify_ci.sh" "scripts/verify_ci.sh"
-run_optional_g1
+run_optional_process_cleanup
 
 echo "[8/8] 无 etcd 启动验证通过"

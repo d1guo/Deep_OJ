@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 验证 scheduler 仅承担控制面职责（不触碰旧数据面）。
+# 2) 校验默认配置下 repair/gc 仅记录 disabled，不执行真实动作。
+# 3) 在运行时打开 repair 后，验证能把 DB 候选任务补投递到 Redis Stream。
+# 失败时输出 scheduler 日志与 Redis 片段，便于直接定位控制面问题。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 COMPOSE_BUILD="${COMPOSE_BUILD:-1}"
 KEEP_TMP="${KEEP_TMP:-0}"
 TMP_DIR="$(mktemp -d)"
-OVERRIDE_FILE="$TMP_DIR/docker-compose.b3.override.yml"
+OVERRIDE_FILE="$TMP_DIR/docker-compose.scheduler-control-plane.override.yml"
 STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-oj-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-deep_oj}"
@@ -56,6 +62,7 @@ fatal() {
   exit 1
 }
 
+# 等待 scheduler 启动日志出现“控制面模式”固定标记。
 wait_scheduler_markers() {
   local timeout_sec="${1:-60}"
   local deadline=$(( $(date +%s) + timeout_sec ))
@@ -78,6 +85,7 @@ wait_scheduler_markers() {
   done
 }
 
+# 等待默认配置下的 disabled 日志，确认未误开启 repair/gc。
 wait_default_disabled_logs() {
   local timeout_sec="${1:-60}"
   local deadline=$(( $(date +%s) + timeout_sec ))
@@ -129,6 +137,7 @@ assert_stream_contains_job() {
   echo "$stream_dump" | rg -q --fixed-strings "$job_id"
 }
 
+# 运行时覆盖配置：仅打开 repair，保持 gc 关闭，便于做最小闭环验证。
 make_runtime_override() {
   cat > "$OVERRIDE_FILE" <<YAML
 services:
@@ -175,6 +184,8 @@ export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-deepoj_pg_password_change_me}"
 export MINIO_ROOT_USER="${MINIO_ROOT_USER:-deepoj_minio_user}"
 export MINIO_ROOT_PASSWORD="${MINIO_ROOT_PASSWORD:-deepoj_minio_password_change_me}"
 
+# 主流程：
+# 先验证“默认不动作”，再验证“显式打开后可动作”。
 echo "[1/6] 启动 compose（COMPOSE_BUILD=$COMPOSE_BUILD）"
 if [[ "$COMPOSE_BUILD" == "1" ]]; then
   docker compose up -d --build || fatal "docker compose up --build 失败"
@@ -207,7 +218,7 @@ if ! wait_scheduler_markers 90; then
   fatal "override 后 scheduler 启动标记校验失败"
 fi
 
-REPAIR_JOB_ID="b3-repair-$(date +%s)-$RANDOM"
+REPAIR_JOB_ID="scheduler-repair-$(date +%s)-$RANDOM"
 insert_repair_candidate "$REPAIR_JOB_ID"
 
 echo "[5/6] 验证 repair_xadd 日志与 Redis Stream 中出现 job_id"
@@ -218,7 +229,7 @@ if ! assert_stream_contains_job "$REPAIR_JOB_ID"; then
   fatal "Redis Stream 中未找到 repair job_id: $REPAIR_JOB_ID"
 fi
 
-echo "[6/6] B3 控制面验证通过"
-echo "EVIDENCE_B3_MARKERS: control_plane_only=true legacy_loops_started=0"
-echo "EVIDENCE_B3_DISABLED: repair_disabled=1 gc_disabled=1"
-echo "EVIDENCE_B3_REPAIR: job_id=$REPAIR_JOB_ID stream=$STREAM_KEY"
+echo "[6/6] scheduler 控制面验证通过"
+echo "EVIDENCE_CONTROL_PLANE_MARKERS: control_plane_only=true legacy_loops_started=0"
+echo "EVIDENCE_CONTROL_PLANE_DISABLED: repair_disabled=1 gc_disabled=1"
+echo "EVIDENCE_CONTROL_PLANE_REPAIR: job_id=$REPAIR_JOB_ID stream=$STREAM_KEY"

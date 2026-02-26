@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 提交一条任务到 API。
+# 2) 在 Redis Stream 中定位该 job，校验字段是否齐全（job_id/enqueue_ts/payload_ref/priority）。
+# 3) 继续校验 payload_ref 指向的值是否是合法 JSON 且符合 envelope 约束。
+# 该脚本用于确认“提交入队协议”没有回归。
+
 API_BASE="${API_BASE:-http://127.0.0.1:18080}"
 STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-oj-redis}"
@@ -19,6 +25,7 @@ if [ -z "$REDIS_PASSWORD" ]; then
   exit 1
 fi
 
+# 先登录拿 token，再提交任务，保证后续校验基于真实业务路径。
 TOKEN="$(curl -sS -X POST "$API_BASE/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}" \
@@ -48,6 +55,7 @@ if [ -z "$JOB_ID" ]; then
   exit 1
 fi
 
+# 从 stream 逆序取最近消息，并在本地解析定位本次 job。
 XRANGE_RAW="$(docker exec -i "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" --raw XREVRANGE "$STREAM_KEY" + - COUNT 200)"
 
 PARSED="$(printf '%s\n' "$XRANGE_RAW" | python3 - "$JOB_ID" <<'PY'
@@ -99,6 +107,7 @@ PY
 STREAM_ENTRY_ID="$(printf '%s' "$PARSED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stream_entry_id"])')"
 PAYLOAD_REF="$(printf '%s' "$PARSED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["payload_ref"])')"
 
+# 验证 payload_ref 指向对象存在且为受控 schema。
 PAYLOAD_RAW="$(docker exec -i "$REDIS_CONTAINER" redis-cli -a "$REDIS_PASSWORD" --raw GET "$PAYLOAD_REF")"
 if [ -z "$PAYLOAD_RAW" ]; then
   echo "payload GET returned empty value for key: $PAYLOAD_REF" >&2

@@ -26,7 +26,7 @@ go test ./internal/api -v
 
 # 真实环境验收脚本（需 API/Redis 在线 + PROBLEM_ID）
 PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
-  /home/diguo/Deep_OJ/scripts/verify_c1_stream_enqueue.sh
+  /home/diguo/Deep_OJ/scripts/verify_stream_enqueue_payload.sh
 ```
 
 ### 涉及文件
@@ -38,7 +38,7 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - `src/go/internal/api/env.go`
 - `src/go/internal/appconfig/config.go`
 - `src/go/cmd/api/main.go`
-- `scripts/verify_c1_stream_enqueue.sh`
+- `scripts/verify_stream_enqueue_payload.sh`
 - `DESIGN.md`
 - `RUNBOOK.md`
 
@@ -74,7 +74,7 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - 配置语义收敛：文档与注释统一为“运行时从环境变量读取，config.yaml 仅回填缺省值（进程内）”。
 - payload envelope v1 扩展：新增 `encoding=base64`、`content_type=application/json`；读取侧对缺失字段做兼容默认。
 - `api_stream_enqueue_latency_ms` 确认为 Histogram，bucket 调整为毫秒级 `1/2/5/10/20/50/100/200/500/1000/2000`。
-- `scripts/verify_c1_stream_enqueue.sh` 增强：
+- `scripts/verify_stream_enqueue_payload.sh` 增强：
   - 校验 payload GET 非空
   - 校验 payload JSON 可解析
   - 校验 `schema_version` / `task_data_b64` / `encoding` / `content_type`
@@ -89,7 +89,7 @@ go test ./...
 
 # C1 stream 入队验证脚本（需 API/Redis 在线 + PROBLEM_ID）
 PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
-  /home/diguo/Deep_OJ/scripts/verify_c1_stream_enqueue.sh
+  /home/diguo/Deep_OJ/scripts/verify_stream_enqueue_payload.sh
 ```
 
 ### 涉及文件
@@ -105,7 +105,7 @@ PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
 - `src/go/internal/api/handler.go`
 - `src/go/internal/api/metrics.go`
 - `src/go/cmd/api/main.go`
-- `scripts/verify_c1_stream_enqueue.sh`
+- `scripts/verify_stream_enqueue_payload.sh`
 - `config.yaml`
 - `docker-compose.yml`
 - `DESIGN.md`
@@ -262,7 +262,7 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XAUTOCLAIM "$STREAM_KEY"
   - `api_outbox_dispatch_latency_seconds`
   - `api_outbox_pending`
 - API 进程启动 dispatcher（`src/go/cmd/api/main.go`）
-- 新增验证脚本：`scripts/verify_d1_outbox.sh`
+- 新增验证脚本：`scripts/verify_outbox_relay_recovery.sh`
 
 ### 验收命令
 
@@ -278,7 +278,7 @@ go test ./internal/api -run 'TestOutbox_' -count=20 -v
 PROBLEM_ID=<problem_id> \
 POSTGRES_PASSWORD=<postgres_password> \
 REDIS_PASSWORD=<redis_password> \
-bash /home/diguo/Deep_OJ/scripts/verify_d1_outbox.sh
+bash /home/diguo/Deep_OJ/scripts/verify_outbox_relay_recovery.sh
 ```
 
 ### 涉及文件
@@ -292,6 +292,6 @@ bash /home/diguo/Deep_OJ/scripts/verify_d1_outbox.sh
 - `src/go/internal/api/metrics.go`
 - `src/go/internal/api/env.go`
 - `src/go/cmd/api/main.go`
-- `scripts/verify_d1_outbox.sh`
+- `scripts/verify_outbox_relay_recovery.sh`
 - `DESIGN.md`
 - `RUNBOOK.md`

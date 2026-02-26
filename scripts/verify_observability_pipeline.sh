@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 验证 API / scheduler / worker 指标端点可达且关键指标存在。
+# 2) 验证 metrics 中不存在高基数 job_id label。
+# 3) 验证日志可通过 trace_id 串联业务链路。
+# 该脚本用于回归“可观测性闭环”是否完整。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -46,7 +52,7 @@ if [[ -f docker-compose.override.yml ]]; then
 fi
 
 if [[ "$RUNTIME_OVERRIDE" == "1" ]]; then
-  RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_mvp4.runtime.override.yml"
+  RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_observability.runtime.override.yml"
   cat > "$RUNTIME_OVERRIDE_FILE" <<YAML
 services:
   api:
@@ -204,7 +210,7 @@ fail_verify() {
   local body_file="${3:-$LAST_HTTP_BODY_FILE}"
   local message="${4:-}"
 
-  echo "ERROR: MVP-4 verify failed" >&2
+  echo "ERROR: 可观测性验收失败" >&2
   echo "  failed_step: $step" >&2
   echo "  http_status: ${status:-<none>}" >&2
   echo "  response_body (<=2KB):" >&2
@@ -411,6 +417,8 @@ elif ! command -v grep >/dev/null 2>&1; then
   fail_verify "dependency check" "<none>" "" "missing command: rg or grep"
 fi
 
+# 主流程：
+# 启动服务 -> 触发 smoke 流量 -> 断言指标可达与指标字段规范 -> 断言日志链路可追踪。
 echo "[1/9] start services"
 FAILED_STEP="start services"
 if [[ "$COMPOSE_BUILD" == "1" ]]; then
@@ -620,4 +628,4 @@ echo "[9/9] done"
 echo "EVIDENCE_METRICS: components=${METRICS_COMPONENTS}"
 echo "EVIDENCE_LOG_CHAIN: trace_id=${TRACE_ID} job_id=${JOB_ID}"
 echo "EVIDENCE_NO_HIGH_CARDINALITY: job_id_label_absent=1"
-echo "MVP-4 verify passed"
+echo "observability pipeline verify passed"

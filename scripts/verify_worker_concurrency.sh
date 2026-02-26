@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 通过提交长耗时任务，观测 worker 并发是否受 WORKER_POOL_SIZE 约束。
+# 2) 在压测窗口采样 worker metrics，验证 inflight 峰值未超过上限。
+# 3) 同时检查 backpressure 计数器是否随压力增加。
+# 该脚本用于验证“并发上限 + 背压保护”两个关键行为。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -11,7 +17,7 @@ EMAIL="${EMAIL:-${USERNAME}@example.com}"
 WORKER_POOL_SIZE_REQUESTED="${WORKER_POOL_SIZE_REQUESTED:-2}"
 WORKER_METRICS_PORT="${WORKER_METRICS_PORT:-9092}"
 WORKER_MINIO_ENDPOINT="${WORKER_MINIO_ENDPOINT:-oj-minio:9000}"
-API_JWT_SECRET="${API_JWT_SECRET:-verify-f3-jwt-secret}"
+API_JWT_SECRET="${API_JWT_SECRET:-verify-worker-concurrency-jwt-secret}"
 SUBMIT_MULTIPLIER="${SUBMIT_MULTIPLIER:-3}"
 TIME_LIMIT_MS="${TIME_LIMIT_MS:-7000}"
 MEMORY_LIMIT_KB="${MEMORY_LIMIT_KB:-65536}"
@@ -31,7 +37,7 @@ COMPOSE_FILES=(-f docker-compose.yml)
 if [[ -f docker-compose.override.yml ]]; then
   COMPOSE_FILES+=(-f docker-compose.override.yml)
 fi
-RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_f3.runtime.override.yml"
+RUNTIME_OVERRIDE_FILE="$TMP_DIR/verify_worker_concurrency.runtime.override.yml"
 cat >"$RUNTIME_OVERRIDE_FILE" <<YAML
 services:
   api:
@@ -46,6 +52,7 @@ services:
 YAML
 COMPOSE_FILES+=(-f "$RUNTIME_OVERRIDE_FILE")
 
+# 清理与诊断函数：保证失败时能直接看到 worker 日志与指标快照。
 cleanup() {
   if [[ "$KEEP_TMP" == "1" ]]; then
     echo "KEEP_TMP=1, retain tmp directory: $TMP_DIR" >&2
@@ -306,6 +313,7 @@ print(left - right)
 PY
 }
 
+# 在施压期间周期采样 metrics，避免只看单个时间点导致误判。
 sample_metrics_during_load() {
   local worker_container="$1"
   local output_dir="$2"
@@ -370,6 +378,8 @@ for cmd in curl python3 docker bash; do
   require_cmd "$cmd"
 done
 
+# 主流程：
+# 启动环境 -> 注册上传题目 -> 施压并采样 -> 校验并发峰值与背压计数器。
 if ! [[ "$WORKER_POOL_SIZE_REQUESTED" =~ ^[0-9]+$ ]]; then
   fatal "WORKER_POOL_SIZE_REQUESTED must be a positive integer"
 fi
@@ -528,5 +538,5 @@ if [[ "$(float_gt "$read_pause_delta" "0")" != "1" && "$(float_gt "$reclaim_paus
 fi
 
 echo "[7/7] evidence"
-echo "EVIDENCE_F3_LIMIT: max_concurrency=${max_concurrency} max_inflight_seen=${max_inflight_seen} max_exec_inflight_seen=${max_exec_inflight_seen:-0} max_stream_inflight_seen=${max_stream_inflight_seen:-0}"
-echo "EVIDENCE_F3_BACKPRESSURE: read_pause_delta=${read_pause_delta} reclaim_pause_delta=${reclaim_pause_delta}"
+echo "EVIDENCE_WORKER_CONCURRENCY_LIMIT: max_concurrency=${max_concurrency} max_inflight_seen=${max_inflight_seen} max_exec_inflight_seen=${max_exec_inflight_seen:-0} max_stream_inflight_seen=${max_stream_inflight_seen:-0}"
+echo "EVIDENCE_WORKER_CONCURRENCY_BACKPRESSURE: read_pause_delta=${read_pause_delta} reclaim_pause_delta=${reclaim_pause_delta}"

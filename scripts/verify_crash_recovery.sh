@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 提交任务后在运行中故意杀掉 worker，模拟真实崩溃。
+# 2) 验证重启后能 reclaim 并最终完成，且不会产生乱序覆盖。
+# 3) 输出 PEL、attempt、fencing 相关证据，证明恢复链路正确。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -35,8 +40,8 @@ READINESS_HEALTH_BODY_FILE=""
 READINESS_LAST_SOURCE="<none>"
 HAS_RG=0
 COMPOSE_FILES=(-f docker-compose.yml)
-if [[ -f docker-compose.verify-g1.yml ]]; then
-  COMPOSE_FILES+=(-f docker-compose.verify-g1.yml)
+if [[ -f docker-compose.verify-process-cleanup.yml ]]; then
+  COMPOSE_FILES+=(-f docker-compose.verify-process-cleanup.yml)
 fi
 if [[ -f docker-compose.override.yml ]]; then
   COMPOSE_FILES+=(-f docker-compose.override.yml)
@@ -164,7 +169,7 @@ fail_verify() {
   local body_file="${3:-$LAST_HTTP_BODY_FILE}"
   local message="${4:-}"
 
-  echo "ERROR: MVP-3 verify failed" >&2
+  echo "ERROR: 崩溃恢复验收失败" >&2
   echo "  failed_step: $step" >&2
   echo "  http_status: ${status:-<none>}" >&2
   echo "  response_body (<=2KB):" >&2
@@ -396,6 +401,8 @@ elif ! command -v grep >/dev/null 2>&1; then
   fail_verify "dependency check" "<none>" "" "missing command: rg or grep"
 fi
 
+# 主流程：
+# 启动服务并提交任务 -> 强制 crash worker -> 观测 reclaim/finalize -> 输出恢复证据。
 echo "[1/10] start services"
 FAILED_STEP="start services"
 if [[ "$COMPOSE_BUILD" == "1" ]]; then
@@ -819,5 +826,5 @@ if [[ "$STALE_WRITE_ROWS" != "0" ]]; then
 fi
 echo "EVIDENCE_FENCING: job_id=$JOB_ID stale_attempt=$ATTEMPT_BEFORE final_attempt=$DB_ATTEMPT_ID stale_write_rows=$STALE_WRITE_ROWS"
 
-echo "MVP-3 verify passed"
+echo "crash recovery verify passed"
 echo "pass_criteria: worker crash(no xack) -> reclaim -> Finished, attempt bump, stale attempt write blocked"

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 通过停 worker 制造积压，触发 API 背压。
+# 2) 验证重压下会出现 429 且带 Retry-After。
+# 3) 恢复 worker 后验证接口恢复到 2xx。
+# 失败时会输出 compose 日志与 stream 压力快照，便于定位限流判定问题。
+
 API_BASE="${API_BASE:-http://127.0.0.1:18080}"
 USERNAME="${USERNAME:-admin}"
 PASSWORD="${PASSWORD:-password}"
@@ -28,7 +34,7 @@ trap cleanup EXIT
 
 usage() {
   cat <<USAGE
-Usage: scripts/verify_d3_backpressure.sh
+Usage: scripts/verify_api_backpressure.sh
 
 Environment overrides:
   API_BASE               (default: http://127.0.0.1:18080)
@@ -53,6 +59,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
+# 环境自检：缺命令时立即失败，避免中途半程失败造成误判。
 if ! command -v curl >/dev/null 2>&1; then
   echo "ERROR: curl not found" >&2
   exit 2
@@ -143,6 +150,7 @@ fatal_request() {
   exit 1
 }
 
+# 统一 HTTP 请求断言逻辑：记录状态码、响应头、响应体，失败可回溯。
 http_request() {
   local method="$1"
   local url="$2"
@@ -240,6 +248,8 @@ ensure_stream_group() {
   fi
 }
 
+# 主流程：
+# 启动核心服务 -> 造压触发背压 -> 恢复 worker -> 验证恢复。
 export JWT_SECRET ADMIN_USERS REDIS_PASSWORD STREAM_KEY STREAM_GROUP
 
 echo "[1/8] start core services (api/scheduler/redis/postgres/minio)"

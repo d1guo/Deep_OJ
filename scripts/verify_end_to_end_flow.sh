@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 从“注册/登录 -> 上传题目 -> 提交代码 -> 轮询结果”完整跑通主业务链路。
+# 2) 结合 DB 查询，确认任务最终状态与接口返回一致。
+# 3) 作为最基础的端到端回归验收脚本。
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -98,7 +103,7 @@ fail_verify() {
   local body_file="${3:-$LAST_HTTP_BODY_FILE}"
   local message="${4:-}"
 
-  echo "ERROR: MVP-2 verify failed" >&2
+  echo "ERROR: 端到端流程验收失败" >&2
   echo "  failed_step: $step" >&2
   echo "  http_status: ${status:-<none>}" >&2
   echo "  response_body (<=2KB):" >&2
@@ -387,6 +392,8 @@ elif ! command -v grep >/dev/null 2>&1; then
   fail_verify "dependency check" "<none>" "" "missing command: rg or grep"
 fi
 
+# 主流程：
+# 启动依赖 -> 跑 smoke e2e -> 抽取 job_id -> 轮询终态 -> 核对数据库证据。
 echo "[1/7] start services"
 FAILED_STEP="start services"
 if ! docker compose up -d; then
@@ -530,6 +537,6 @@ fi
 
 echo "$DB_TABLE_OUTPUT"
 
-echo "[7/7] MVP-2 verify passed"
+echo "[7/7] 端到端流程验收通过"
 echo "pass_criteria: api.status=Finished and db.count=1 with terminal status/verdict"
 echo "job_id=$JOB_ID"

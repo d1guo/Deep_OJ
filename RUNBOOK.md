@@ -39,7 +39,7 @@ curl -fsS http://127.0.0.1:13000/api/health
 系统已移除 etcd 运行时依赖。请使用以下脚本执行完整验收：
 
 ```bash
-bash scripts/verify_b1_no_etcd.sh
+bash scripts/verify_no_etcd_runtime.sh
 ```
 
 ### 0.2 无 legacy 数据面验证（B2）
@@ -51,7 +51,7 @@ bash scripts/verify_b1_no_etcd.sh
 验证命令：
 
 ```bash
-bash scripts/verify_b2_no_legacy_dataplane.sh
+bash scripts/verify_no_legacy_dataplane.sh
 ```
 
 ### 0.3 B3 控制面 scheduler 验证
@@ -64,7 +64,7 @@ scheduler 已收敛为纯控制面，只保留两类循环：
 验证命令：
 
 ```bash
-bash scripts/verify_b3_control_plane.sh
+bash scripts/verify_scheduler_control_plane.sh
 ```
 
 开启方式（建议优先环境变量覆盖）：
@@ -282,7 +282,7 @@ docker exec -it oj-redis redis-cli -a "$REDIS_PASSWORD" XTRIM "$STREAM_KEY" MAXL
 
 ```bash
 PROBLEM_ID=<problem_id> REDIS_PASSWORD=<redis_password> \
-  bash scripts/verify_c1_stream_enqueue.sh
+  bash scripts/verify_stream_enqueue_payload.sh
 ```
 
 粗算 backlog/lag（运维口径）：
@@ -342,7 +342,7 @@ Redis down 场景预期：
 可复现脚本：
 
 ```bash
-bash scripts/verify_d1_outbox.sh
+bash scripts/verify_outbox_relay_recovery.sh
 ```
 
 迁移与回滚（手动）：

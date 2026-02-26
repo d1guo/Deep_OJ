@@ -52,33 +52,33 @@
     - 端口冲突（18080）已修复：`Bind ... port is already allocated` 不再出现
 - [x] MVP-2 端到端：提交 -> 入队 -> 执行 -> 结果落库 -> 查询结果，全链路可跑通（提供命令/接口示例）  
   - 验收证据（2026-02-18）：
-    - 一键：`bash scripts/verify_mvp2_e2e.sh`
+    - 一键：`bash scripts/verify_end_to_end_flow.sh`
     - 关键输出示例：
       - `extracted_job_id=1e539f1b-c1f3-428c-b7c5-3302591ca130`
       - `api_status_check: status=Finished ... verdict=Accepted attempt_id=1`
       - Postgres：`SELECT ... FROM submissions WHERE job_id='...'` 返回 1 行且终态 `Accepted`
-    - 涉及文件：`scripts/verify_mvp2_e2e.sh`、`RUNBOOK.md`、`TASK.md`
+    - 涉及文件：`scripts/verify_end_to_end_flow.sh`、`RUNBOOK.md`、`TASK.md`
 - [x] MVP-3 崩溃恢复：Worker 在关键点崩溃（未 XACK）后，重启可 reclaim 并最终完成且不乱结果（集成测试或可复现步骤）  
   - 验收证据（2026-02-18）：
-    - 一键：`bash scripts/verify_mvp3_crash_recover.sh`
+    - 一键：`bash scripts/verify_crash_recovery.sh`
     - 关键输出判据（示例）：
       - `EVIDENCE_PRE_CRASH: status=running attempt_id=1`
       - `EVIDENCE_CRASH: signal=SIGKILL ... worker_restarted=1`
       - `EVIDENCE_PEL: ... pending_after>0`
       - `EVIDENCE_RECLAIM: ... attempt_after_api=2`
       - `EVIDENCE_FENCING: ... stale_write_rows=0`
-      - `MVP-3 verify passed`
-    - 涉及文件：`scripts/verify_mvp3_crash_recover.sh`、`RUNBOOK.md`、`TASK.md`
+      - `crash recovery verify passed`
+    - 涉及文件：`scripts/verify_crash_recovery.sh`、`RUNBOOK.md`、`TASK.md`
 - [x] MVP-4 可观测：至少有基本 metrics + structured logs，能定位单个 job（logs）+ 看系统吞吐/延迟（metrics）  
   - 验收证据（2026-02-18）：
-    - 一键：`bash scripts/verify_mvp4_observability.sh`
+    - 一键：`bash scripts/verify_observability_pipeline.sh`
     - 关键输出示例：
       - `metrics_reachable_components=api worker scheduler`
       - `metrics_required_names=ok`
       - `metrics_job_id_label=absent`
       - `EVIDENCE_LOG_CHAIN: trace_id=<...> job_id=<...>`
-      - `MVP-4 verify passed`
-    - 涉及文件：`scripts/verify_mvp4_observability.sh`、`RUNBOOK.md`、`TASK.md`
+      - `observability pipeline verify passed`
+    - 涉及文件：`scripts/verify_observability_pipeline.sh`、`RUNBOOK.md`、`TASK.md`
 
 ---
 
@@ -124,7 +124,7 @@
 - [x] D1 Outbox Pattern：API 同事务写 jobs + outbox_events；dispatcher 异步投递 streams，幂等可重试
 - [x] D2 Streams 压力口径：backlog/lag（XINFO GROUPS + XLEN）与 oldest_age（enqueue_ts），写入 bench_report.md
 - [x] D3 API 背压：按 backlog/oldest_age 分级限流；重压返回 429 + Retry-After  
-  - 验收：`bash scripts/verify_d3_backpressure.sh`（出现 429 + Retry-After，恢复 worker 后 2xx）
+  - 验收：`bash scripts/verify_api_backpressure.sh`（出现 429 + Retry-After，恢复 worker 后 2xx）
 - [x] D3.1 升级 go-redis 到 v9 以兼容 Redis 7+/8 的 XAUTOCLAIM 返回结构，修复 reclaim loop 解析错误  
   - 验收证据（2026-02-19）：
     - `cd src/go && go list -m github.com/redis/go-redis/v9` => `github.com/redis/go-redis/v9 v9.18.0`
@@ -136,7 +136,7 @@
   - 验收：`bash scripts/verify_e1_streams_only.sh`（scheduler control-plane only；worker 执行 consume/ack/reclaim）
 - [x] E2 B3 控制面收敛：scheduler 仅保留 repair/gc 循环，不再承担任何数据面职责  
   - 验收证据（2026-02-21）：
-    - `bash scripts/verify_b3_control_plane.sh`
+    - `bash scripts/verify_scheduler_control_plane.sh`
     - 启动日志包含：`dispatch_mode=streams_only`、`control_plane_only=true`、`legacy_loops_started=0`、`control_plane_loops_started=repair,gc`
     - 默认日志包含：`event=repair_disabled`、`event=gc_disabled`
     - 开启 repair 后日志包含：`event=repair_xadd` 且 Redis `XRANGE/XREVRANGE deepoj:jobs` 可见对应 `job_id`
@@ -151,7 +151,7 @@
 ### G. 沙箱可信度与展示材料（最后做“护城河”）
 - [x] G1 “杀全家”语义：进程组 + kill(-pgid, SIGKILL)，防子孙泄漏（含测试）  
   - 验收证据（2026-02-20）：
-    - 前置检查（workspace/seccomp/权限）：`bash scripts/verify_g1_prereq.sh`
+    - 前置检查（workspace/seccomp/权限）：`bash scripts/verify_sandbox_prerequisites.sh`
     - 默认 seccomp 编译：
       ```bash
       mkdir -p "$(pwd)/data/workspace"
@@ -186,8 +186,8 @@
         /app/judge_engine --compile -s /tmp/g1_accept.cpp -r "g1_unconfined_$(date +%s)" -C /app/config.yaml
       ```
       返回 `status=Compiled`。
-    - `bash scripts/verify_g1_kill_all.sh`  
-      输出 `EVIDENCE_G1_PARENT_KILL ... all_gone=1`、`EVIDENCE_G1_KILL_BEFORE_PS`、`EVIDENCE_G1_KILL_AFTER_PS`、`EVIDENCE_G1_KILL_BEFORE_CGROUP`、`EVIDENCE_G1_KILL_AFTER_CGROUP`，最终 `G1 verify passed`。
+    - `bash scripts/verify_worker_process_cleanup.sh`  
+      输出 `EVIDENCE_PROCESS_CLEANUP_PARENT_KILL ... all_gone=1`、`EVIDENCE_PROCESS_CLEANUP_BEFORE_PS`、`EVIDENCE_PROCESS_CLEANUP_AFTER_PS`、`EVIDENCE_PROCESS_CLEANUP_BEFORE_CGROUP`、`EVIDENCE_PROCESS_CLEANUP_AFTER_CGROUP`，最终 `worker process cleanup verify passed`。
 - [ ] G2 清理幂等：cgroup/namespace 清理可重复执行（含测试/复现）
 - [ ] G3 6 类对抗测试：fork/线程/内存/FD/磁盘/逃逸 syscall（用例 + 结果）
 - [ ] G4 FS/路径逃逸测试：/etc、/proc、符号链接穿越、超大文件写入（用例 + 结果）

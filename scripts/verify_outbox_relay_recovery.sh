@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 脚本用途：
+# 1) 人为制造 Redis 不可用，验证 API 仍可提交（依赖 outbox 落库）。
+# 2) 检查 outbox_events 出现 pending。
+# 3) 恢复 Redis 后验证 dispatcher 自动补投递到 Stream。
+# 该脚本用于确认“数据库兜底 + 异步补投递”链路可用。
+
 API_BASE="${API_BASE:-http://127.0.0.1:18080}"
 STREAM_KEY="${JOB_STREAM_KEY:-deepoj:jobs}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-oj-redis}"
@@ -34,6 +40,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 先登录拿 token，确保后续 submit 请求符合真实鉴权流程。
 TOKEN="$(curl -sS -X POST "$API_BASE/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}" \
@@ -46,6 +53,7 @@ fi
 echo "[1/5] stop redis to simulate outage: $REDIS_CONTAINER"
 docker stop "$REDIS_CONTAINER" >/dev/null
 
+# Redis 下线时提交任务，应当成功并写入 outbox，而不是直接失败。
 echo "[2/5] submit while redis is down"
 JOB_ID="$(curl -sS -X POST "$API_BASE/api/v1/submit" \
   -H "Authorization: Bearer $TOKEN" \
@@ -78,6 +86,7 @@ fi
 echo "[4/5] restore redis and wait for dispatcher"
 docker start "$REDIS_CONTAINER" >/dev/null
 deadline=$(( $(date +%s) + WAIT_SECONDS ))
+# 轮询等待 dispatcher 回填 stream_entry_id，作为“已补投递”的判据。
 while true; do
   delivered="$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" -i "$POSTGRES_CONTAINER" \
     psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc \
