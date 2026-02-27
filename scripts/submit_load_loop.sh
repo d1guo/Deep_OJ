@@ -17,7 +17,7 @@ PROBLEM_ID="${PROBLEM_ID:-}"
 TOKEN="${TOKEN:-}"
 
 WORKERS="${WORKERS:-2}"
-DURATION_SEC="${DURATION_SEC:-300}"         # 0 表示无限持续，直到 Ctrl+C
+DURATION_SEC="${DURATION_SEC:-3600}"        # 0 表示无限持续，直到 Ctrl+C
 SUBMIT_INTERVAL_SEC="${SUBMIT_INTERVAL_SEC:-0.2}"
 SUMMARY_INTERVAL_SEC="${SUMMARY_INTERVAL_SEC:-5}"
 MIXED_MODE="${MIXED_MODE:-0}"               # 0: 全 AC, 1: AC/WA/CE 混合
@@ -62,7 +62,7 @@ Env:
   TOKEN                default: empty (if set, skip register/login)
   PROBLEM_ID           default: empty (auto upload minimal problem.zip)
   WORKERS              default: 2
-  DURATION_SEC         default: 300, set 0 to run until Ctrl+C
+  DURATION_SEC         default: 3600, set 0 to run until Ctrl+C
   SUBMIT_INTERVAL_SEC  default: 0.2
   SUMMARY_INTERVAL_SEC default: 5
   MIXED_MODE           default: 0 (1 means AC/WA/CE mixed)
