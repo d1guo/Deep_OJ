@@ -1,99 +1,489 @@
-# Deep-OJ 云集群部署与简历空格取数手册（腾讯云按量版）
+# Deep-OJ 云上压测单页傻瓜教程（从拿到新服务器到跑 1 小时）
 
-## 0. 目标与结论
+## 0. 先读这一段（30 秒）
 
-本手册是 Deep-OJ 云上落地与简历数据取数的唯一主文档，覆盖：
+你现在只需要看这一份文档：`docs/low_cost_cloud_cluster.md`。
 
-- 腾讯云按量计费集群如何部署
-- 简历每个横线空格如何测、从哪里取值
-- 限流与背压参数怎么调
-- 按 S0-S6 一步一步执行的命令手册（每步含“目的/命令/产物”）
+- 当前执行口径：4 角色节点 + 1 小时压测。
+- 4 角色节点：`control` / `stateful` / `minio` / `worker`。
+- 一机一角色组（不是严格一机一容器）。
+- 目标：从 0 到 1 完成部署、健康检查、1 小时压测、worker 扩容观察。
 
-固定决策如下：
+本页所有命令都会标注“在哪台机器执行”。
 
-- 云平台：腾讯云（CVM + VPC + 安全组）
-- 拓扑：1 台 API 直出公网，不上 Nginx（压测/取数阶段）
-- 口径：标准口径（1 小时主压测 + Outbox 5/5/5 + Worker 1->4 对比）
-- 文档归一：本文件为主；`deploy/cluster/README.md` 仅保留入口跳转
+## 1. 你需要准备什么（开工前）
 
-## 1. 部署拓扑（到底多少台）
+### 1.1 最低资源建议
 
-### 1.1 节点数量与职责
+- `node-control`：2C4G（API + Scheduler + Prometheus + Grafana）
+- `node-stateful`：4C8G（PostgreSQL + Redis）
+- `node-minio`：2C4G（MinIO）
+- `node-worker-1`：4C8G（常驻 worker）
+- 可选扩容：`node-worker-2..4`
 
-| 节点 | 数量 | 规格建议 | 部署内容 |
-|---|---:|---|---|
-| `node-control` | 1 | 2C4G / 80GB | API + Scheduler + Prometheus + Grafana |
-| `node-stateful` | 1 | 4C8G / 200GB | PostgreSQL + Redis |
-| `node-minio` | 1 | 2C4G / 200GB | MinIO |
-| `node-worker-1` | 1 | 4C8G / 120GB | 常驻 Worker |
-| `node-worker-2..4` | 3（临时） | 4C8G / 120GB | 压测扩容 Worker |
+### 1.2 机器要求
 
-结论：
+- OS：Ubuntu（建议 22.04+）
+- 你有 sudo 权限
+- 所有节点在同一 VPC，可私网互通
+- 你可 SSH 到所有节点
 
-- 常驻：4 台
-- 压测扩容窗口：7 台
-- API Server：1 台
-- Nginx：不上（本阶段）
+### 1.3 一次性变量模板（先填好）
 
-### 1.2 Nginx 是否要上
+先在你本地管理机准备一份变量清单（后面会一直用）：
 
-- 当前“简历数据取数”阶段：不上 Nginx，减少链路变量，降低排障成本。
-- 仅当你要做“域名 + TLS + 80/443 展示”时再加 Nginx（可与 API 同机）。
+```bash
+# 在你本地管理机执行（不是服务器）
+cat > cluster.env <<'VARS'
+CONTROL_IP=10.0.1.10
+STATEFUL_IP=10.0.1.11
+MINIO_IP=10.0.1.12
+WORKER1_IP=10.0.1.21
+WORKER2_IP=10.0.1.22
+WORKER3_IP=10.0.1.23
+WORKER4_IP=10.0.1.24
 
-### 1.3 网络与安全组（腾讯云）
+POSTGRES_PASSWORD=replace_me_pg
+REDIS_PASSWORD=replace_me_redis
+MINIO_ROOT_USER=deepoj_minio_user
+MINIO_ROOT_PASSWORD=replace_me_minio
+JWT_SECRET=replace_me_jwt
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=replace_me_grafana
+VARS
+```
 
-- 所有节点放同一个 VPC 私网。
-- 仅 `node-control` 开公网入口。
-- 推荐开放策略：
+## 2. 从拿到新服务器开始（A-J）
 
-| 端口 | 节点 | 来源 | 用途 |
-|---|---|---|---|
-| `22` | 全部 | 你的办公公网 IP | SSH |
-| `18080` | node-control | `0.0.0.0/0` 或办公 IP | API |
-| `19090` | node-control | 办公 IP 或不开放 | Prometheus（可选） |
-| `13000` | node-control | 不开放公网，走 SSH 隧道 | Grafana |
-| `5432` | node-stateful | VPC 内 node-control + worker 网段 | PostgreSQL |
-| `6379` | node-stateful | VPC 内 node-control + worker 网段 | Redis |
-| `9000/9001` | node-minio | VPC 内指定源 | MinIO API/Console |
-| `50051/9092` | node-worker-* | VPC 内 | worker gRPC + metrics |
+### Step A：给机器定角色（control/stateful/minio/worker）
 
-## 2. 目录与模板（本仓库）
+这一步在干什么：把每台机器的职责固定，避免后续在错误节点执行命令。  
+为什么现在做：角色没定好，后面配置里的 IP 和 compose 文件会全乱。  
+在哪台机器执行：在你本地管理机（记录即可）。
 
-- 分节点 Compose 模板：`deploy/cluster/`
-- 控制面配置模板：`deploy/cluster/config.control.example.yaml`
-- Worker 配置模板：`deploy/cluster/config.worker.example.yaml`
-- Prometheus 模板：`deploy/cluster/prometheus.yml`
+复制即用命令：
 
-说明：
+```bash
+# 在你本地管理机执行
+source cluster.env
+printf "%-16s %s\n" \
+  node-control "$CONTROL_IP" \
+  node-stateful "$STATEFUL_IP" \
+  node-minio "$MINIO_IP" \
+  node-worker-1 "$WORKER1_IP" \
+  node-worker-2 "$WORKER2_IP" \
+  node-worker-3 "$WORKER3_IP" \
+  node-worker-4 "$WORKER4_IP"
+```
 
-- `*.example.yaml` 是样例，复制成真实文件后再填私网 IP/密钥。
-- `node-*.compose.yml` 是分节点编排文件，不是新项目。
+成功标志：你有一张“角色 -> IP”清单。  
+失败先查什么：IP 是否重复、是否有空值。
 
-## 3. 参数怎么调（限流 + 背压）
+---
 
-控制面配置文件（`config.control.yaml`）重点项：
+### Step B：每台机器安装 Docker + Compose
 
-- `api.limits.submit_rate_limit.ip_limit`
-- `api.limits.submit_rate_limit.user_limit`
-- `api.limits.submit_rate_limit.window_sec`
-- `api.limits.submit_max_inflight`
+这一步在干什么：把所有节点统一到同一容器运行时环境。  
+为什么现在做：后续所有步骤都依赖 `docker compose`。  
+在哪台机器执行：所有节点都执行一次（control/stateful/minio/worker）。
 
-Worker 配置文件（`config.worker.yaml`）重点项：
+复制即用命令：
 
-- `worker.stream.backpressure_sleep_ms`
-- `worker.pool_size`
+```bash
+# 在每台服务器执行
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg lsb-release
 
-推荐三档：
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-| 档位 | submit_rate_limit (ip/user) | submit_max_inflight | worker.backpressure_sleep_ms | 用途 |
-|---|---|---:|---:|---|
-| 日常回归 | `1200 / 2400` | `5000` | `50` | 功能验证 |
-| 主压测 | `200000 / 200000` | `30000` | `20~50` | 避免入口限流干扰吞吐 |
-| 背压专项 | `200000 / 200000` | `200~500` | `50` | 快速触发 429/拥塞保护 |
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-## 4. 简历空格全量编号表（B01-B24）
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-同一实验序号可覆盖多个空格。所有空格都必须可追溯到命令输出或指标文件。
+sudo usermod -aG docker "$USER"
+newgrp docker || true
+
+docker --version
+docker compose version
+```
+
+成功标志：`docker --version` 和 `docker compose version` 有输出。  
+失败先查什么：
+- `docker: permission denied` -> 重新登录 shell 或 `newgrp docker`
+- apt 报错 -> 检查网络和 Docker 源是否添加成功
+
+---
+
+### Step C：每台机器拉代码并初始化 `.env`
+
+这一步在干什么：把模板配置复制到本机可编辑文件。  
+为什么现在做：后续配置和启动都在 `~/Deep_OJ/deploy/cluster` 目录。  
+在哪台机器执行：所有节点。
+
+复制即用命令：
+
+```bash
+# 在每台服务器执行
+git clone https://github.com/d1guo/Deep_OJ.git ~/Deep_OJ || true
+cd ~/Deep_OJ/deploy/cluster
+cp -n .env.example .env
+```
+
+把密码写入 `.env`（示例，按你的真实值替换）：
+
+```bash
+# 在每台服务器执行（先把变量替换成你自己的）
+cd ~/Deep_OJ/deploy/cluster
+sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=replace_me_pg/' .env
+sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=replace_me_redis/' .env
+sed -i 's/^MINIO_ROOT_PASSWORD=.*/MINIO_ROOT_PASSWORD=replace_me_minio/' .env
+sed -i 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=replace_me_grafana/' .env
+```
+
+成功标志：`ls .env` 存在，且关键密码不是默认占位符。  
+失败先查什么：`sed` 后是否把特殊字符写坏（有特殊字符建议手工编辑 `.env`）。
+
+---
+
+### Step D：配置 control 节点（核心）
+
+这一步在干什么：把 control 节点改成能连到真实 stateful/minio/worker。  
+为什么现在做：control 负责 API、调度、观测；地址错一个，全链路都通不了。  
+在哪台机器执行：只在 `node-control`。
+
+复制即用命令：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+cp -n config.control.example.yaml config.control.yaml
+```
+
+必须改的字段（打开 `config.control.yaml` 逐条改）：
+
+1. `api.database_url` -> 指向 `STATEFUL_IP:5432`
+2. `api.redis_url` -> 指向 `STATEFUL_IP:6379`
+3. `api.minio.endpoint` -> 指向 `http://MINIO_IP:9000`
+4. `api.auth.jwt_secret` -> 你的 JWT_SECRET
+5. `scheduler.database_url` -> 指向 `STATEFUL_IP:5432`
+6. `scheduler.redis_url` -> 指向 `STATEFUL_IP:6379`
+7. `scheduler.workers.addresses` -> 列出全部 worker 私网地址（至少 worker-1）
+
+Prometheus targets 也要改：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+# 编辑 prometheus.yml，把 worker targets 改成真实 worker 私网IP:9092
+```
+
+建议改完后自检：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+rg -n '10\.0\.1\.|change_me|127\.0\.0\.1:9091|10\.0\.1\.21:9092' config.control.yaml prometheus.yml
+```
+
+成功标志：`config.control.yaml` 不再有示例 IP/密码；`workers.addresses` 是你的实际地址。  
+失败先查什么：
+- `database_url` 密码和 `.env` 是否一致
+- `workers.addresses` 端口是否是 `50051`
+- `prometheus.yml` 中 worker 端口是否是 `9092`
+
+---
+
+### Step E：配置每台 worker 节点
+
+这一步在干什么：给每台 worker 唯一身份，并接到同一个 stateful/minio。  
+为什么现在做：worker 身份冲突会导致消费冲突或观测难排查。  
+在哪台机器执行：每台 `node-worker-*`。
+
+复制即用命令：
+
+```bash
+# 在每台 node-worker-* 执行
+cd ~/Deep_OJ/deploy/cluster
+cp -n config.worker.example.yaml config.worker.yaml
+```
+
+必须改的字段：
+
+1. 唯一字段（每台不同）：
+- `worker.id`
+- `worker.addr`（例如 `10.0.1.21:50051`）
+- `worker.stream.consumer`
+
+2. 共享基础地址（所有 worker 一样）：
+- `worker.database_url` -> `STATEFUL_IP:5432`
+- `worker.redis_url` -> `STATEFUL_IP:6379`
+- `worker.minio.endpoint` -> `http://MINIO_IP:9000`
+
+建议自检：
+
+```bash
+# 在每台 node-worker-* 执行
+cd ~/Deep_OJ/deploy/cluster
+rg -n 'worker.id|worker.addr|consumer|database_url|redis_url|minio:' config.worker.yaml
+```
+
+成功标志：每台 worker 的 id/addr/consumer 都不同。  
+失败先查什么：`worker.addr` IP 是否写成别台机器地址。
+
+---
+
+### Step F：按依赖顺序启动（写死顺序）
+
+这一步在干什么：按依赖链启动服务，减少反复失败重启。  
+为什么现在做：先有 DB/Redis/MinIO，control/worker 才能正常连接。  
+在哪台机器执行：按角色节点分别执行。
+
+复制即用命令：
+
+```bash
+# 在 node-stateful 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-stateful.compose.yml up -d
+```
+
+```bash
+# 在 node-minio 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-minio.compose.yml up -d
+```
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-control.compose.yml up -d
+```
+
+```bash
+# 在 node-worker-1 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-worker.compose.yml up -d
+```
+
+成功标志：每台 `docker compose ps` 都显示对应服务 `Up`。  
+失败先查什么：
+- `.env` 密码是否缺失
+- `config.*.yaml` 是否存在且路径正确
+- `docker compose logs --tail=200 <service>`
+
+---
+
+### Step G：control 节点健康检查（门禁）
+
+这一步在干什么：确认 API/Prometheus/Grafana 和 targets 都可用。  
+为什么现在做：这是开压测前门禁，不通过就不要跑流量。  
+在哪台机器执行：`node-control`。
+
+复制即用命令：
+
+```bash
+# 在 node-control 执行
+curl -fsS http://127.0.0.1:18080/api/v1/health
+curl -fsS http://127.0.0.1:19090/-/ready
+curl -fsS http://127.0.0.1:13000/api/health
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,health:.health,lastError:.lastError}'
+```
+
+成功标志：
+- `api/scheduler/worker` 全 `UP`
+- `lastError` 为空
+
+失败先查什么：
+- worker target DOWN -> `node-worker` 的 `docker compose logs --tail=200 worker`
+- scheduler DOWN -> `node-control` 的 `docker compose logs --tail=200 scheduler`
+- api DOWN -> 优先查 DB/Redis 地址与密码
+
+---
+
+### Step H：跑 1 小时压测（固定口径）
+
+这一步在干什么：产出主压测日志和累计任务数。  
+为什么现在做：先拿单 worker 基线数据，后面扩容才有对照。  
+在哪台机器执行：`node-control`。
+
+复制即用命令：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ
+mkdir -p artifacts/resume/manual
+KEEP_TMP=1 DURATION_SEC=3600 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
+bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s1_load_1h.log
+```
+
+取数命令：
+
+```bash
+# 在 node-control 执行
+SUCCESS_IDS_FILE="$(grep 'success_ids=' artifacts/resume/manual/s1_load_1h.log | tail -n1 | cut -d= -f2-)"
+echo "$SUCCESS_IDS_FILE"
+wc -l < "$SUCCESS_IDS_FILE"
+```
+
+成功标志：
+- 日志文件存在：`artifacts/resume/manual/s1_load_1h.log`
+- 能拿到 `success_ids` 路径
+- `wc -l` > 0
+
+失败先查什么：
+- 登录 429 -> 降低 `WORKERS` 或先传固定 `TOKEN`
+- submit 429 太高 -> 看 `submit_429_total{reason=...}` 分类
+
+---
+
+### Step I：扩容 worker 到 2..4（可选）
+
+这一步在干什么：扩容执行侧，观察吞吐是否上升。  
+为什么现在做：验证瓶颈是不是 worker 并发。  
+在哪台机器执行：`node-worker-2`、`node-worker-3`、`node-worker-4`；然后回 `node-control` 观测。
+
+复制即用命令：
+
+```bash
+# 在每台 node-worker-2..4 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-worker.compose.yml up -d
+```
+
+回 control 观察：
+
+```bash
+# 在 node-control 执行
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,instance:.labels.instance,health:.health,lastError:.lastError}'
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=sum(rate(worker_task_total[1m]))' | jq '.data.result'
+```
+
+成功标志：worker targets 数量增加且 `UP`，`Jobs/s` 比基线更高。  
+失败先查什么：新增 worker 的 `config.worker.yaml` 唯一字段是否冲突。
+
+---
+
+### Step J：停机/回滚（按角色）
+
+这一步在干什么：标准化收尾或故障回滚。  
+为什么现在做：避免临时测试环境失控持续扣费。  
+在哪台机器执行：对应角色节点。
+
+复制即用命令：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-control.compose.yml down
+```
+
+```bash
+# 在 node-stateful 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-stateful.compose.yml down
+```
+
+```bash
+# 在 node-minio 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-minio.compose.yml down
+```
+
+```bash
+# 在 node-worker-* 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-worker.compose.yml down
+```
+
+成功标志：各节点 `docker compose ps` 无运行容器。  
+失败先查什么：是否在错误节点执行了错误 compose 文件。
+
+## 3. 1 小时压测与取数（B01/B02/B16）
+
+固定口径：
+
+- 压测时长：`DURATION_SEC=3600`
+- 输出日志：`artifacts/resume/manual/s1_load_1h.log`
+- 累计任务：`wc -l < success_ids_file`
+- 并发参数：压测命令中的 `WORKERS`
+
+## 4. worker 扩容（1 -> 4）与观测
+
+推荐流程：
+
+1. 先只跑 `node-worker-1` 作为 baseline
+2. 跑 1 小时压测并记下 `Jobs/s`、P95、P99
+3. 拉起 `node-worker-2..4`
+4. 再跑同口径压测
+5. 对比吞吐与延迟
+
+关键观测命令（在 node-control）：
+
+```bash
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=sum(rate(worker_task_total[1m]))' | jq '.data.result'
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.95,sum by (le)(rate(job_e2e_duration_seconds_bucket[5m])))' | jq '.data.result'
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.99,sum by (le)(rate(job_e2e_duration_seconds_bucket[5m])))' | jq '.data.result'
+```
+
+## 5. 常见报错速查（最小集合）
+
+### 5.1 API 连不上 DB
+
+现象：API 启动失败或 submit 5xx。  
+先查：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-control.compose.yml logs --tail=200 api
+```
+
+重点看 `database_url` 是否指向 `STATEFUL_IP:5432` 且密码一致。
+
+### 5.2 API 连不上 Redis
+
+现象：提交报队列错误。  
+先查：
+
+```bash
+# 在 node-control 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-control.compose.yml logs --tail=200 api
+```
+
+### 5.3 worker 不消费
+
+现象：submit 成功但任务长期 pending。  
+先查：
+
+```bash
+# 在对应 node-worker 执行
+cd ~/Deep_OJ/deploy/cluster
+docker compose -f node-worker.compose.yml logs --tail=200 worker
+```
+
+重点看 `worker.id / worker.addr / worker.stream.consumer` 是否唯一。
+
+### 5.4 Prometheus target DOWN
+
+现象：看板没数据。  
+先查：
+
+```bash
+# 在 node-control 执行
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,instance:.labels.instance,health:.health,lastError:.lastError}'
+```
+
+重点看：
+- `prometheus.yml` worker targets 是否写了正确私网 IP
+- worker 9092 是否可达
+
+## 6. 简历空格映射（B01-B24）
 
 | 空格编号 | 对应简历空格 | 实验序号 | 取数方法（命令/来源） | 填写口径 |
 |---|---|---|---|---|
@@ -122,307 +512,19 @@ Worker 配置文件（`config.worker.yaml`）重点项：
 | B23 | 吞吐提升 `__` 倍 | S2 | `scaled_jobs / baseline_jobs` | 倍数 |
 | B24 | 沙箱模块单测覆盖率 `__%` | S6 | `collect_coverage.sh` 产物（C++ 覆盖率） | 百分比 |
 
-## 5. 手把手流程（S0-S6）
+## 附录 A：背压口径速记
 
-下面所有步骤默认以仓库根目录 `~/Deep_OJ` 为基准。每个步骤都包含“目的 + 命令 + 产物”。
+- `submit QPS`：入口成功速率（submit 返回 200）
+- `Jobs/s`：端到端完成速率
+- `submit_429_total{reason="rate_limit"}`：入口限流
+- `submit_429_total{reason="inflight_cap"}`：活跃任务上限保护
+- `submit_429_total{reason="backpressure"}`：队列背压拒绝
 
-### S0. 集群落地（4 台常驻）
+## 附录 B：严格“一机一服务”后续怎么做
 
-#### S0-1 代码和环境准备（每台）
-目的：统一版本与密钥入口。
+这不是当前执行路径。若后续要做：
 
-```bash
-git clone https://github.com/d1guo/deep_oj.git ~/Deep_OJ
-cd ~/Deep_OJ/deploy/cluster
-cp .env.example .env
-```
-
-产物：每台机器的 `deploy/cluster/.env`。
-
-#### S0-2 配置落盘
-目的：把样例配置变成真实配置（私网 IP/密码/worker.id）。
-
-```bash
-# node-control
-cd ~/Deep_OJ/deploy/cluster
-cp config.control.example.yaml config.control.yaml
-
-# node-worker-1..4
-cd ~/Deep_OJ/deploy/cluster
-cp config.worker.example.yaml config.worker.yaml
-```
-
-补充：按你的私网地址编辑 `prometheus.yml` 中 `worker` targets。
-
-产物：`config.control.yaml`、`config.worker.yaml`、已更新的 `prometheus.yml`。
-
-#### S0-3 按顺序启动
-目的：先状态，再控制，再计算，避免依赖竞态。
-
-```bash
-# node-stateful
-cd ~/Deep_OJ/deploy/cluster
-docker compose -f node-stateful.compose.yml up -d
-
-# node-minio
-cd ~/Deep_OJ/deploy/cluster
-docker compose -f node-minio.compose.yml up -d
-
-# node-control
-cd ~/Deep_OJ/deploy/cluster
-docker compose -f node-control.compose.yml up -d
-
-# node-worker-1
-cd ~/Deep_OJ/deploy/cluster
-docker compose -f node-worker.compose.yml up -d
-```
-
-产物：4 台常驻节点容器全部运行。
-
-#### S0-4 健康检查（node-control）
-目的：确认 API/Prometheus/Grafana 就绪。
-
-```bash
-curl -fsS http://127.0.0.1:18080/api/v1/health
-curl -fsS http://127.0.0.1:19090/-/ready
-curl -fsS http://127.0.0.1:13000/api/health
-```
-
-产物：3 个健康检查返回 200。
-
-### S1. 1 小时主压测（填 B01/B02/B16）
-
-目的：一次实验产出压测时长、累计任务、并发参数。
-
-```bash
-cd ~/Deep_OJ
-mkdir -p artifacts/resume/manual
-KEEP_TMP=1 DURATION_SEC=3600 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
-  bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s1_load_1h.log
-```
-
-取值命令：
-
-```bash
-# 找 success_ids 文件路径
-SUCCESS_IDS_FILE="$(grep 'success_ids=' artifacts/resume/manual/s1_load_1h.log | tail -n1 | cut -d= -f2-)"
-echo "$SUCCESS_IDS_FILE"
-
-# 统计累计任务
-wc -l < "$SUCCESS_IDS_FILE"
-```
-
-产物：
-
-- `artifacts/resume/manual/s1_load_1h.log`
-- `success_ids` 文件（路径由脚本输出）
-
-### S2. 扩容对比（填 B13-B15/B17-B23/B18-B20）
-
-#### S2-1 基线轮（仅 1 台 Worker）
-目的：得到 baseline 吞吐/QPS/延迟。
-
-```bash
-cd ~/Deep_OJ
-KEEP_TMP=1 DURATION_SEC=1800 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
-  bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s2_base_load.log
-bash scripts/collect_resume_metrics.sh | tee artifacts/resume/manual/s2_base_collect.log
-```
-
-#### S2-2 启动临时 Worker（node-worker-2..4）
-目的：进入 4 Worker 扩容状态。
-
-```bash
-cd ~/Deep_OJ/deploy/cluster
-docker compose -f node-worker.compose.yml up -d
-```
-
-#### S2-3 扩容轮（4 台 Worker）
-目的：得到 scaled 吞吐/QPS/延迟。
-
-```bash
-cd ~/Deep_OJ
-KEEP_TMP=1 DURATION_SEC=1800 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
-  bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s2_scaled_load.log
-bash scripts/collect_resume_metrics.sh | tee artifacts/resume/manual/s2_scaled_collect.log
-```
-
-#### S2-4 计算扩容倍数
-目的：得到 B23。
-
-```bash
-python3 - <<'PY'
-import csv,glob
-files=sorted(glob.glob('artifacts/resume/metrics_*/resume_metrics.csv'))
-print('latest metrics files:', files[-2], files[-1])
-def get(path,key):
-    with open(path, encoding='utf-8') as f:
-        for r in csv.DictReader(f):
-            if r['key']==key:
-                return float(r['value'])
-    raise RuntimeError(f'{key} not found in {path}')
-b=get(files[-2],'jobs_per_sec_peak_5m')
-s=get(files[-1],'jobs_per_sec_peak_5m')
-print('baseline_jobs_per_sec_peak_5m=', b)
-print('scaled_jobs_per_sec_peak_5m=', s)
-print('scale_factor=', round(s/b,4))
-PY
-```
-
-产物：
-
-- 基线和扩容两轮的 `resume_metrics.csv`
-- `scale_factor`
-
-### S3. 进程清理专项（填 B03）
-
-说明：该脚本依赖“单机 compose 进程可见”。建议在临时 `node-lab`（单机部署）执行，不在分节点集群直接执行。
-
-目的：验证 FD/僵尸进程无泄漏。
-
-```bash
-cd ~/Deep_OJ
-bash scripts/verify_worker_process_cleanup.sh | tee artifacts/resume/manual/s3_process_cleanup.log
-grep 'EVIDENCE_PROCESS_CLEANUP_NO_LEAK' artifacts/resume/manual/s3_process_cleanup.log
-```
-
-产物：`EVIDENCE_PROCESS_CLEANUP_NO_LEAK ... leaked=0`。
-
-### S4. Outbox 故障矩阵（填 B04-B09）
-
-说明：同样建议在 `node-lab` 执行（脚本会本机 `docker exec` `api/redis/postgres` 容器）。
-
-目的：得到 Redis 重启/Dispatcher 崩溃/网络抖动下的丢失率、重复率、RTO。
-
-```bash
-cd ~/Deep_OJ
-POSTGRES_PASSWORD=<pg_pwd> REDIS_PASSWORD=<redis_pwd> \
-REDIS_RESTART_ROUNDS=5 DISPATCHER_CRASH_ROUNDS=5 REDIS_JITTER_ROUNDS=5 \
-bash scripts/bench_outbox_fault_matrix.sh | tee artifacts/resume/manual/s4_outbox.log
-```
-
-取值口径：
-
-- B04/B05/B06：直接填 `5/5/5`
-- B07：`summary.json.loss_rate`
-- B08：`summary.json.duplicate_rate`
-- B09：`summary.json.rto_ms.p95 / 1000`
-
-### S5. 缓存冷热对比（填 B10-B12）
-
-#### S5-1 清空 worker 本地缓存（所有 worker）
-目的：制造冷启动窗口。
-
-```bash
-sudo rm -rf /var/lib/deepoj/workspace/cases/*
-sudo rm -rf /var/lib/deepoj/workspace/cases_unzipped/*
-```
-
-#### S5-2 连续跑 30 分钟
-目的：前 15 分钟冷窗口，后 15 分钟热窗口。
-
-```bash
-cd ~/Deep_OJ
-DURATION_SEC=1800 WORKERS=20 SUBMIT_INTERVAL_SEC=0.1 \
-bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s5_cache_30m.log
-```
-
-#### S5-3 PromQL 取数（node-control）
-目的：计算命中率、MinIO 带宽下降、平均拉取耗时下降。
-
-```bash
-# 1) 热窗口命中率
-curl -g -sG 'http://127.0.0.1:19090/api/v1/query' \
-  --data-urlencode 'query=100 * sum(increase(worker_testcase_cache_total{result="hit"}[15m])) / sum(increase(worker_testcase_cache_total[15m]))'
-
-# 2) MinIO 下载字节（热窗口）
-curl -g -sG 'http://127.0.0.1:19090/api/v1/query' \
-  --data-urlencode 'query=sum(increase(worker_minio_download_bytes_total[15m]))'
-
-# 3) MinIO 下载字节（冷窗口：向前偏移 15m）
-curl -g -sG 'http://127.0.0.1:19090/api/v1/query' \
-  --data-urlencode 'query=sum(increase(worker_minio_download_bytes_total[15m] offset 15m))'
-
-# 4) testcase prepare 平均耗时（热窗口）
-curl -g -sG 'http://127.0.0.1:19090/api/v1/query' \
-  --data-urlencode 'query=sum(increase(worker_testcase_prepare_duration_seconds_sum[15m])) / sum(increase(worker_testcase_prepare_duration_seconds_count[15m]))'
-
-# 5) testcase prepare 平均耗时（冷窗口）
-curl -g -sG 'http://127.0.0.1:19090/api/v1/query' \
-  --data-urlencode 'query=sum(increase(worker_testcase_prepare_duration_seconds_sum[15m] offset 15m)) / sum(increase(worker_testcase_prepare_duration_seconds_count[15m] offset 15m))'
-```
-
-计算公式：
-
-- B11：`(cold_bytes - warm_bytes) / cold_bytes * 100%`
-- B12：`(cold_avg - warm_avg) / cold_avg * 100%`
-
-### S6. 覆盖率（填 B24）
-
-目的：生成 Go + C++ 覆盖率结果文件，读取 C++ 覆盖率填空。
-
-```bash
-cd ~/Deep_OJ
-CPP_COVERAGE=1 bash scripts/collect_coverage.sh | tee artifacts/resume/manual/s6_coverage.log
-```
-
-产物：
-
-- `artifacts/coverage/<timestamp>/summary.md`
-- `artifacts/coverage/<timestamp>/cpp/coverage.summary.txt`
-
-## 6. 产物目录约定
-
-为便于审计，建议统一归档到 `artifacts/resume/manual/`：
-
-- `s1_load_1h.log`
-- `s2_base_load.log`
-- `s2_base_collect.log`
-- `s2_scaled_load.log`
-- `s2_scaled_collect.log`
-- `s3_process_cleanup.log`
-- `s4_outbox.log`
-- `s5_cache_30m.log`
-- `s6_coverage.log`
-
-## 7. 常见失败与排查
-
-### 7.1 脚本执行节点不对
-
-症状：`docker exec` 找不到 `oj-api/oj-redis/oj-postgres`。
-
-原因：`verify_worker_process_cleanup.sh`、`bench_outbox_fault_matrix.sh` 依赖“单机 compose 同机容器名”，不适合直接在分节点集群控制机执行。
-
-处理：在临时 `node-lab`（单机 compose）执行 S3/S4。
-
-### 7.2 429 原因混淆（限流 vs inflight_cap）
-
-症状：压测中出现 429，但吞吐没有上去。
-
-处理：
-
-- 主压测阶段先把 `submit_rate_limit` 放宽到 `200000/200000`
-- 再把 `submit_max_inflight` 提到 `30000`
-- 观察 `submit_429_total{reason=...}` 与 `api_backpressure_reject_total`
-
-### 7.3 Grafana/Prometheus 不应暴露公网
-
-建议：
-
-- 不开放 `13000/19090` 公网
-- 使用 SSH 隧道查看
-
-## 8. 验收清单（文档层）
-
-- 本文可直接指导从租机到取数全流程
-- B01-B24 全部可映射命令或指标
-- 同一实验序号可覆盖多个空格，避免重复劳动
-- `deploy/cluster/README.md` 仅保留入口跳转，不再双份维护
-
-## 9. 相关文件
-
-- 集群模板目录：`deploy/cluster/`
-- 控制面样例：`deploy/cluster/config.control.example.yaml`
-- Worker 样例：`deploy/cluster/config.worker.example.yaml`
-- Prometheus 样例：`deploy/cluster/prometheus.yml`
-- 项目总览：`README.md`
+1. 把 `node-control.compose.yml` 拆成 `api/scheduler/prometheus/grafana` 4 份
+2. 每台机器只起一个 service
+3. 全部配置改成对应私网地址
+4. 重做健康检查和观测 targets 清单
