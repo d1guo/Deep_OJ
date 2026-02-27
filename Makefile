@@ -1,4 +1,5 @@
-.PHONY: all build clean test run docker-build docker-up docker-down
+.PHONY: all build clean test run bench docker-build docker-up docker-down \
+	bench-outbox resume-metrics coverage
 
 # 默认目标
 all: docker-build
@@ -26,7 +27,22 @@ test:
 # 启动压力测试 (Benchmark)
 bench:
 	@echo "正在运行压力测试..."
-	go run benchmark/submit_bench.go -c 50 -d 10s
+	go run scripts/benchmark_submit.go -c 50 -n 5000
+
+# Outbox 故障矩阵
+bench-outbox:
+	@echo "正在执行 Outbox 故障矩阵..."
+	bash scripts/bench_outbox_fault_matrix.sh
+
+# 简历指标汇总
+resume-metrics:
+	@echo "正在汇总简历指标..."
+	bash scripts/collect_resume_metrics.sh
+
+# 覆盖率采集
+coverage:
+	@echo "正在采集覆盖率..."
+	bash scripts/collect_coverage.sh
 
 # 清理
 clean: docker-down

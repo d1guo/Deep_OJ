@@ -1,0 +1,117 @@
+server:
+  port: 50051
+  pool_size: 4
+
+path:
+  workspace_root: "/data/workspace"
+  compiler_bin: "/usr/bin/g++"
+
+observability:
+  service_name: "deep-oj"
+  instance_id: ""
+
+api:
+  port: 18080
+  gin_mode: "release"
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  redis_url: "10.0.1.11:6379"
+  minio:
+    endpoint: "http://10.0.1.12:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "change_me_minio_password"
+    bucket: "deep-oj-problems"
+    secure: false
+  auth:
+    jwt_secret: "change_me_jwt_secret"
+    jwt_expire_hours: 24
+    oauth_state_ttl_sec: 300
+    admin_users:
+      - "admin"
+  limits:
+    submit_rate_limit:
+      ip_limit: 1200
+      user_limit: 2400
+      window_sec: 60
+    submit_max_inflight: 5000
+  metrics:
+    service_name: "deep-oj-api"
+    instance_id: ""
+  metrics_token: "deepoj_metrics_token_dev"
+  outbox:
+    enabled: true
+    dispatch_interval_ms: 200
+    dispatch_batch_size: 100
+    retry_base_ms: 500
+    retry_max_ms: 10000
+  stream:
+    stream_key: "deepoj:jobs"
+    stream_maxlen: 200000
+    job_payload_ttl_sec: 86400
+
+scheduler:
+  redis_url: "10.0.1.11:6379"
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  scheduler_id: "scheduler-control-1"
+  metrics_port: 9091
+  metrics_poll_ms: 1000
+  metrics:
+    service_name: "deep-oj-scheduler"
+    instance_id: ""
+  control_plane:
+    repair_enabled: false
+    repair_interval_ms: 30000
+    repair_batch_size: 200
+    repair_min_age_sec: 60
+    gc_enabled: false
+    gc_interval_ms: 600000
+    stream_trim_maxlen: 200000
+    db_retention_days: 14
+    db_delete_enabled: false
+    db_delete_batch_size: 500
+  workers:
+    addresses:
+      - "10.0.1.21:50051"
+      - "10.0.1.22:50051"
+      - "10.0.1.23:50051"
+      - "10.0.1.24:50051"
+    probe_timeout_ms: 1000
+
+worker:
+  id: "worker-placeholder"
+  addr: "127.0.0.1:50051"
+  port: 50051
+  redis_url: "10.0.1.11:6379"
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  stream:
+    stream_key: "deepoj:jobs"
+    group: "deepoj:workers"
+  minio:
+    endpoint: "http://10.0.1.12:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "change_me_minio_password"
+    bucket: "deep-oj-problems"
+    secure: false
+  workspace: "/data/workspace"
+  judger_bin: "/app/judge_engine"
+  judger_config: "/app/config.worker.yaml"
+  metrics:
+    service_name: "deep-oj-worker"
+    instance_id: ""
+  metrics_port: 9092
+
+redis:
+  pool_size: 20
+  min_idle_conns: 4
+  dial_timeout_ms: 5000
+  read_timeout_ms: 3000
+  write_timeout_ms: 3000
+  password: "change_me_redis_password"
+  tls_enabled: false
+  key_prefix: "deepoj"
+  key_env: "prod"
+
+postgres:
+  max_conns: 40
+  min_conns: 4
+  max_conn_lifetime_min: 60
+  max_conn_idle_min: 30

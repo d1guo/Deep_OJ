@@ -132,6 +132,23 @@ bash scripts/verify_ci.sh
 bash scripts/verify_worker_process_cleanup.sh
 ```
 
+### 压测与简历指标导出
+
+```bash
+# 持续提交压测
+bash scripts/submit_load_loop.sh
+
+# Outbox 故障矩阵（丢失率/重复率/RTO）
+POSTGRES_PASSWORD=<...> REDIS_PASSWORD=<...> bash scripts/bench_outbox_fault_matrix.sh
+
+# 汇总简历指标到 Markdown/CSV
+POSTGRES_PASSWORD=<...> SUCCESS_IDS_FILE=<...> OUTBOX_SUMMARY_FILE=<...> \
+  bash scripts/collect_resume_metrics.sh
+
+# 覆盖率产物（Go + 可选 C++）
+bash scripts/collect_coverage.sh
+```
+
 ## Scheduler 控制面配置
 
 可在 `config.yaml` 的 `scheduler.control_plane` 中配置，默认值如下：
@@ -173,6 +190,8 @@ bash scripts/verify_worker_process_cleanup.sh
 - 设计与不变量：`DESIGN.md`
 - 启动与排障：`RUNBOOK.md`
 - 任务与验收证据：`TASK.md`
+- 低成本云集群部署：`docs/low_cost_cloud_cluster.md`
+- 分节点 Compose 模板入口：`deploy/cluster/README.md`
 
 ## License
 

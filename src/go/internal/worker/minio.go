@@ -132,6 +132,7 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 
 		if st, err := os.Stat(localPath); err == nil && st.Size() > 0 {
 			if m.etagMatch(localPath, remoteETag) {
+				workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
 				m.touchCache(problemID, remoteETag, localPath, "")
 				return localPath, nil
 			}
@@ -151,6 +152,7 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 		// Re-check after lock
 		if st, err := os.Stat(localPath); err == nil && st.Size() > 0 {
 			if m.etagMatch(localPath, remoteETag) {
+				workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
 				m.touchCache(problemID, remoteETag, localPath, "")
 				return localPath, nil
 			}
@@ -159,12 +161,14 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 		tmpPath := localPath + ".tmp"
 		_ = os.Remove(tmpPath)
 
+		workerTestcaseCacheTotal.WithLabelValues("miss").Inc()
 		dlStart := time.Now()
 		if err := m.downloadObjectWithRetry(dlCtx, objectName, tmpPath); err != nil {
 			_ = os.Remove(tmpPath)
 			return "", err
 		}
 		workerDownloadDuration.Observe(time.Since(dlStart).Seconds())
+		workerMinioDownloadBytesTotal.Add(float64(fileSize(tmpPath)))
 		if err := os.Rename(tmpPath, localPath); err != nil {
 			_ = os.Remove(tmpPath)
 			return "", fmt.Errorf("rename failed: %w", err)
@@ -183,6 +187,11 @@ func (m *TestCaseManager) Download(ctx context.Context, problemID string) (strin
 
 // Prepare ensures testcase zip is downloaded and unzipped, returns workdir
 func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string, error) {
+	start := time.Now()
+	defer func() {
+		workerTestcasePrepareDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	workDir := filepath.Join(m.workspace, "cases_unzipped", problemID)
 	readyPath, readyETagPath := readyMarkerPaths(workDir)
 
@@ -190,6 +199,7 @@ func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string
 	if err != nil {
 		if fileExists(readyPath) {
 			slog.Warn("MinIO 不可用，降级使用本地测试点缓存", "problem_id", problemID, "error", err)
+			workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
 			m.touchCache(problemID, "", "", workDir)
 			return workDir, nil
 		}
@@ -198,11 +208,13 @@ func (m *TestCaseManager) Prepare(ctx context.Context, problemID string) (string
 	expectedETag := strings.TrimSpace(m.readEtag(zipPath))
 
 	if m.readyMatchesETag(workDir, expectedETag) {
+		workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
 		return workDir, nil
 	}
 
 	_, err, _ = m.sf.Do("uz:"+problemID, func() (interface{}, error) {
 		if m.readyMatchesETag(workDir, expectedETag) {
+			workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
 			return workDir, nil
 		}
 

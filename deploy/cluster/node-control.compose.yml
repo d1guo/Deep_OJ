@@ -1,0 +1,55 @@
+services:
+  api:
+    image: deep-oj:v3
+    restart: unless-stopped
+    user: deep_oj
+    command: /app/oj_api
+    environment:
+      APP_CONFIG: /app/config.control.yaml
+    volumes:
+      - ./config.control.yaml:/app/config.control.yaml:ro
+    ports:
+      - "${API_PORT:-18080}:18080"
+
+  scheduler:
+    image: deep-oj:v3
+    restart: unless-stopped
+    user: deep_oj
+    command: /app/oj_scheduler
+    environment:
+      APP_CONFIG: /app/config.control.yaml
+    volumes:
+      - ./config.control.yaml:/app/config.control.yaml:ro
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "${PROM_PORT:-19090}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+      - scheduler
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-13000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../../docker/observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ../../docker/observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../../docker/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

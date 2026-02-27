@@ -109,6 +109,29 @@ var (
 		},
 	)
 
+	workerMinioDownloadBytesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "worker_minio_download_bytes_total",
+			Help: "Total bytes downloaded from MinIO for testcase archives",
+		},
+	)
+
+	workerTestcaseCacheTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "worker_testcase_cache_total",
+			Help: "Total testcase cache lookups grouped by hit/miss result",
+		},
+		[]string{"result"},
+	)
+
+	workerTestcasePrepareDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "worker_testcase_prepare_duration_seconds",
+			Help:    "End-to-end testcase prepare duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
 	workerUnzipDuration = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "worker_unzip_duration_seconds",
@@ -287,6 +310,9 @@ func InitMetrics() {
 	reg.MustRegister(workerTaskDuration)
 	reg.MustRegister(workerCompileDuration)
 	reg.MustRegister(workerDownloadDuration)
+	reg.MustRegister(workerMinioDownloadBytesTotal)
+	reg.MustRegister(workerTestcaseCacheTotal)
+	reg.MustRegister(workerTestcasePrepareDuration)
 	reg.MustRegister(workerUnzipDuration)
 	reg.MustRegister(judgeExecDuration)
 	reg.MustRegister(judgeExecInflight)
@@ -319,6 +345,8 @@ func InitMetrics() {
 	xackTotal.WithLabelValues("ok")
 	xackTotal.WithLabelValues("error")
 	xautoclaimErrorsTotal.WithLabelValues("none")
+	workerTestcaseCacheTotal.WithLabelValues("hit")
+	workerTestcaseCacheTotal.WithLabelValues("miss")
 	workerStreamBackpressureTotal.WithLabelValues("read_new")
 	workerStreamBackpressureTotal.WithLabelValues("reclaim")
 }

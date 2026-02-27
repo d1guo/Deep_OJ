@@ -1,0 +1,22 @@
+services:
+  worker:
+    image: deep-oj:v3
+    restart: unless-stopped
+    init: true
+    command: /app/oj_worker
+    cap_add:
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=unconfined
+      - seccomp=unconfined
+    environment:
+      APP_CONFIG: /app/config.worker.yaml
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - ${WORKER_WORKSPACE:-/var/lib/deepoj/workspace}:/data/workspace:rw
+      - ./config.worker.yaml:/app/config.worker.yaml:ro

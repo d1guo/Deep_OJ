@@ -1,0 +1,179 @@
+server:
+  port: 50051
+  pool_size: 4
+
+path:
+  workspace_root: "/data/workspace"
+  compiler_bin: "/usr/bin/g++"
+  mount_dirs:
+    - "/lib"
+    - "/lib64"
+    - "/usr"
+    - "/bin"
+    - "/etc/alternatives"
+  mount_files:
+    - "/etc/localtime"
+    - "/dev/null"
+    - "/dev/zero"
+    - "/dev/random"
+    - "/dev/urandom"
+
+compile:
+  cpu_limit_s: 10
+  real_time_limit_s: 15
+  memory_limit_mb: 1024
+  tmpfs_size_mb: 128
+  log_max_size_mb: 16
+  max_errors: 10
+
+runner:
+  max_output_size: 10485760
+  output_buffer_size: 2097152
+  tmpfs_size_mb: 64
+  cgroup_pids_limit: 20
+  cgroup_cpu_max_cores: 1.0
+  cgroup_io_read_bps: 104857600
+  cgroup_io_write_bps: 104857600
+
+security:
+  run_as_uid: 65534
+  run_as_gid: 65534
+
+observability:
+  service_name: "deep-oj"
+  instance_id: ""
+
+api:
+  port: 18080
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  redis_url: "10.0.1.11:6379"
+  minio:
+    endpoint: "http://10.0.1.12:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "change_me_minio_password"
+    bucket: "deep-oj-problems"
+    secure: false
+  auth:
+    jwt_secret: "change_me_jwt_secret"
+    jwt_expire_hours: 24
+    oauth_state_ttl_sec: 300
+    admin_users:
+      - "admin"
+  limits:
+    submit_rate_limit:
+      ip_limit: 1200
+      user_limit: 2400
+      window_sec: 60
+    submit_max_inflight: 5000
+  metrics:
+    service_name: "deep-oj-api"
+    instance_id: ""
+  metrics_token: "deepoj_metrics_token_dev"
+  stream:
+    stream_key: "deepoj:jobs"
+    stream_maxlen: 200000
+    job_payload_ttl_sec: 86400
+  outbox:
+    enabled: true
+    dispatch_interval_ms: 200
+    dispatch_batch_size: 100
+    retry_base_ms: 500
+    retry_max_ms: 10000
+
+scheduler:
+  redis_url: "10.0.1.11:6379"
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  scheduler_id: "scheduler-control-1"
+  metrics_port: 9091
+  metrics_poll_ms: 1000
+  metrics:
+    service_name: "deep-oj-scheduler"
+    instance_id: ""
+  control_plane:
+    repair_enabled: false
+    repair_interval_ms: 30000
+    repair_batch_size: 200
+    repair_min_age_sec: 60
+    gc_enabled: false
+    gc_interval_ms: 600000
+    stream_trim_maxlen: 200000
+    db_retention_days: 14
+    db_delete_enabled: false
+    db_delete_batch_size: 500
+  workers:
+    addresses:
+      - "10.0.1.21:50051"
+    probe_timeout_ms: 1000
+
+worker:
+  id: "worker-node-1"
+  addr: "10.0.1.21:50051"
+  port: 50051
+  redis_url: "10.0.1.11:6379"
+  database_url: "postgres://deep_oj:change_me_pg_password@10.0.1.11:5432/deep_oj?sslmode=disable"
+  stream:
+    stream_key: "deepoj:jobs"
+    group: "deepoj:workers"
+    consumer: "worker-node-1"
+    read_count: 16
+    block_ms: 2000
+    lease_sec: 60
+    heartbeat_sec: 10
+    reclaim_interval_sec: 5
+    reclaim_count: 16
+    reclaim_grace_sec: 15
+    log_throttle_sec: 10
+    backpressure_sleep_ms: 50
+  minio:
+    endpoint: "http://10.0.1.12:9000"
+    access_key: "deepoj_minio_user"
+    secret_key: "change_me_minio_password"
+    bucket: "deep-oj-problems"
+    secure: false
+  workspace: "/data/workspace"
+  judger_bin: "/app/judge_engine"
+  judger_config: "/app/config.worker.yaml"
+  pool_size: 4
+  keep_workdir: false
+  timeouts:
+    compile_ms: 10000
+    exec_buffer_ms: 500
+    download_ms: 60000
+    unzip_ms: 30000
+  testcase_cache:
+    max: 100
+    ttl_sec: 3600
+  unzip_limits:
+    max_bytes: 268435456
+    max_files: 2000
+    max_file_bytes: 67108864
+  result_ttl_sec: 600
+  checker_timeout_ms: 2000
+  cleanup_timeout_sec: 5
+  allow_host_checker: false
+  require_cgroups_v2: false
+  metrics:
+    service_name: "deep-oj-worker"
+    instance_id: ""
+  metrics_port: 9092
+  executor:
+    stdout_limit_bytes: 262144
+    stderr_limit_bytes: 1048576
+    cmd_cgroup_root: ""
+
+redis:
+  pool_size: 10
+  min_idle_conns: 3
+  dial_timeout_ms: 5000
+  read_timeout_ms: 3000
+  write_timeout_ms: 3000
+  password: "change_me_redis_password"
+  tls_enabled: false
+  key_prefix: "deepoj"
+  key_env: "prod"
+
+postgres:
+  max_conns: 10
+  min_conns: 2
+  max_conn_lifetime_min: 60
+  max_conn_idle_min: 30

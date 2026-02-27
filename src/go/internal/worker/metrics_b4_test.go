@@ -35,6 +35,9 @@ func TestMetricsEmitBasic(t *testing.T) {
 		judgeVerdictTotal,
 		judgeProtocolErrorsTotal,
 		judgeOutputTruncatedTotal,
+		workerTestcaseCacheTotal,
+		workerMinioDownloadBytesTotal,
+		workerTestcasePrepareDuration,
 	}
 	for _, c := range collectors {
 		if err := reg.Register(c); err != nil {
@@ -48,6 +51,9 @@ func TestMetricsEmitBasic(t *testing.T) {
 	judgeVerdictTotal.WithLabelValues("OK").Inc()
 	judgeProtocolErrorsTotal.WithLabelValues(reasonInvalidJSON).Inc()
 	judgeOutputTruncatedTotal.WithLabelValues("stdout").Inc()
+	workerTestcaseCacheTotal.WithLabelValues("hit").Inc()
+	workerMinioDownloadBytesTotal.Add(1024)
+	workerTestcasePrepareDuration.Observe(0.02)
 	judgeExecInflight.Dec()
 
 	mfs, err := reg.Gather()
@@ -65,6 +71,9 @@ func TestMetricsEmitBasic(t *testing.T) {
 		"judge_verdict_total",
 		"judge_protocol_errors_total",
 		"judge_output_truncated_total",
+		"worker_testcase_cache_total",
+		"worker_minio_download_bytes_total",
+		"worker_testcase_prepare_duration_seconds",
 	}
 	for _, name := range required {
 		if !found[name] {

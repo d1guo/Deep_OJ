@@ -443,6 +443,7 @@ docker run --rm --network deep-oj-net curlimages/curl:8.7.1 -sS http://oj-worker
 - API：`http_requests_total`、`http_request_duration_seconds`、`submission_total`
 - Scheduler：`control_plane_only`、`legacy_loops_started`、`scheduler_active_workers`、`scheduler_repair_total{result,reason}`、`scheduler_stream_trim_total{result}`、`scheduler_db_gc_total{result,reason}`
 - Worker：`worker_task_total`、`worker_task_duration_seconds`、`worker_compile_duration_seconds`、`worker_download_duration_seconds`、`worker_unzip_duration_seconds`
+- Worker（缓存/对象存储口径）：`worker_testcase_cache_total{result}`、`worker_minio_download_bytes_total`、`worker_testcase_prepare_duration_seconds`
 - Worker（Judge 执行链路）：`judge_exec_duration_seconds{result}`、`judge_exec_inflight`、`judge_exec_total{result}`、`judge_verdict_total{verdict}`、`judge_protocol_errors_total{reason}`、`judge_output_truncated_total{stream}`
 - Worker（Streams 消费链路）：`worker_stream_consume_total{status,reason}`、`worker_stream_consume_latency_ms`、`worker_stream_inflight`
 - Worker（C3 claim/lease/fencing）：`worker_claim_total{status,reason}`、`worker_lease_heartbeat_total{status,reason}`、`worker_stale_attempt_total`
@@ -485,6 +486,21 @@ docker compose logs --since=30m api scheduler worker | rg "$JOB_ID|trace_id|atte
 ```bash
 TRACE_ID="<trace_id>"
 docker compose logs --since=30m worker | rg "$TRACE_ID"
+```
+
+### 5.5 简历指标导出脚本
+
+```bash
+# Outbox 故障矩阵（统计丢失率/重复率/RTO）
+POSTGRES_PASSWORD=<...> REDIS_PASSWORD=<...> \
+  bash scripts/bench_outbox_fault_matrix.sh
+
+# 汇总 Prometheus/DB/脚本产物为 Markdown + CSV
+POSTGRES_PASSWORD=<...> SUCCESS_IDS_FILE=<...> OUTBOX_SUMMARY_FILE=<...> \
+  bash scripts/collect_resume_metrics.sh
+
+# 覆盖率（Go + 条件触发 C++ gcovr/lcov）
+bash scripts/collect_coverage.sh
 ```
 
 ## 6. 探针脚本
