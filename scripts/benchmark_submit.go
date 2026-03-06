@@ -29,6 +29,8 @@ var (
 	password     string
 	email        string
 	loginRetries int
+	uniqueCode   bool
+	noncePrefix  string
 )
 
 func init() {
@@ -44,6 +46,8 @@ func init() {
 	flag.StringVar(&password, "password", getEnvDefault("BENCH_PASSWORD", "password"), "登录密码")
 	flag.StringVar(&email, "email", getEnvDefault("BENCH_EMAIL", "admin@example.com"), "注册邮箱")
 	flag.IntVar(&loginRetries, "login-retries", 30, "登录重试次数（遇到 429 时有效）")
+	flag.BoolVar(&uniqueCode, "unique-code", true, "每次请求追加唯一 nonce 注释，避免 inflight 去重")
+	flag.StringVar(&noncePrefix, "nonce-prefix", "", "nonce 前缀（留空则自动生成）")
 	flag.Parse()
 }
 
@@ -80,6 +84,16 @@ func main() {
 	fmt.Printf("开始压测：请求数=%d，并发=%d\n", totalReqs, concurrency)
 	fmt.Printf("目标 URL: %s\n", targetURL)
 	fmt.Printf("鉴权模式: Bearer Token（长度=%d）\n", len(jwt))
+	if uniqueCode {
+		seed := strings.TrimSpace(noncePrefix)
+		if seed == "" {
+			seed = fmt.Sprintf("bench_%d", time.Now().UnixNano())
+			noncePrefix = seed
+		}
+		fmt.Printf("请求体模式: unique-code 开启（nonce_prefix=%s）\n", noncePrefix)
+	} else {
+		fmt.Println("请求体模式: unique-code 关闭（可能触发 inflight 去重）")
+	}
 
 	payload := SubmitRequest{
 		Code:        "#include <iostream>\nint main(){ int a,b; std::cin >> a >> b; std::cout << a+b; return 0; }",
@@ -106,15 +120,28 @@ func main() {
 
 	start := time.Now()
 	for i := 0; i < totalReqs; i++ {
+		reqSeq := i + 1
 		wg.Add(1)
 		sem <- struct{}{}
 
-		go func() {
+		go func(seq int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			body := jsonData
+			if uniqueCode {
+				reqPayload := payload
+				reqPayload.Code = appendCodeNonce(payload.Code, noncePrefix, seq)
+				encoded, err := json.Marshal(reqPayload)
+				if err != nil {
+					errorsCh <- fmt.Sprintf("marshal_request_error: %v", err)
+					return
+				}
+				body = encoded
+			}
+
 			t0 := time.Now()
-			req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(jsonData))
+			req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
 			if err != nil {
 				errorsCh <- fmt.Sprintf("build_request_error: %v", err)
 				return
@@ -142,7 +169,7 @@ func main() {
 
 			_, _ = io.Copy(io.Discard, resp.Body)
 			latencies <- latency
-		}()
+		}(reqSeq)
 	}
 
 	wg.Wait()
@@ -331,4 +358,8 @@ func getEnvDefault(key, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func appendCodeNonce(baseCode, prefix string, seq int) string {
+	return fmt.Sprintf("%s\n// bench_nonce:%s:%d", baseCode, prefix, seq)
 }
