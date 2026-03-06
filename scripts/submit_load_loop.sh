@@ -15,6 +15,7 @@ PASSWORD="${PASSWORD:-password}"
 EMAIL="${EMAIL:-${USERNAME}@example.com}"
 PROBLEM_ID="${PROBLEM_ID:-}"
 TOKEN="${TOKEN:-}"
+TOKEN_POOL_FILE="${TOKEN_POOL_FILE:-}"
 
 WORKERS="${WORKERS:-2}"
 DURATION_SEC="${DURATION_SEC:-3600}"        # 0 表示无限持续，直到 Ctrl+C
@@ -40,6 +41,8 @@ ERROR_FILE="$TMP_DIR/errors.txt"
 STOP_FILE="$TMP_DIR/stop.signal"
 PIDS=()
 START_TS="$(date +%s)"
+TOKEN_POOL=()
+WORKER_TOKENS=()
 
 # 预创建统计文件，避免并发首次写入时触发 "No such file or directory"。
 : > "$SUCCESS_IDS_FILE"
@@ -60,6 +63,7 @@ Env:
   PASSWORD             default: password
   EMAIL                default: <USERNAME>@example.com
   TOKEN                default: empty (if set, skip register/login)
+  TOKEN_POOL_FILE      default: empty (one JWT token per line; ignores blank/# lines)
   PROBLEM_ID           default: empty (auto upload minimal problem.zip)
   WORKERS              default: 2
   DURATION_SEC         default: 3600, set 0 to run until Ctrl+C
@@ -73,6 +77,9 @@ Env:
   PROM_BASE            default: http://127.0.0.1:19090
   PROM_DIAG_ENABLED    default: 1 (0 means skip Prometheus diagnostics)
   KEEP_TMP             default: 0 (set 1 to keep temp files)
+  Tips:
+    - 默认不设置 TOKEN_POOL_FILE 时，所有 worker 复用同一个 TOKEN（兼容旧行为）。
+    - 设置 TOKEN_POOL_FILE 后，worker 按索引轮询 token，模拟“同 IP 多账号并发”。
 USAGE
 }
 
@@ -194,8 +201,63 @@ http_request() {
   fi
 }
 
+load_token_pool() {
+  TOKEN_POOL=()
+  if [[ -z "$TOKEN_POOL_FILE" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$TOKEN_POOL_FILE" ]]; then
+    echo "ERROR: TOKEN_POOL_FILE not found: $TOKEN_POOL_FILE" >&2
+    exit 1
+  fi
+
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" == \#* ]] && continue
+    TOKEN_POOL+=("$line")
+  done < "$TOKEN_POOL_FILE"
+
+  if [[ "${#TOKEN_POOL[@]}" -eq 0 ]]; then
+    echo "ERROR: TOKEN_POOL_FILE has no valid token entries: $TOKEN_POOL_FILE" >&2
+    exit 1
+  fi
+}
+
+prepare_worker_tokens() {
+  WORKER_TOKENS=()
+
+  if [[ -n "$TOKEN_POOL_FILE" ]]; then
+    load_token_pool
+    local pool_size="${#TOKEN_POOL[@]}"
+    local i idx
+    for i in $(seq 1 "$WORKERS"); do
+      idx=$(( (i - 1) % pool_size ))
+      WORKER_TOKENS[$i]="${TOKEN_POOL[$idx]}"
+    done
+    return 0
+  fi
+
+  if [[ -z "$TOKEN" ]]; then
+    echo "ERROR: TOKEN is empty and TOKEN_POOL_FILE is not set" >&2
+    exit 1
+  fi
+
+  local i
+  for i in $(seq 1 "$WORKERS"); do
+    WORKER_TOKENS[$i]="$TOKEN"
+  done
+}
+
 register_and_login() {
   if [[ -n "$TOKEN" ]]; then
+    return
+  fi
+  if [[ -n "$TOKEN_POOL_FILE" && -n "$PROBLEM_ID" ]]; then
+    # 已提供题目且后续提交使用 token 池，不必再走注册/登录路径。
     return
   fi
 
@@ -344,6 +406,7 @@ CPP
 
 submit_loop() {
   local worker_id="$1"
+  local submit_token="$2"
   local deadline=0
   local seq=0
   if [[ "$DURATION_SEC" -gt 0 ]]; then
@@ -379,7 +442,7 @@ PY
     local body_file="$TMP_DIR/submit_${worker_id}_${seq}.json"
     local status
     status="$(curl -sS -X POST "$API_BASE/api/v1/submit" \
-      -H "Authorization: Bearer $TOKEN" \
+      -H "Authorization: Bearer $submit_token" \
       -H 'Content-Type: application/json' \
       -d "$payload" \
       -o "$body_file" \
@@ -525,16 +588,24 @@ if ! [[ "$DURATION_SEC" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-echo "[1/4] 注册并登录（若提供 TOKEN 则跳过）"
+echo "[1/5] 注册并登录（若提供 TOKEN 或 TOKEN_POOL_FILE+PROBLEM_ID 则跳过）"
 register_and_login
-echo "[2/4] 准备题目（未传 PROBLEM_ID 时自动上传）"
+echo "[2/5] 准备题目（未传 PROBLEM_ID 时自动上传）"
 ensure_problem
 echo "使用题目 problem_id=$PROBLEM_ID"
-echo "[3/4] 启动持续提交 worker"
+echo "[3/5] 准备 worker token 分配"
+prepare_worker_tokens
+if [[ -n "$TOKEN_POOL_FILE" ]]; then
+  echo "token_mode=pool token_pool_file=$TOKEN_POOL_FILE token_pool_size=${#TOKEN_POOL[@]}"
+else
+  echo "token_mode=single"
+fi
+
+echo "[4/5] 启动持续提交 worker"
 echo "参数 workers=$WORKERS duration_sec=$DURATION_SEC submit_interval_sec=$SUBMIT_INTERVAL_SEC mixed_mode=$MIXED_MODE prom_diag=$PROM_DIAG_ENABLED"
 
 for i in $(seq 1 "$WORKERS"); do
-  submit_loop "$i" &
+  submit_loop "$i" "${WORKER_TOKENS[$i]}" &
   PIDS+=("$!")
 done
 
@@ -552,7 +623,7 @@ for pid in "${PIDS[@]:-}"; do
 done
 
 touch "$STOP_FILE"
-echo "[4/4] final summary"
+echo "[5/5] final summary"
 print_summary
 echo "最近成功 job_id 样例:"
 tail -n 10 "$SUCCESS_IDS_FILE" 2>/dev/null || true

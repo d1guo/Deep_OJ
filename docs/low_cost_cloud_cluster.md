@@ -108,16 +108,16 @@ flowchart LR
 
 这一步在干什么：把“信息来源 -> 你要干什么”做成速查表。  
 为什么现在做：压测时先看哪里、再做什么，一眼就知道。  
-在哪台机器执行：主要在 `node-control`。
+在哪台机器执行：主要在 `node-control` + `独立压测机`。
 
 | 你想知道什么 | 信息来源（命令/文件） | 用它干什么 |
 |---|---|---|
 | 服务是否就绪 | `curl http://127.0.0.1:18080/api/v1/health` / `curl http://127.0.0.1:19090/-/ready` / `curl http://127.0.0.1:13000/api/health` | 判断是否可以开始压测（门禁） |
 | 采集链路是否通 | `Prometheus /api/v1/targets` | 判断 api/scheduler/worker target 是否全 `UP` |
-| 压测是否在持续产出 | `artifacts/resume/manual/s1_load_1h.log` + `grep 'success_ids=' ...` | 找到本次压测的成功任务 ID 文件 |
+| 压测是否在持续产出 | `artifacts/resume/manual/s1_limited_load_1h.log` / `s2_relaxed_load_1h.log` + `grep 'success_ids=' ...` | 找到本次压测的成功任务 ID 文件 |
 | 总任务数 | `wc -l < success_ids_file` | 计算累计完成任务（B02） |
 | 当前吞吐 Jobs/s | `sum(rate(worker_task_total[1m]))` | 看执行侧吞吐、比较扩容前后 |
-| P95 / P99 | `histogram_quantile(...job_e2e_duration...)` | 看延迟与抖动 |
+| P95 / P99 | `histogram_quantile(...worker_task_duration_seconds_bucket...)` | 看延迟与抖动 |
 | 可复用简历指标 | `scripts/collect_resume_metrics.sh` 输出的 Markdown/CSV | 统一口径，避免手抄出错 |
 
 targets 可复制检查命令（在 `node-control`）：
@@ -134,8 +134,8 @@ curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {
 4. 每台 `node-worker-*` 生成 `config.worker.yaml`，填唯一 `id/addr/consumer`。
 5. 按顺序启动：`stateful -> minio -> control -> worker`。
 6. 做门禁健康检查：`health + targets` 全绿。
-7. 运行 1 小时压测：`scripts/submit_load_loop.sh`。
-8. 取数出结论：`success_ids` 行数 + Prometheus 吞吐/P95/P99 + 可选 `collect_resume_metrics.sh` 汇总。
+7. 跑双口径 1 小时压测：先 `S1(生产限流)`，再 `S2(放宽阈值)`。
+8. 取数出结论：分别输出 `s1_limited` / `s2_relaxed` 的吞吐、P95/P99、429 分类，再填写简历空格。
 
 ## 2. 从拿到新服务器开始（A-J）
 
@@ -411,39 +411,173 @@ curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {
 
 ---
 
-### Step H：跑 1 小时压测（固定口径）
+### Step H：跑 1 小时压测（双口径：生产限流 + 放宽阈值）
 
-这一步在干什么：产出主压测日志和累计任务数。  
-为什么现在做：先拿单 worker 基线数据，后面扩容才有对照。  
-在哪台机器执行：`node-control`。
+这一步在干什么：分别产出 `S1(生产限流)` 与 `S2(放宽阈值)` 两组可对比数据。  
+为什么现在做：简历里同时回答“限流可控性”和“系统上限吞吐”。  
+在哪台机器执行：`node-control`（改配置/重启）+ `独立压测机`（发压/收集指标）。
 
-复制即用命令：
+#### H0：拉齐脚本版本 + 独立压测机准备（一次）
+
+先拉到最新脚本（`node-control` 与 `独立压测机` 都执行）：
 
 ```bash
-# 在 node-control 执行
+git clone https://github.com/d1guo/Deep_OJ.git ~/Deep_OJ || true
 cd ~/Deep_OJ
-mkdir -p artifacts/resume/manual
-KEEP_TMP=1 DURATION_SEC=3600 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
-bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s1_load_1h.log
+git pull --ff-only origin main
 ```
 
-取数命令：
+仅在独立压测机执行目录准备：
+
+```bash
+cd ~/Deep_OJ
+mkdir -p artifacts/resume/manual artifacts/resume/s1_limited artifacts/resume/s2_relaxed
+```
+
+取控制面地址与 metrics token（在 `node-control` 查看）：
 
 ```bash
 # 在 node-control 执行
-SUCCESS_IDS_FILE="$(grep 'success_ids=' artifacts/resume/manual/s1_load_1h.log | tail -n1 | cut -d= -f2-)"
-echo "$SUCCESS_IDS_FILE"
-wc -l < "$SUCCESS_IDS_FILE"
+cd ~/Deep_OJ/deploy/cluster
+hostname -I | awk '{print $1}'   # 记录为 CONTROL_PRIVATE_IP
+rg -n 'metrics_token:' config.control.yaml
+```
+
+门禁复检（在 `node-control` 执行）：
+
+```bash
+cd ~/Deep_OJ/deploy/cluster
+curl -fsS http://127.0.0.1:18080/api/v1/health
+curl -fsS http://127.0.0.1:19090/-/ready
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,instance:.labels.instance,health:.health,lastError:.lastError}'
+```
+
+#### H0.5：可选，同 IP 多账号并发（`TOKEN_POOL_FILE`）
+
+作用：在不改脚本源码、不上 k6 的前提下，模拟“同 IP 多账号并发提交”。
+
+token 文件格式（每行一个 JWT，忽略空行和 `#` 注释行）：
+
+```bash
+# 在独立压测机执行
+cat > ~/tokens.pool <<'TOKENS'
+# user-a
+eyJhbGciOi...
+# user-b
+eyJhbGciOi...
+TOKENS
+```
+
+使用建议：
+- 推荐同时传 `PROBLEM_ID`，这样脚本会跳过注册/登录路径，避免 auth 429 干扰提交压测。
+- `TOKEN_POOL_FILE` 内 token 数小于 `WORKERS` 时会按 worker 索引轮询复用。
+- `TOKEN_POOL_FILE` 不存在或解析后为空时，脚本会直接报错退出。
+- 若不使用 token 池，删除命令里的 `TOKEN_POOL_FILE` 与 `PROBLEM_ID` 两个环境变量即可（兼容旧行为）。
+
+#### H1：生产限流口径（S1）
+
+先把阈值固定为生产默认值，并确认生效（在 `node-control` 执行）：
+
+```bash
+cd ~/Deep_OJ/deploy/cluster
+sed -i 's/^\(\s*ip_limit:\).*/\1 1200/' config.control.yaml
+sed -i 's/^\(\s*user_limit:\).*/\1 2400/' config.control.yaml
+sed -i 's/^\(\s*window_sec:\).*/\1 60/' config.control.yaml
+sed -i 's/^\(\s*submit_max_inflight:\).*/\1 5000/' config.control.yaml
+docker compose -f node-control.compose.yml up -d api
+sleep 3
+docker compose -f node-control.compose.yml logs --tail=80 api | grep -E 'effective_submit_rate_limit|submit_max_inflight'
+```
+
+跑 1 小时并采集 `S1` 指标（在 `独立压测机` 执行）：
+
+```bash
+cd ~/Deep_OJ
+# 可选：同 IP 多账号并发（启用就取消下一行注释）
+# TOKEN_POOL_FILE="$HOME/tokens.pool" PROBLEM_ID="<已有题目ID>" \
+API_BASE="http://<CONTROL_PRIVATE_IP>:18080" \
+PROM_BASE="http://<CONTROL_PRIVATE_IP>:19090" \
+KEEP_TMP=1 DURATION_SEC=3600 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
+bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s1_limited_load_1h.log
+
+SUCCESS_IDS_FILE="$(grep 'success_ids=' artifacts/resume/manual/s1_limited_load_1h.log | tail -n1 | cut -d= -f2-)"
+API_BASE="http://<CONTROL_PRIVATE_IP>:18080" \
+PROM_BASE="http://<CONTROL_PRIVATE_IP>:19090" \
+METRICS_TOKEN="<config.control.yaml里api.metrics_token>" \
+LOAD_RUN_SECONDS=3600 SUCCESS_IDS_FILE="$SUCCESS_IDS_FILE" OUT_DIR=artifacts/resume/s1_limited \
+bash scripts/collect_resume_metrics.sh
+```
+
+#### H2：放宽限流口径（S2）
+
+临时上调阈值并确认生效（在 `node-control` 执行）：
+
+```bash
+cd ~/Deep_OJ/deploy/cluster
+sed -i 's/^\(\s*ip_limit:\).*/\1 600000/' config.control.yaml
+sed -i 's/^\(\s*user_limit:\).*/\1 600000/' config.control.yaml
+sed -i 's/^\(\s*window_sec:\).*/\1 60/' config.control.yaml
+sed -i 's/^\(\s*submit_max_inflight:\).*/\1 50000/' config.control.yaml
+docker compose -f node-control.compose.yml up -d api
+sleep 3
+docker compose -f node-control.compose.yml logs --tail=80 api | grep -E 'effective_submit_rate_limit|submit_max_inflight'
+```
+
+跑 1 小时并采集 `S2` 指标（在 `独立压测机` 执行）：
+
+```bash
+cd ~/Deep_OJ
+# 可选：同 IP 多账号并发（启用就取消下一行注释）
+# TOKEN_POOL_FILE="$HOME/tokens.pool" PROBLEM_ID="<已有题目ID>" \
+API_BASE="http://<CONTROL_PRIVATE_IP>:18080" \
+PROM_BASE="http://<CONTROL_PRIVATE_IP>:19090" \
+KEEP_TMP=1 DURATION_SEC=3600 WORKERS=20 SUBMIT_INTERVAL_SEC=0.05 \
+bash scripts/submit_load_loop.sh | tee artifacts/resume/manual/s2_relaxed_load_1h.log
+
+SUCCESS_IDS_FILE="$(grep 'success_ids=' artifacts/resume/manual/s2_relaxed_load_1h.log | tail -n1 | cut -d= -f2-)"
+API_BASE="http://<CONTROL_PRIVATE_IP>:18080" \
+PROM_BASE="http://<CONTROL_PRIVATE_IP>:19090" \
+METRICS_TOKEN="<config.control.yaml里api.metrics_token>" \
+LOAD_RUN_SECONDS=3600 SUCCESS_IDS_FILE="$SUCCESS_IDS_FILE" OUT_DIR=artifacts/resume/s2_relaxed \
+bash scripts/collect_resume_metrics.sh
+```
+
+#### H3：恢复生产默认阈值（在 `node-control` 执行）
+
+```bash
+cd ~/Deep_OJ/deploy/cluster
+sed -i 's/^\(\s*ip_limit:\).*/\1 1200/' config.control.yaml
+sed -i 's/^\(\s*user_limit:\).*/\1 2400/' config.control.yaml
+sed -i 's/^\(\s*window_sec:\).*/\1 60/' config.control.yaml
+sed -i 's/^\(\s*submit_max_inflight:\).*/\1 5000/' config.control.yaml
+docker compose -f node-control.compose.yml up -d api
+```
+
+双口径结果对比命令（在 `独立压测机` 执行）：
+
+```bash
+cd ~/Deep_OJ
+for f in artifacts/resume/s1_limited/resume_metrics.csv artifacts/resume/s2_relaxed/resume_metrics.csv; do
+  echo "===== $f"
+  awk -F, '/^(submit_qps_peak_5m|jobs_per_sec_peak_5m|e2e_p95_ms|e2e_p99_ms),/{print}' "$f"
+done
+
+for f in artifacts/resume/manual/s1_limited_load_1h.log artifacts/resume/manual/s2_relaxed_load_1h.log; do
+  echo "===== $f"
+  grep '\[摘要\]' "$f" | tail -n1
+done
 ```
 
 成功标志：
-- 日志文件存在：`artifacts/resume/manual/s1_load_1h.log`
-- 能拿到 `success_ids` 路径
-- `wc -l` > 0
+- `s1_limited` 与 `s2_relaxed` 都有 `resume_metrics.csv`
+- `api` 日志能看到对应 `effective_submit_rate_limit` 与 `submit_max_inflight`
+- 对比命令能同时输出 4 个核心指标与 429 摘要
 
 失败先查什么：
 - 登录 429 -> 降低 `WORKERS` 或先传固定 `TOKEN`
+- `worker` target `connection refused` -> 检查 `node-worker.compose.yml` 是否暴露 `9092:9092`，并重启 worker
 - submit 429 太高 -> 看 `submit_429_total{reason=...}` 分类
+- `TOKEN_POOL_FILE` 只能缓解 user 维度限流，不会绕过 `ip_limit`；若仍是 `rate_limit`，走 `S2` 放宽阈值或增加压测机数量（多 IP）
 
 ---
 
@@ -509,14 +643,22 @@ docker compose -f node-worker.compose.yml down
 成功标志：各节点 `docker compose ps` 无运行容器。  
 失败先查什么：是否在错误节点执行了错误 compose 文件。
 
-## 3. 1 小时压测与取数（B01/B02/B16）
+## 3. 双口径压测与取数（S1/S2）
 
-固定口径：
+固定公共参数：
 
 - 压测时长：`DURATION_SEC=3600`
-- 输出日志：`artifacts/resume/manual/s1_load_1h.log`
-- 累计任务：`wc -l < success_ids_file`
 - 并发参数：压测命令中的 `WORKERS`
+- 统一采集：`scripts/collect_resume_metrics.sh`
+- 独立压测机必须显式设置：
+  - `API_BASE=http://<CONTROL_PRIVATE_IP>:18080`
+  - `PROM_BASE=http://<CONTROL_PRIVATE_IP>:19090`
+  - `METRICS_TOKEN=<config.control.yaml里的api.metrics_token>`
+
+两组产物目录：
+
+- `S1(生产限流)`：`artifacts/resume/s1_limited` + `artifacts/resume/manual/s1_limited_load_1h.log`
+- `S2(放宽阈值)`：`artifacts/resume/s2_relaxed` + `artifacts/resume/manual/s2_relaxed_load_1h.log`
 
 ## 4. worker 扩容（1 -> 4）与观测
 
@@ -532,8 +674,8 @@ docker compose -f node-worker.compose.yml down
 
 ```bash
 curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=sum(rate(worker_task_total[1m]))' | jq '.data.result'
-curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.95,sum by (le)(rate(job_e2e_duration_seconds_bucket[5m])))' | jq '.data.result'
-curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.99,sum by (le)(rate(job_e2e_duration_seconds_bucket[5m])))' | jq '.data.result'
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.95,sum by (le)(rate(worker_task_duration_seconds_bucket[5m])))' | jq '.data.result'
+curl -g -sS 'http://127.0.0.1:19090/api/v1/query?query=histogram_quantile(0.99,sum by (le)(rate(worker_task_duration_seconds_bucket[5m])))' | jq '.data.result'
 ```
 
 ## 5. 常见报错速查（最小集合）
@@ -588,6 +730,7 @@ curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {
 重点看：
 - `prometheus.yml` worker targets 是否写了正确私网 IP
 - worker 9092 是否可达
+- 若 `lastError` 出现 `connect: connection refused`，检查 `node-worker.compose.yml` 是否包含 `ports: ["9092:9092"]`
 
 ## 6. 简历空格映射（B01-B24）
 
@@ -609,14 +752,17 @@ curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {
 | B14 | （`__` 核/`__` GB）核数 | S2 | 规格盘点 | Worker 规格填 `4` |
 | B15 | （`__` 核/`__` GB）内存 | S2 | 规格盘点 | Worker 规格填 `8` |
 | B16 | 并发 `__` | S1/S2 | `submit_load_loop.sh` 的 `WORKERS` | 填实测并发参数 |
-| B17 | 吞吐 `__` Jobs/s | S2 | `collect_resume_metrics.sh` 的 `jobs_per_sec_peak_5m` | 峰值口径 |
-| B18 | P95 `__` ms | S2 | `collect_resume_metrics.sh` 的 `e2e_p95_ms` | ms |
-| B19 | P99 `__` ms | S2 | `collect_resume_metrics.sh` 的 `e2e_p99_ms` | ms |
-| B20 | 提交接口稳态 `__` QPS | S2 | `collect_resume_metrics.sh` 的 `submit_qps_peak_5m` | QPS |
+| B17 | 吞吐 `__` Jobs/s | S2 | `s2_relaxed/resume_metrics.csv` 的 `jobs_per_sec_peak_5m` | 放宽阈值上限口径 |
+| B18 | P95 `__` ms | S2 | `s2_relaxed/resume_metrics.csv` 的 `e2e_p95_ms` | 放宽阈值上限口径 |
+| B19 | P99 `__` ms | S2 | `s2_relaxed/resume_metrics.csv` 的 `e2e_p99_ms` | 放宽阈值上限口径 |
+| B20 | 提交接口稳态 `__` QPS | S1 | `s1_limited/resume_metrics.csv` 的 `submit_qps_peak_5m` | 生产限流口径优先 |
 | B21 | Worker 从 `__` 台 | S2 | 扩容前节点数 | `1` |
 | B22 | Worker 到 `__` 台 | S2 | 扩容后节点数 | `4` |
 | B23 | 吞吐提升 `__` 倍 | S2 | `scaled_jobs / baseline_jobs` | 倍数 |
 | B24 | 沙箱模块单测覆盖率 `__%` | S6 | `collect_coverage.sh` 产物（C++ 覆盖率） | 百分比 |
+
+简历双口径描述模板（可直接抄写）：
+`在生产限流策略下，提交入口 QPS 被稳定约束在配置阈值内，429 可分类可解释；在放宽限流阈值后，单集群吞吐达到 __ Jobs/s，端到端 P95/P99 为 __/__ ms。`
 
 ## 附录 A：背压口径速记
 
