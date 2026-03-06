@@ -113,17 +113,23 @@ flowchart LR
 | 你想知道什么 | 信息来源（命令/文件） | 用它干什么 |
 |---|---|---|
 | 服务是否就绪 | `curl http://127.0.0.1:18080/api/v1/health` / `curl http://127.0.0.1:19090/-/ready` / `curl http://127.0.0.1:13000/api/health` | 判断是否可以开始压测（门禁） |
-| 采集链路是否通 | `curl 'http://127.0.0.1:19090/api/v1/targets' \| jq ...` | 判断 api/scheduler/worker target 是否全 `UP` |
+| 采集链路是否通 | `Prometheus /api/v1/targets` | 判断 api/scheduler/worker target 是否全 `UP` |
 | 压测是否在持续产出 | `artifacts/resume/manual/s1_load_1h.log` + `grep 'success_ids=' ...` | 找到本次压测的成功任务 ID 文件 |
 | 总任务数 | `wc -l < success_ids_file` | 计算累计完成任务（B02） |
 | 当前吞吐 Jobs/s | `sum(rate(worker_task_total[1m]))` | 看执行侧吞吐、比较扩容前后 |
 | P95 / P99 | `histogram_quantile(...job_e2e_duration...)` | 看延迟与抖动 |
 | 可复用简历指标 | `scripts/collect_resume_metrics.sh` 输出的 Markdown/CSV | 统一口径，避免手抄出错 |
 
+targets 可复制检查命令（在 `node-control`）：
+
+```bash
+curl -sS 'http://127.0.0.1:19090/api/v1/targets' | jq '.data.activeTargets[] | {job:.labels.job,health:.health,lastError:.lastError}'
+```
+
 ### 1.6 从 0 到 1 的执行顺序（只记这 8 步）
 
 1. 维护 `cluster.env`（这是人工唯一真实源头：IP + 密码）。
-2. 每台机器 `cp .env.example .env`，把 `cluster.env` 的密码同步进去。
+2. 先把 `cluster.env` 分发到每台机器（建议放 `~/cluster.env`），再生成 `.env` 并同步键值。
 3. `node-control` 生成 `config.control.yaml`，填 DB/Redis/MinIO/JWT/worker 地址。
 4. 每台 `node-worker-*` 生成 `config.worker.yaml`，填唯一 `id/addr/consumer`。
 5. 按顺序启动：`stateful -> minio -> control -> worker`。
@@ -213,19 +219,41 @@ cd ~/Deep_OJ/deploy/cluster
 cp -n .env.example .env
 ```
 
-把密码写入 `.env`（示例，按你的真实值替换）：
+先把 `cluster.env` 分发到每台服务器（在你本地管理机执行）：
 
 ```bash
-# 在每台服务器执行（先把变量替换成你自己的）
-cd ~/Deep_OJ/deploy/cluster
-sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=replace_me_pg/' .env
-sed -i 's/^REDIS_PASSWORD=.*/REDIS_PASSWORD=replace_me_redis/' .env
-sed -i 's/^MINIO_ROOT_PASSWORD=.*/MINIO_ROOT_PASSWORD=replace_me_minio/' .env
-sed -i 's/^GRAFANA_ADMIN_PASSWORD=.*/GRAFANA_ADMIN_PASSWORD=replace_me_grafana/' .env
+# 在你本地管理机执行（替换 USER 为你的登录用户名）
+source cluster.env
+for ip in "$CONTROL_IP" "$STATEFUL_IP" "$MINIO_IP" "$WORKER1_IP" "$WORKER2_IP" "$WORKER3_IP" "$WORKER4_IP"; do
+  scp ./cluster.env USER@"$ip":~/cluster.env
+  ssh USER@"$ip" 'chmod 600 ~/cluster.env'
+done
 ```
 
-成功标志：`ls .env` 存在，且关键密码不是默认占位符。  
-失败先查什么：`sed` 后是否把特殊字符写坏（有特殊字符建议手工编辑 `.env`）。
+从 `cluster.env` 同步密码到 `.env`（避免手工替换）：
+
+```bash
+# 在每台服务器执行（该机器需先有 ~/cluster.env 且非空）
+test -s ~/cluster.env || { echo "ERROR: ~/cluster.env 不存在或为空"; exit 1; }
+
+set -a
+source ~/cluster.env
+set +a
+
+cd ~/Deep_OJ/deploy/cluster
+
+for k in POSTGRES_PASSWORD REDIS_PASSWORD MINIO_ROOT_USER MINIO_ROOT_PASSWORD JWT_SECRET GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD; do
+  sed -i "s/^${k}=.*/${k}=${!k}/" .env
+done
+
+awk -F= '/^(POSTGRES_PASSWORD|REDIS_PASSWORD|MINIO_ROOT_USER|MINIO_ROOT_PASSWORD|JWT_SECRET|GRAFANA_ADMIN_USER|GRAFANA_ADMIN_PASSWORD)=/{print $1, "len=" length($2)}' .env
+```
+
+成功标志：`ls .env` 存在，且关键字段长度符合预期（例如当前 20 位策略）。  
+失败先查什么：
+- `~/cluster.env` 是否为空文件
+- 是否缺少 `POSTGRES_PASSWORD/REDIS_PASSWORD/MINIO_ROOT_USER/MINIO_ROOT_PASSWORD/JWT_SECRET/GRAFANA_ADMIN_USER/GRAFANA_ADMIN_PASSWORD` 任一键
+- 若密码包含特殊字符导致 `sed` 替换异常，改为手工编辑 `.env`
 
 ---
 
