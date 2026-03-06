@@ -11,6 +11,8 @@ security_test_runner
 ltjl/
 .gemini/
 .agent/
+artifacts/
+cluster.env
 
 # CMake 相关
 CMakeCache.txt
@@ -49,5 +51,4 @@ coverage.out
 *.html
 
 # 本地新增文档草稿（不入库）
-docs/low_cost_cloud_cluster.md
 deploy/cluster/README.md

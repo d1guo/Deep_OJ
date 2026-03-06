@@ -143,13 +143,13 @@ api:
       window_sec: 60
     submit_rate_limit:
       # submit 路由限流：单 IP 窗口内请求上限（本地压测放宽）。
-      ip_limit: 1200
+      ip_limit: 200000
       # submit 路由限流：单用户窗口内请求上限（本地压测放宽）。
-      user_limit: 2400
+      user_limit: 200000
       # submit 路由限流窗口（秒）。
       window_sec: 60
     # submit 入口活跃任务数上限（pending+processing），用于防爆兜底。
-    submit_max_inflight: 5000
+    submit_max_inflight: 30000
     problem_defaults:
       # 题目默认时间限制（毫秒）。
       time_limit_ms: 1000

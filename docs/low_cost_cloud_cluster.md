@@ -53,6 +53,84 @@ GRAFANA_ADMIN_PASSWORD=replace_me_grafana
 VARS
 ```
 
+### 1.4 先看全局数据流（谁读什么）
+
+这一步在干什么：先建立“配置流 + 运行流”的全局心智图。  
+为什么现在做：后续每一步其实都在填这个图里的某个节点。  
+在哪台机器执行：不用执行命令，先看懂图。
+
+配置流（静态）：
+
+```mermaid
+flowchart TD
+    U[你 / 本地管理机] --> CE[cluster.env<br/>IP + 真实密码]
+
+    CE --> ENV[每台节点 deploy/cluster/.env]
+    CE --> CC[node-control: config.control.yaml]
+    CE --> CW[每台 worker: config.worker.yaml]
+    CE --> PM[node-control: prometheus.yml]
+
+    ENV --> COMPOSE[docker compose]
+    COMPOSE --> PG[(PostgreSQL)]
+    COMPOSE --> RD[(Redis)]
+    COMPOSE --> MI[(MinIO)]
+    COMPOSE --> GF[Grafana]
+    COMPOSE --> API[API]
+    COMPOSE --> SCH[Scheduler]
+    COMPOSE --> WK[Worker]
+```
+
+运行流（动态）：
+
+```mermaid
+flowchart LR
+    LOAD[scripts/submit_load_loop.sh] -->|POST /api/v1/submit| API[API :18080]
+    API -->|写提交状态| PG[(PostgreSQL)]
+    API -->|XADD 任务| RD[(Redis Stream)]
+
+    SCH[Scheduler] -->|控制面巡检/修复| PG
+    SCH -->|必要时补投递| RD
+
+    WK[Worker] -->|XREADGROUP / XAUTOCLAIM| RD
+    WK -->|判题结果落库| PG
+    WK -->|拉取测试数据| MI[(MinIO)]
+
+    API -->|/metrics| PROM[Prometheus :19090]
+    SCH -->|/metrics| PROM
+    WK -->|/metrics| PROM
+    PROM --> GF[Grafana :13000]
+
+    LOAD -->|读 PromQL| PROM
+    MET[scripts/collect_resume_metrics.sh] -->|读 PromQL + 可选读 DB + 读 success_ids| OUT[Markdown/CSV 指标汇总]
+```
+
+### 1.5 信息来源矩阵（你怎么拿到每个结论）
+
+这一步在干什么：把“信息来源 -> 你要干什么”做成速查表。  
+为什么现在做：压测时先看哪里、再做什么，一眼就知道。  
+在哪台机器执行：主要在 `node-control`。
+
+| 你想知道什么 | 信息来源（命令/文件） | 用它干什么 |
+|---|---|---|
+| 服务是否就绪 | `curl http://127.0.0.1:18080/api/v1/health` / `curl http://127.0.0.1:19090/-/ready` / `curl http://127.0.0.1:13000/api/health` | 判断是否可以开始压测（门禁） |
+| 采集链路是否通 | `curl 'http://127.0.0.1:19090/api/v1/targets' \| jq ...` | 判断 api/scheduler/worker target 是否全 `UP` |
+| 压测是否在持续产出 | `artifacts/resume/manual/s1_load_1h.log` + `grep 'success_ids=' ...` | 找到本次压测的成功任务 ID 文件 |
+| 总任务数 | `wc -l < success_ids_file` | 计算累计完成任务（B02） |
+| 当前吞吐 Jobs/s | `sum(rate(worker_task_total[1m]))` | 看执行侧吞吐、比较扩容前后 |
+| P95 / P99 | `histogram_quantile(...job_e2e_duration...)` | 看延迟与抖动 |
+| 可复用简历指标 | `scripts/collect_resume_metrics.sh` 输出的 Markdown/CSV | 统一口径，避免手抄出错 |
+
+### 1.6 从 0 到 1 的执行顺序（只记这 8 步）
+
+1. 维护 `cluster.env`（这是人工唯一真实源头：IP + 密码）。
+2. 每台机器 `cp .env.example .env`，把 `cluster.env` 的密码同步进去。
+3. `node-control` 生成 `config.control.yaml`，填 DB/Redis/MinIO/JWT/worker 地址。
+4. 每台 `node-worker-*` 生成 `config.worker.yaml`，填唯一 `id/addr/consumer`。
+5. 按顺序启动：`stateful -> minio -> control -> worker`。
+6. 做门禁健康检查：`health + targets` 全绿。
+7. 运行 1 小时压测：`scripts/submit_load_loop.sh`。
+8. 取数出结论：`success_ids` 行数 + Prometheus 吞吐/P95/P99 + 可选 `collect_resume_metrics.sh` 汇总。
+
 ## 2. 从拿到新服务器开始（A-J）
 
 ### Step A：给机器定角色（control/stateful/minio/worker）
